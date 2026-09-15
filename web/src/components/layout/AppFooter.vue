@@ -30,7 +30,7 @@ const badges = [
   {
     key: "docs",
     href: APP_URL,
-    icon: "globe",
+    icon: "github",
     label: "当前版本",
     value: APP_VERSION_BADGE,
   },
