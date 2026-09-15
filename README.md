@@ -1,33 +1,6 @@
 <a name="readme-top"></a>
-
-<div align="center">
-
-<img src="docs/pictures/banner.png" alt="MyPan" width="100%">
-
 <br>
-
-<a href="https://www.litepan.top"><img src="https://img.shields.io/badge/官网文档-www.litepan.top-6C63FF?style=for-the-badge&labelColor=1B1B2F" alt="官网文档"></a>
-&nbsp;
-<a href="https://space.bilibili.com/1501989416"><img src="https://img.shields.io/badge/Bilibili-交流与演示-00A1D6?style=for-the-badge&logo=bilibili&logoColor=white&labelColor=1B1B2F" alt="Bilibili"></a>
-&nbsp;
-<a href="https://hub.docker.com/r/desstg/mypan"><img src="https://img.shields.io/badge/Docker-desstg%2Fmypan-2496ED?style=for-the-badge&logo=docker&logoColor=white&labelColor=1B1B2F" alt="Docker"></a>
-
-
-[![docker-pulls][docker-pulls-shield]][docker-url]
-[![version][version-shield]][docker-url]
-[![license][license-shield]][license-url]
-
-</div>
-
-<br>
-
-> [!CAUTION]
-> 当前仓库是正在开发中的 **Go 版 MyPan**，首次发布可能问题较多，请谨慎测试。
-> Python 旧版已归档至 [LitePan-old](https://github.com/Ponphil/LitePan-old)。
-
-
-<br>
-
+### 本项目上游是： 开源 LitePan项目，链接地址：https://github.com/Ponphil/LitePan
 ## ▎ 功能简述
 
 <table>
