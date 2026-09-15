@@ -57,7 +57,7 @@
 ```yaml
 services:
   litepan:
-    image: desstg/mypan:beta
+    image: desstg/mypan:latest
     container_name: mypan
     restart: unless-stopped
     ports:
