@@ -1,0 +1,48 @@
+# 运行数据与挂载点
+data
+strm
+mounts
+*.db
+*.db-wal
+*.db-shm
+
+# 本地构建产物；前端内嵌资源由 Docker web 阶段重新生成
+litepan
+dist
+internal/api/web
+*.tar
+*.tar.gz
+
+# 依赖、缓存与本地备份
+.bak
+**/.bak
+web/node_modules
+web/*.tsbuildinfo
+
+# 版本库、IDE、系统文件与本地密钥
+.git
+.idea
+.vscode
+.DS_Store
+.env
+.env.*
+
+# 构建不需要的测试与文档
+**/*_test.go
+*.md
+docs
+
+# 根目录的调试截图与临时脚本：只会被 COPY . . 白白带进 Go 构建阶段。
+# 这里逐条写全名而不是用 *.png，是为了不去误伤 web/、drivers/ 里的图片资源。
+# 以后再往根目录丢调试截图，记得回来补一行。
+1.png
+dev-server-check.png
+dev-server-wide.png
+footer-after.png
+litepan-login.png
+litepan-logo-new-login.png
+litepan-ui-001.png
+2.txt
+.tmp_serve_web.mjs
+.playwright-mcp
+.backup-logos

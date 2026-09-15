@@ -1,0 +1,260 @@
+/* ============================================================
+ * 跨盘传输共用样式（跨盘普传 / 跨盘秒传共用外壳层）
+ *
+ * 来源：CrossDriveTransfer.vue <style> 中可复用段落，抽取时以
+ * `.xfer-ui` 前缀限定作用域，避免 .panel/.tree/.combo 等通用类名
+ * 污染其它页面。秒传页仍保留自身 scoped 样式（零回归），普传页
+ * 根节点挂 xfer-ui 后复用以下规则；后续可将秒传页逐步迁移到本文件。
+ * ============================================================ */
+
+.xfer-ui {
+  color: var(--text);
+  --card-bg: var(--surface);
+  --app-bg: var(--bg);
+  --border-color: var(--border);
+  --text-main: var(--text);
+  --text-secondary: var(--text-muted);
+  --text-regular: var(--text-regular);
+  --primary-color: var(--brand);
+  --primary-color-end: var(--brand-end);
+}
+
+/* 顶部 logo 块 */
+.xfer-ui .logo-chip { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.xfer-ui .logo-chip img { object-fit: contain; border-radius: var(--radius-sm); }
+.xfer-ui .logo-chip.s26 { width: 26px; height: 26px; }
+.xfer-ui .logo-chip.s26 img { width: 26px; height: 26px; }
+
+/* 传输主壳 */
+.xfer-ui .transfer-shell {
+  margin-top: 10px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+.xfer-ui .transfer-topbar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--app-bg) 55%, var(--card-bg));
+  border-bottom: 1px solid var(--border-color);
+}
+.xfer-ui .tb-side { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.xfer-ui .tb-side.tb-dst { justify-content: flex-end; }
+.xfer-ui .tb-title { min-width: 0; }
+.xfer-ui .tb-title span { display: block; font-weight: 700; font-size: 14px; line-height: 1.25; }
+.xfer-ui .tb-title small { display: block; font-size: 11px; font-weight: 500; color: var(--text-secondary); }
+.xfer-ui .tb-title-dst { text-align: right; }
+.xfer-ui .panel-role {
+  flex-shrink: 0; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: var(--radius-pill);
+}
+.xfer-ui .tb-src .panel-role { background: rgba(76, 116, 223, 0.12); color: #2952cc; }
+.xfer-ui .dst-role { background: rgba(255, 140, 66, 0.16); color: #c2410c; }
+.xfer-ui .tb-mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 0 4px;
+  min-height: 46px;
+}
+.xfer-ui .tb-swap {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(76, 116, 223, 0.14);
+  background: rgba(76, 116, 223, 0.08);
+  color: var(--primary-color);
+  font-size: 12px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.xfer-ui .tb-swap:hover {
+  background: rgba(76, 116, 223, 0.16);
+  border-color: rgba(76, 116, 223, 0.3);
+}
+.xfer-ui .tb-swap-hint { font-size: 10px; color: var(--text-secondary); white-space: nowrap; line-height: 1; }
+
+/* 左右两栏 */
+.xfer-ui .transfer-body { display: grid; grid-template-columns: 1fr 1fr; align-items: stretch; }
+.xfer-ui .panel { background: var(--card-bg); min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
+.xfer-ui .panel.src { border-right: 1px solid var(--border-color); }
+.xfer-ui .panel-pick { padding: 12px 16px; border-bottom: 1px solid var(--border-color); box-sizing: border-box; }
+.xfer-ui .combo {
+  width: 100%;
+  height: 40px;
+  box-sizing: border-box;
+  border: none;
+  border-radius: var(--radius-md);
+  padding: 0 14px;
+  background: var(--app-bg);
+  color: var(--text-main);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  transition: background 0.15s;
+}
+.xfer-ui .combo:hover { background: rgba(127, 127, 127, 0.12); }
+.xfer-ui .combo .c-ic { color: var(--primary-color); flex: 0 0 auto; line-height: 1; }
+.xfer-ui .combo .c-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 20px;
+}
+.xfer-ui .combo .c-text.placeholder { color: var(--text-secondary); }
+.xfer-ui .combo .c-caret { color: var(--text-secondary); flex: 0 0 auto; line-height: 1; }
+.xfer-ui .tree { padding: 6px; height: 300px; overflow: auto; }
+.xfer-ui .tree-empty { color: var(--text-secondary); padding: 28px 12px; text-align: center; }
+
+/* 分段设置（同名策略等） */
+.xfer-ui .ct-settings-seg {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg) 86%, var(--surface));
+  border: 1px solid var(--border);
+}
+.xfer-ui .ct-settings-opt {
+  flex: 1;
+  height: 32px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.xfer-ui .ct-settings-opt:hover:not(.active) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+.xfer-ui .ct-settings-opt.active {
+  background: var(--surface);
+  color: var(--brand);
+  box-shadow: 0 1px 5px rgba(15, 23, 42, 0.1);
+}
+.xfer-ui .ct-settings-opt:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.xfer-ui .ct-settings-fallback-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+/* 底部操作岛（齿轮设置 + 主按钮） */
+.xfer-ui .footer-island {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  flex-shrink: 0;
+  border-radius: var(--radius-md);
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-soft);
+}
+.xfer-ui .footer-island .ct-settings-trigger { border: none; background: transparent; box-shadow: none; }
+.xfer-ui .ct-settings-menu { position: relative; flex: 0 0 auto; }
+.xfer-ui .ct-settings-trigger {
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--card-bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.xfer-ui .ct-settings-trigger:hover { color: var(--primary-color); border-color: rgba(76, 116, 223, 0.35); }
+.xfer-ui .ct-settings-dropdown {
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 92%, #fff), var(--surface));
+  border: 1px solid var(--border);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.07);
+}
+.xfer-ui .ct-settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.xfer-ui .ct-settings-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.xfer-ui .ct-settings-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+/* 主操作按钮 */
+.xfer-ui .ct-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--card-bg);
+  color: var(--text-regular);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.2s, opacity 0.2s;
+  white-space: nowrap;
+}
+.xfer-ui .ct-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.xfer-ui .ct-btn-primary {
+  background: linear-gradient(135deg, var(--primary-color), var(--primary-color-end));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: var(--shadow-brand);
+}
+.xfer-ui .ct-btn-primary:not(:disabled):hover { filter: brightness(1.06); }
+.xfer-ui .ct-btn-go {
+  background: linear-gradient(135deg, #16a34a, #22c55e);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: var(--shadow-brand);
+}
+.xfer-ui .ct-btn-go:not(:disabled):hover { filter: brightness(1.06); }
+.xfer-ui .ct-btn-danger { background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: #dc2626; }
+.xfer-ui .ct-btn-danger:not(:disabled):hover { background: rgba(239, 68, 68, 0.18); }
+
+@media (max-width: 1080px) {
+  .xfer-ui .transfer-topbar { grid-template-columns: 1fr; gap: 8px; text-align: center; }
+  .xfer-ui .tb-side.tb-src,
+  .xfer-ui .tb-side.tb-dst { justify-content: center; }
+  .xfer-ui .tb-title-dst { text-align: center; }
+  .xfer-ui .tb-swap-hint { display: none; }
+  .xfer-ui .transfer-body { grid-template-columns: 1fr; }
+  .xfer-ui .panel.src { border-right: none; border-bottom: 1px solid var(--border-color); }
+}

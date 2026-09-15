@@ -1,0 +1,16 @@
+services:
+  litepan:
+    image: desstg/mypan:beta
+    container_name: litepan
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - /vol1/1000/docker/litepango/data:/app/data
+      - /vol1/1000/docker/litepango/strm:/app/strm
+      - /vol1/1000/docker/litepango/mounts:/app/mounts:shared
+    devices:
+      - /dev/fuse:/dev/fuse
+    privileged: true
+    pid: "host"
+    network_mode: "host"
+    restart: always

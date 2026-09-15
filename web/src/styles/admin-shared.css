@@ -1,0 +1,35 @@
+.admin-tabbed-page {
+  padding-bottom: 24px;
+}
+
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal-form__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.modal-form__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+@media (max-width: 640px) {
+  .modal-form__row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings__loading,
+.settings-card__loading {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 16px 0 20px;
+}

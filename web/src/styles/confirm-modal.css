@@ -1,0 +1,330 @@
+.confirm-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-confirm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+}
+
+.confirm-modal {
+  width: 560px;
+  max-width: 90vw;
+  background: var(--surface);
+  border-radius: 12px;
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+}
+
+.confirm-modal--sm {
+  width: 450px;
+}
+
+.confirm-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-head-bg);
+  border-radius: 12px 12px 0 0;
+}
+
+.confirm-modal__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.confirm-modal__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.confirm-modal__close:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.confirm-modal__close:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.confirm-modal__body {
+  padding: 32px 24px 24px;
+}
+
+.confirm-modal__confirm {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  text-align: left;
+}
+
+.confirm-modal__icon-wrap {
+  flex-shrink: 0;
+}
+
+.confirm-modal__flat-icon {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-modal__flat-icon::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  opacity: 0.1;
+  z-index: 0;
+}
+
+.confirm-modal__flat-icon--warning::before {
+  background-color: var(--warning);
+}
+
+.confirm-modal__flat-icon--danger::before {
+  background-color: var(--danger);
+}
+
+.confirm-modal__flat-icon--info::before {
+  background-color: var(--info);
+}
+
+.confirm-modal__flat-icon .lp-svg-icon {
+  position: relative;
+  z-index: 1;
+}
+
+.confirm-modal__icon {
+  width: 22px !important;
+  height: 22px !important;
+}
+
+.confirm-modal__flat-icon--warning .lp-svg-icon {
+  color: var(--warning);
+}
+
+.confirm-modal__flat-icon--danger .lp-svg-icon {
+  color: var(--danger);
+}
+
+.confirm-modal__flat-icon--info .lp-svg-icon {
+  color: var(--info);
+}
+
+.confirm-modal__message {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.confirm-modal__content {
+  min-width: 0;
+}
+
+.confirm-modal__hint {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.confirm-modal__option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: var(--text-regular);
+  font-size: 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.confirm-modal__filename {
+  margin: 6px 0 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.confirm-modal__confirm--stack {
+  display: block;
+}
+
+.confirm-modal__confirm--stack .confirm-modal__option {
+  margin-top: 16px;
+}
+
+.upload-notice__intro {
+  margin: 0 0 14px;
+  color: var(--text-regular);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.upload-notice__card {
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+}
+.upload-notice__flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.2fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+.upload-notice__node {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 8px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-regular);
+  font-size: 13px;
+}
+.upload-notice__icon {
+  line-height: 0;
+  display: inline-flex;
+}
+.upload-notice__arrow {
+  color: var(--text-muted);
+  font-size: 20px;
+}
+.upload-notice__tips {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text-regular);
+  font-size: 14px;
+  line-height: 1.8;
+}
+.upload-notice__tip {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+.upload-notice__tip-bar {
+  flex-shrink: 0;
+  width: 4px;
+  border-radius: 999px;
+  background: var(--brand-gradient);
+}
+
+.confirm-modal__foot--multi {
+  flex-wrap: wrap;
+}
+
+.confirm-modal__foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 0 24px 16px;
+}
+
+.confirm-modal__btn {
+  min-width: 70px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.confirm-modal-enter-active,
+.confirm-modal-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.confirm-modal-enter-from,
+.confirm-modal-leave-to {
+  opacity: 0;
+}
+
+@media (max-width: 768px) {
+  .confirm-modal-overlay {
+    padding: 16px;
+  }
+
+  .confirm-modal,
+  .confirm-modal--sm {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .confirm-modal__head,
+  .confirm-modal__body,
+  .confirm-modal__foot {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .upload-notice__flow {
+    grid-template-columns: 1fr;
+  }
+  .upload-notice__arrow {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
+}
+
+/* 野兽派主题：确认/说明弹窗及其内容块保持直角。 */
+:root[data-skin="brutal"] .confirm-modal,
+:root[data-skin="brutal"] .confirm-modal__head,
+:root[data-skin="brutal"] .confirm-modal__close,
+:root[data-skin="brutal"] .confirm-modal__flat-icon,
+:root[data-skin="brutal"] .confirm-modal__flat-icon::before,
+:root[data-skin="brutal"] .confirm-modal__btn,
+:root[data-skin="brutal"] .upload-notice__card,
+:root[data-skin="brutal"] .upload-notice__node,
+:root[data-skin="brutal"] .upload-notice__tip-bar {
+  border-radius: 0 !important;
+}
+
+:root[data-skin="brutal"] .confirm-modal {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  box-shadow: var(--shadow-pop);
+}
+
+:root[data-skin="brutal"] .confirm-modal__head {
+  background: var(--brutal-yellow);
+  border-bottom: var(--brutal-bw) solid var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .confirm-modal__close:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--brutal-yellow) 58%, transparent);
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .upload-notice__card,
+:root[data-skin="brutal"] .upload-notice__node {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+}

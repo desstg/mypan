@@ -1,0 +1,201 @@
+/* 全局视觉令牌，主题和皮肤只覆盖变量值。 */
+:root {
+  --brand-start: #4c74df;
+  --brand-end: #02a6f0;
+  --brand-gradient: linear-gradient(135deg, var(--brand-start), var(--brand-end));
+  --brand-gradient-h: linear-gradient(90deg, var(--brand-start), var(--brand-end));
+  --brand-gradient-h-hover: linear-gradient(90deg, #3b5bdb, #1e88e5);
+  --brand: #4c74df;
+  --brand-strong: #3b5bdb;
+
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-muted: #fafafa;
+  --surface-sunken: #f8f9fa;
+
+  --text: #1e293b;
+  --text-regular: #374151;
+  --text-muted: #64748b;
+  --text-on-brand: #ffffff;
+
+  --border: #e2e8f0;
+  --border-soft: #f1f5f9;
+
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --info: #1976d2;
+  --info-soft: #e3f2fd;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 18px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 2px 8px rgba(15, 23, 42, 0.08);
+  --shadow-soft: 0 2px 4px rgba(0, 0, 0, 0.1);
+  --shadow-pop: 0 8px 24px rgba(15, 23, 42, 0.16);
+  --shadow-brand: 0 2px 4px rgba(76, 116, 223, 0.3);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 15px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  --font-size: 14px;
+  --line-height: 1.6;
+
+  --panel-head-bg: #f9fafb;
+  --overlay-scrim: color-mix(in srgb, var(--surface) 75%, transparent);
+  --surface-hover: #f5f7fb;
+  --accent-soft: rgba(76, 116, 223, 0.12);
+  --accent-text: #2563eb;
+  --tab-active-bg: #eff6ff;
+  --tab-active-border: #bfdbfe;
+
+  --header-height: 100px;
+  --header-logo-height: 50px;
+  --sidebar-width: 220px;
+  --content-width: 85%;
+
+  --transition: 0.2s ease;
+
+  --admin-sidebar-bg: linear-gradient(180deg, var(--brand-start), var(--brand-end));
+  --admin-sidebar-border: transparent;
+  --admin-sidebar-shadow: none;
+  --admin-nav-hover-bg: rgba(255, 255, 255, 0.1);
+  --admin-nav-active-bg: #fff;
+  --admin-nav-active-color: var(--brand);
+  --admin-nav-active-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  --admin-footer-border: rgba(255, 255, 255, 0.15);
+
+  /* 叠层：dropdown < modal < popover(Modal 内 Select 等) < confirm < toast */
+  --z-dropdown: 10050;
+  --z-modal: 10100;
+  --z-popover: 10150;
+  --z-confirm: 100100;
+  --z-toast: 100200;
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --brand-start: #1e40af;
+  --brand-end: #0f766e;
+  --brand: #3b82f6;
+  --brand-strong: #2563eb;
+  --brand-gradient-h-hover: linear-gradient(90deg, #1d4ed8, #0e7490);
+
+  --bg: #101215;
+  --surface: #181b20;
+  --surface-muted: #1d2127;
+  --surface-sunken: #15181c;
+
+  --text: #e7eaf0;
+  --text-regular: #cbd2dc;
+  --text-muted: #9099a8;
+
+  --border: #2b3038;
+  --border-soft: #23272e;
+
+  --info: #60a5fa;
+  --info-soft: #1e293b;
+
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-soft: 0 2px 4px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  --admin-sidebar-bg: linear-gradient(
+    135deg,
+    rgba(28, 51, 111, 0.98) 0%,
+    rgba(24, 92, 139, 0.96) 52%,
+    rgba(8, 145, 178, 0.92) 100%
+  );
+  --admin-sidebar-border: rgba(148, 163, 184, 0.14);
+  --admin-sidebar-shadow: 0 18px 46px rgba(2, 6, 23, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --admin-nav-hover-bg: rgba(255, 255, 255, 0.08);
+  --admin-nav-active-bg: rgba(15, 23, 42, 0.3);
+  --admin-nav-active-color: #e5eefc;
+  --admin-nav-active-shadow: none;
+  --admin-footer-border: rgba(148, 163, 184, 0.16);
+
+  --panel-head-bg: #1d2127;
+  --overlay-scrim: color-mix(in srgb, var(--bg) 82%, transparent);
+  --surface-hover: #23272e;
+  --accent-soft: rgba(59, 130, 246, 0.18);
+  --accent-text: #93c5fd;
+  --tab-active-bg: rgba(59, 130, 246, 0.15);
+  --tab-active-border: rgba(59, 130, 246, 0.35);
+
+  color-scheme: dark;
+}
+
+/* 野兽派皮肤独立于主题并通过源码顺序覆盖暗色变量。 */
+:root[data-skin="brutal"] {
+  --brand-start: #4c74df;
+  --brand-end: #02a6f0;
+  --brand-gradient: linear-gradient(135deg, var(--brand-start), var(--brand-end));
+  --brand-gradient-h: linear-gradient(90deg, var(--brand-start), var(--brand-end));
+  --brand-gradient-h-hover: linear-gradient(90deg, #3b5bdb, #1e88e5);
+  --brand: #4c74df;
+  --brand-strong: #111111;
+
+  --bg: #f4f1e8;
+  --surface: #ffffff;
+  --surface-muted: #fbf7ea;
+  --surface-sunken: #f4f1e8;
+
+  --text: #111111;
+  --text-regular: #111111;
+  --text-muted: #4b4b4b;
+  --text-on-brand: #ffffff;
+
+  --border: #111111;
+  --border-soft: #111111;
+
+  --success: #2fae66;
+  --warning: #e8a000;
+  --danger: #e23b3b;
+  --info: #4c74df;
+  --info-soft: #e6f0ff;
+
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-pill: 0px;
+
+  --shadow-card: 5px 5px 0 #111111;
+  --shadow-soft: 3px 3px 0 #111111;
+  --shadow-pop: 7px 7px 0 #111111;
+  --shadow-brand: 4px 4px 0 #111111;
+
+  --brutal-ink: #111111;
+  --brutal-yellow: #ffd23f;
+  --brutal-blue: #e6f0ff;
+  --brutal-green: #37d67a;
+
+  --admin-sidebar-bg: linear-gradient(180deg, var(--brand-start), var(--brand-end));
+  --admin-sidebar-border: #111111;
+  --admin-sidebar-shadow: none;
+  --admin-nav-hover-bg: rgba(255, 255, 255, 0.18);
+  --admin-nav-active-bg: #fff;
+  --admin-nav-active-color: var(--brand);
+  --admin-nav-active-shadow: none;
+  --admin-footer-border: rgba(255, 255, 255, 0.3);
+
+  --panel-head-bg: var(--brutal-yellow);
+  --overlay-scrim: rgba(17, 17, 17, 0.45);
+  --surface-hover: #fbf7ea;
+  --accent-soft: var(--brutal-yellow);
+  --accent-text: #111111;
+  --tab-active-bg: #111111;
+  --tab-active-border: #111111;
+
+  color-scheme: light;
+}

@@ -1,0 +1,318 @@
+/* 文件列表共享样式：表头、排序箭头、网格排序菜单、列宽。组件 scoped 只保留行/卡片布局差异。 */
+
+.file-list .file-table td.state--empty-cell {
+  display: table-cell;
+  padding: 20px;
+  text-align: center;
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.file-list .grid-state {
+  padding: 20px;
+  text-align: center;
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.file-list .sort-indicator {
+  display: inline-block;
+  width: 8px;
+  height: 10px;
+  margin-left: 4px;
+  position: relative;
+  vertical-align: middle;
+}
+
+.file-list .sort-indicator::before,
+.file-list .sort-indicator::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+}
+
+.file-list .sort-indicator::before {
+  top: 0;
+  border-bottom: 4px solid var(--border);
+}
+
+.file-list .sort-indicator::after {
+  bottom: 0;
+  border-top: 4px solid var(--border);
+}
+
+.file-list .sort-indicator.asc::before {
+  border-bottom-color: var(--text-regular);
+}
+
+.file-list .sort-indicator.asc::after {
+  border-top-color: var(--border);
+}
+
+.file-list .sort-indicator.desc::before {
+  border-bottom-color: var(--border);
+}
+
+.file-list .sort-indicator.desc::after {
+  border-top-color: var(--text-regular);
+}
+
+.file-list .file-table th {
+  position: relative;
+  user-select: none;
+}
+
+.file-list .file-table th.sortable {
+  cursor: pointer;
+}
+
+.file-list .file-table {
+  width: 100%;
+  min-width: 600px;
+  border-collapse: collapse;
+}
+
+.file-list .file-table th,
+.file-list .file-table td {
+  height: 54px;
+  padding: 8px 16px;
+  vertical-align: middle;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.file-list .file-table th {
+  height: 52px;
+  background: var(--surface-muted);
+  text-align: left;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--text-muted);
+  border-bottom: none;
+  box-shadow: inset 0 -1px 0 var(--border-soft);
+}
+
+.file-list .file-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.file-list .checkbox-col {
+  width: 44px;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.file-list .name-col {
+  width: auto;
+  min-width: 300px;
+}
+
+.file-list .size-col {
+  width: 120px;
+  min-width: 120px;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.file-list .time-col {
+  width: 180px;
+  min-width: 180px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.file-list .checkbox-col input[type="checkbox"],
+.file-list .grid-select-all input[type="checkbox"],
+.file-list .file-card-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  display: inline-grid;
+  place-content: center;
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.file-list .checkbox-col input[type="checkbox"]::before,
+.file-list .grid-select-all input[type="checkbox"]::before,
+.file-list .file-card-checkbox input[type="checkbox"]::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  transform: scale(0);
+  clip-path: polygon(14% 44%, 0 58%, 39% 97%, 100% 19%, 86% 6%, 37% 68%);
+  background: var(--text-on-brand);
+  transition: transform 0.12s ease-in-out;
+}
+
+.file-list .checkbox-col input[type="checkbox"]:hover,
+.file-list .grid-select-all input[type="checkbox"]:hover,
+.file-list .file-card-checkbox input[type="checkbox"]:hover {
+  border-color: var(--text-muted);
+  background: var(--surface-sunken);
+}
+
+.file-list .checkbox-col input[type="checkbox"]:checked,
+.file-list .checkbox-col input[type="checkbox"]:indeterminate,
+.file-list .grid-select-all input[type="checkbox"]:checked,
+.file-list .grid-select-all input[type="checkbox"]:indeterminate,
+.file-list .file-card-checkbox input[type="checkbox"]:checked,
+.file-list .file-card-checkbox input[type="checkbox"]:indeterminate {
+  border-color: var(--brand);
+  background: var(--brand);
+}
+
+.file-list .checkbox-col input[type="checkbox"]:checked::before,
+.file-list .grid-select-all input[type="checkbox"]:checked::before,
+.file-list .file-card-checkbox input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}
+
+.file-list .checkbox-col input[type="checkbox"]:indeterminate::before,
+.file-list .grid-select-all input[type="checkbox"]:indeterminate::before,
+.file-list .file-card-checkbox input[type="checkbox"]:indeterminate::before {
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  clip-path: none;
+  transform: scale(1);
+}
+
+.file-list.view-grid .file-grid-toolbar {
+  position: relative;
+  z-index: 10;
+}
+
+@media (max-width: 768px) {
+  .file-list .file-table {
+    min-width: 0;
+  }
+
+  .file-list .file-table th,
+  .file-list .file-table td {
+    padding: 8px 10px;
+  }
+
+  .file-list .size-col,
+  .file-list .time-col {
+    display: none;
+  }
+
+  .file-list .name-col {
+    min-width: 0;
+  }
+
+  .file-list .checkbox-col {
+    width: 38px;
+    padding-right: 4px;
+  }
+}
+
+.file-list .inline-rename-wrap {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.file-list .inline-rename-input {
+  width: min(520px, 100%);
+  min-width: 120px;
+  height: 36px;
+  border: 1px solid #2196f3;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  padding: 0 12px;
+  outline: none;
+}
+
+.file-list .inline-rename-input:disabled {
+  color: var(--text-muted);
+  background: var(--surface-sunken);
+}
+
+.file-list .inline-create-row {
+  background: var(--surface);
+}
+
+.file-list .inline-create-wrap .inline-rename-input {
+  width: min(320px, 48vw);
+  flex: 0 1 320px;
+}
+
+.file-list .folder-inline-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+
+.file-list .folder-inline-btn.confirm {
+  background: #2196f3;
+}
+
+.file-list .folder-inline-btn.cancel {
+  background: #d1d5db;
+}
+
+.file-list .folder-inline-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.file-list .inline-rename-spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 2px solid #dbeafe;
+  border-top-color: #3b82f6;
+  border-radius: 999px;
+  animation: spin 0.72s linear infinite;
+}
+
+.file-list .inline-delete-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.file-list .file-row.processing {
+  color: var(--text-muted);
+}
+
+.file-list .file-card.processing .file-card-icon,
+.file-list .file-card.processing .file-card-name,
+.file-list .file-card.processing .file-card-time {
+  opacity: 0.55;
+}
+
+.file-list .file-card-rename {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.file-list .grid-rename-input {
+  width: 100%;
+  min-width: 0;
+}

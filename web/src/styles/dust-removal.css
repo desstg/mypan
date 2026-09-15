@@ -1,0 +1,19 @@
+.lp-dust-removal-canvas {
+  position: fixed;
+  z-index: 10000;
+  display: block;
+  max-width: none;
+  max-height: none;
+  pointer-events: none;
+  user-select: none;
+}
+
+.lp-dust-removal-source {
+  visibility: hidden !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-dust-removal-canvas {
+    display: none;
+  }
+}

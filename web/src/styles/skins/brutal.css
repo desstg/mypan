@@ -1,0 +1,699 @@
+/* 野兽派结构样式集中于此，配色、圆角和阴影由 tokens.css 提供。 */
+
+:root[data-skin="brutal"] {
+  --brutal-bw: 3px;
+}
+
+/* 收口硬阴影造成的后台横向和双滚动条。 */
+:root[data-skin="brutal"] html {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+:root[data-skin="brutal"] body:has(.admin) {
+  overflow: hidden;
+  height: 100%;
+}
+
+:root[data-skin="brutal"] .admin {
+  max-width: 100%;
+}
+
+:root[data-skin="brutal"] .admin__body {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+:root[data-skin="brutal"] .global-chrome {
+  box-shadow: none;
+  border-bottom: var(--brutal-bw) solid var(--brutal-ink);
+}
+
+/* ===== 仪表盘：限定 .dashboard-page，不用硬阴影，避免撑出滚动条与 Chrome 边缘露色 ===== */
+:root[data-skin="brutal"] .dashboard-page .dashboard-hero,
+:root[data-skin="brutal"] .dashboard-page .overview-card,
+:root[data-skin="brutal"] .dashboard-page .dashboard-panel {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .dashboard-page .dashboard-hero,
+:root[data-skin="brutal"] .dashboard-page .overview-card {
+  background: var(--surface);
+}
+
+:root[data-skin="brutal"] .card-action-btn {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  box-shadow: 3px 3px 0 var(--brutal-ink);
+  border-radius: 0;
+}
+
+:root[data-skin="brutal"] .card-action-btn--secondary {
+  background: var(--brutal-yellow);
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .card-action-btn--danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+:root[data-skin="brutal"] .card-action-btn:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .dashboard-page .task-row {
+  border-bottom-width: var(--brutal-bw);
+  border-bottom-color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .dashboard-page .task-progress {
+  background: var(--surface-sunken);
+  border: 1px solid color-mix(in srgb, var(--brutal-ink) 12%, var(--surface-sunken));
+  border-radius: 0;
+}
+
+:root[data-skin="brutal"] .dashboard-page .task-progress span {
+  border-radius: 0;
+}
+
+:root[data-skin="brutal"] .dashboard-page .account-row {
+  border: 0;
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .dashboard-page .dashboard-link-button {
+  color: var(--brutal-ink);
+}
+
+/* ===== 跨盘秒传：限定 .cross-transfer，不用大偏移阴影，避免布局与边缘露色 ===== */
+:root[data-skin="brutal"] .cross-transfer {
+  --fc-pill-bg: var(--brutal-blue);
+  --fc-pill-fg: var(--brutal-ink);
+  --fc-pill-md5-bg: var(--brutal-yellow);
+  --fc-pill-md5-fg: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .flow-card,
+:root[data-skin="brutal"] .cross-transfer .transfer-shell,
+:root[data-skin="brutal"] .cross-transfer .ct-footer,
+:root[data-skin="brutal"] .cross-transfer .footer-island,
+:root[data-skin="brutal"] .cross-transfer .ct-settings-dropdown {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .cross-transfer .flow-card:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .cross-transfer .flow-card.active {
+  outline: var(--brutal-bw) solid var(--brand);
+  outline-offset: calc(var(--brutal-bw) * -1);
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .cross-transfer .fc-slot,
+:root[data-skin="brutal"] .cross-transfer .transfer-topbar,
+:root[data-skin="brutal"] .cross-transfer .panel-pick,
+:root[data-skin="brutal"] .cross-transfer .panel.src {
+  border-color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .transfer-topbar {
+  background: var(--brutal-yellow);
+  border-bottom-width: var(--brutal-bw);
+}
+
+:root[data-skin="brutal"] .cross-transfer .fc-logo img,
+:root[data-skin="brutal"] .cross-transfer .fc-logo.placeholder,
+:root[data-skin="brutal"] .cross-transfer .logo-chip img,
+:root[data-skin="brutal"] .cross-transfer .fc-pill,
+:root[data-skin="brutal"] .cross-transfer .biflag,
+:root[data-skin="brutal"] .cross-transfer .panel-role,
+:root[data-skin="brutal"] .cross-transfer .tb-flow,
+:root[data-skin="brutal"] .cross-transfer .tb-swap,
+:root[data-skin="brutal"] .cross-transfer .combo,
+:root[data-skin="brutal"] .cross-transfer .tree-scan-banner,
+:root[data-skin="brutal"] .cross-transfer .tree-phase-bar,
+:root[data-skin="brutal"] .cross-transfer .tree-phase-bar-indeterminate,
+:root[data-skin="brutal"] .cross-transfer .ct-footer-scroll-hint,
+:root[data-skin="brutal"] .cross-transfer .ct-relay-inline-hint,
+:root[data-skin="brutal"] .cross-transfer .ct-settings-trigger,
+:root[data-skin="brutal"] .cross-transfer .ct-settings-seg,
+:root[data-skin="brutal"] .cross-transfer .ct-settings-opt,
+:root[data-skin="brutal"] .cross-transfer .ct-btn,
+:root[data-skin="brutal"] .cross-transfer .ft-track,
+:root[data-skin="brutal"] .cross-transfer .ft-track > i {
+  border-radius: 0;
+}
+
+:root[data-skin="brutal"] .cross-transfer .panel-role,
+:root[data-skin="brutal"] .cross-transfer .biflag {
+  border: 1px solid var(--brutal-ink);
+  font-weight: 800;
+}
+
+:root[data-skin="brutal"] .cross-transfer .tb-src .panel-role {
+  background: var(--brutal-blue);
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .dst-role {
+  background: var(--brutal-yellow);
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .tb-flow,
+:root[data-skin="brutal"] .cross-transfer .tb-swap {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  background: #fff;
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .tb-swap:hover {
+  background: var(--brutal-yellow);
+  border-color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .combo {
+  border: 1px solid var(--brutal-ink);
+  background: #fff;
+}
+
+:root[data-skin="brutal"] .cross-transfer .combo:hover {
+  background: var(--brutal-yellow);
+}
+
+:root[data-skin="brutal"] .cross-transfer .tree-scan-banner,
+:root[data-skin="brutal"] .cross-transfer .ct-footer-scroll-hint,
+:root[data-skin="brutal"] .cross-transfer .ct-relay-inline-hint {
+  border: 1px solid var(--brutal-ink);
+  background: var(--brutal-blue);
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .tree-scan-banner.warn {
+  background: var(--brutal-yellow);
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .tree-phase-bar {
+  border: 1px solid var(--brutal-ink);
+  background: #fff;
+}
+
+:root[data-skin="brutal"] .cross-transfer .tree-phase-bar-indeterminate {
+  background: var(--brand);
+}
+
+:root[data-skin="brutal"] .cross-transfer .footer-island .ct-settings-trigger {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .cross-transfer .footer-island .ct-settings-trigger:hover {
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-settings-seg {
+  gap: 0;
+  padding: 0;
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  background: var(--brutal-ink);
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-settings-opt {
+  font-weight: 800;
+  color: var(--brutal-yellow);
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-settings-opt:hover:not(.active) {
+  background: color-mix(in srgb, #fff 12%, var(--brutal-ink));
+  color: var(--brutal-yellow);
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-settings-opt.active {
+  background: var(--brutal-yellow);
+  color: var(--brutal-ink);
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-btn {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  font-weight: 800;
+  background: #fff;
+  color: var(--brutal-ink);
+  box-shadow: 3px 3px 0 var(--brutal-ink);
+  transition: transform 0.05s ease, box-shadow 0.05s ease;
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-btn:not(:disabled):hover {
+  filter: none;
+  transform: none;
+  box-shadow: 3px 3px 0 var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-btn:not(:disabled):active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-btn-primary {
+  background: var(--brand);
+  border-color: var(--brutal-ink);
+  color: #fff;
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-btn-go {
+  background: var(--brutal-green);
+  border-color: var(--brutal-ink);
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .cross-transfer .ct-btn-danger {
+  background: var(--danger);
+  border-color: var(--brutal-ink);
+  color: #fff;
+}
+
+:root[data-skin="brutal"] .cross-transfer .ft-track {
+  border: 1px solid var(--brutal-ink);
+  background: #fff;
+}
+
+:root[data-skin="brutal"] .cross-transfer .ft-track > i {
+  background: var(--brutal-green);
+}
+
+/* ===== 通用粗黑边工具：所有带边框的主表面统一加粗 ===== */
+:root[data-skin="brutal"] .card,
+:root[data-skin="brutal"] .modal,
+:root[data-skin="brutal"] .confirm-modal,
+:root[data-skin="brutal"] .menu-panel,
+:root[data-skin="brutal"] .file-toolbar,
+:root[data-skin="brutal"] .browser__frame,
+:root[data-skin="brutal"] .browser__empty,
+:root[data-skin="brutal"] .transfer-status-chip,
+:root[data-skin="brutal"] .upload-task-panel {
+  border-width: var(--brutal-bw);
+  border-style: solid;
+  border-color: var(--brutal-ink);
+}
+
+/* ===== 标题：大写 + 加重 ===== */
+:root[data-skin="brutal"] .card__title,
+:root[data-skin="brutal"] .modal__title,
+:root[data-skin="brutal"] .confirm-modal__title,
+:root[data-skin="brutal"] .dialog-head__title {
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 900;
+  color: var(--brutal-ink);
+}
+
+/* ===== 按钮：粗黑边 + 硬阴影 + 按压位移 ===== */
+:root[data-skin="brutal"] .btn {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  font-weight: 800;
+  box-shadow: var(--shadow-brand);
+  transition: transform 0.05s ease, box-shadow 0.05s ease;
+}
+:root[data-skin="brutal"] .btn--primary {
+  background: var(--brand);
+  color: #fff;
+}
+:root[data-skin="brutal"] .btn--secondary,
+:root[data-skin="brutal"] .btn--cancel,
+:root[data-skin="brutal"] .btn--ghost {
+  background: #fff;
+  color: var(--brutal-ink);
+}
+:root[data-skin="brutal"] .btn--danger {
+  background: var(--danger);
+  color: #fff;
+}
+:root[data-skin="brutal"] .btn:not(:disabled):hover {
+  transform: none;
+  box-shadow: var(--shadow-brand);
+  filter: none;
+}
+:root[data-skin="brutal"] .btn:not(:disabled):active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--brutal-ink);
+}
+
+/* ===== 卡片 / 弹窗：硬阴影（token 已给，确保非 scoped 默认值不盖掉） ===== */
+:root[data-skin="brutal"] .card,
+:root[data-skin="brutal"] .modal,
+:root[data-skin="brutal"] .confirm-modal,
+:root[data-skin="brutal"] .upload-task-panel {
+  box-shadow: var(--shadow-pop);
+}
+:root[data-skin="brutal"] .card__title {
+  font-size: 13px;
+}
+/* 设置卡片左侧彩条加粗成黑色分隔 */
+:root[data-skin="brutal"] .card {
+  border-left-width: var(--brutal-bw);
+  border-left-color: var(--brutal-ink) !important;
+}
+
+/* 弹窗/面板头部：黄色强调块 + 黑色下边 */
+:root[data-skin="brutal"] .modal__head,
+:root[data-skin="brutal"] .confirm-modal__head,
+:root[data-skin="brutal"] .upload-task-panel-header {
+  background: var(--brutal-yellow);
+  border-bottom: var(--brutal-bw) solid var(--brutal-ink);
+}
+
+/* ===== 表单控件：输入/下拉统一细黑边 ===== */
+:root[data-skin="brutal"] .app-input,
+:root[data-skin="brutal"] .select__trigger,
+:root[data-skin="brutal"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+:root[data-skin="brutal"] select,
+:root[data-skin="brutal"] textarea {
+  border-width: 1px;
+  border-style: solid;
+  border-color: var(--brutal-ink);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .select__trigger:hover:not(:disabled),
+:root[data-skin="brutal"] .select--open .select__trigger,
+:root[data-skin="brutal"] .app-input:focus {
+  border-color: var(--brand);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--brand) 55%, var(--brutal-ink));
+}
+
+:root[data-skin="brutal"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus,
+:root[data-skin="brutal"] select:focus,
+:root[data-skin="brutal"] textarea:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--brand) 55%, var(--brutal-ink));
+}
+
+:root[data-skin="brutal"] .switch__slider {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  border-radius: 0;
+  background: #fff;
+}
+:root[data-skin="brutal"] .switch__slider::before {
+  display: block;
+  top: 50%;
+  left: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 0;
+  background: var(--brutal-ink);
+  transform: translateY(-50%);
+}
+:root[data-skin="brutal"] .switch input:checked + .switch__slider {
+  background: var(--brutal-green);
+}
+:root[data-skin="brutal"] .switch input:checked + .switch__slider::before {
+  transform: translate(20px, -50%);
+}
+
+/* ===== 任务列表启/禁切换：黑底轨道，选中黄底 ===== */
+:root[data-skin="brutal"] .admin-enable-toggle {
+  gap: 0;
+  padding: 0;
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  border-radius: 0;
+  background: var(--brutal-ink);
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .admin-enable-toggle__btn {
+  border-radius: 0;
+  font-weight: 800;
+  color: var(--brutal-yellow);
+}
+
+:root[data-skin="brutal"] .admin-enable-toggle__btn:hover:not(:disabled):not(.admin-enable-toggle__btn--active) {
+  background: color-mix(in srgb, #fff 12%, var(--brutal-ink));
+  color: var(--brutal-yellow);
+}
+
+:root[data-skin="brutal"] .admin-enable-toggle__btn--active {
+  background: var(--brutal-yellow);
+  color: var(--brutal-ink);
+}
+
+/* ===== 前台顶栏：去掉光效/星空，改粗黑下边 ===== */
+:root[data-skin="brutal"] .header {
+  border-bottom: var(--brutal-bw) solid var(--brutal-ink);
+  box-shadow: none;
+}
+:root[data-skin="brutal"] .header__sky {
+  display: none;
+}
+
+/* ===== 后台侧栏：直角 + 粗黑右边 ===== */
+:root[data-skin="brutal"] .sidebar {
+  border-right: var(--brutal-bw) solid var(--brutal-ink);
+  border-top-right-radius: 0;
+}
+
+:root[data-skin="brutal"] .nav-item {
+  border-radius: 0;
+}
+
+/* ===== 文件区：表头加粗下边，工具栏粗黑下边 ===== */
+:root[data-skin="brutal"] .file-toolbar {
+  border-bottom: var(--brutal-bw) solid var(--brutal-ink);
+}
+:root[data-skin="brutal"] .file-list .file-table thead th {
+  border-bottom: var(--brutal-bw) solid var(--brutal-ink);
+}
+
+/* ===== 二级菜单条：黄色块 + 粗黑边 + 硬阴影；选中 tab 黑底 ===== */
+:root[data-skin="brutal"] .tabbar {
+  background: var(--brutal-yellow);
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  box-shadow: none;
+}
+:root[data-skin="brutal"] .tabbar__tab {
+  color: var(--brutal-ink);
+  font-weight: 800;
+}
+:root[data-skin="brutal"] .tabbar__tab:hover:not(.tabbar__tab--active) {
+  background: #fff;
+  color: var(--brutal-ink);
+}
+:root[data-skin="brutal"] .tabbar__tab--active,
+:root[data-skin="brutal"] .tabbar__tab--active:hover,
+:root[data-skin="brutal"] .upload-task-tab.active {
+  background: var(--brutal-ink);
+  color: var(--brutal-yellow);
+  border-color: var(--brutal-ink);
+}
+
+/* ===== 任务页第四张设置入口卡：与 StatCard 一致，仅硬阴影、无描边 ===== */
+:root[data-skin="brutal"] .settings-entry-card {
+  border: none;
+  border-radius: 0;
+  box-shadow: var(--shadow-card);
+  background: var(--surface);
+}
+
+:root[data-skin="brutal"] .settings-entry-card:hover {
+  background: var(--brutal-yellow);
+  border: none;
+  box-shadow: var(--shadow-card);
+}
+
+:root[data-skin="brutal"] .settings-entry-card__icon {
+  border-radius: 0;
+  border: none;
+  background: linear-gradient(135deg, var(--brand-start), var(--brand-end));
+  color: #fff;
+}
+
+:root[data-skin="brutal"] .settings-entry-card__hint-action {
+  color: var(--brutal-ink);
+  font-weight: 800;
+}
+
+/* ===== 首页文件表格：表格容器不使用硬阴影，工具栏只保留下边线，避免双框错位 ===== */
+:root[data-skin="brutal"] .browser__frame:not(.browser__frame--grid) {
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .browser__frame:not(.browser__frame--grid) .file-toolbar {
+  border-width: 0 0 var(--brutal-bw);
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .browser__frame:not(.browser__frame--grid) .file-list {
+  border-radius: 0;
+}
+
+/* ===== 上传任务面板：面板内按钮全部直角 ===== */
+:root[data-skin="brutal"] .upload-task-panel .icon-btn,
+:root[data-skin="brutal"] .upload-task-panel .task-toolbar-btn,
+:root[data-skin="brutal"] .upload-task-panel .upload-task-tab,
+:root[data-skin="brutal"] .upload-task-panel .upload-task-nav-item,
+:root[data-skin="brutal"] .upload-task-panel .upload-task-nav-badge,
+:root[data-skin="brutal"] .upload-task-panel .task-chip,
+:root[data-skin="brutal"] .upload-task-panel .task-phase-pill {
+  border-radius: 0;
+}
+
+:root[data-skin="brutal"] .upload-task-panel .task-toolbar-btn {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  box-shadow: 3px 3px 0 var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .upload-task-panel .task-toolbar-btn:hover:not(:disabled) {
+  background: #fff;
+  transform: none;
+  box-shadow: 3px 3px 0 var(--brutal-ink);
+}
+
+/* ===== 离线下载弹窗：沿用野兽派直角、粗边和高对比提示块 ===== */
+:root[data-skin="brutal"] .offline-capability,
+:root[data-skin="brutal"] .offline-capability__icon,
+:root[data-skin="brutal"] .offline-textarea,
+:root[data-skin="brutal"] .offline-torrent-drop,
+:root[data-skin="brutal"] .offline-torrent-summary,
+:root[data-skin="brutal"] .offline-torrent-files,
+:root[data-skin="brutal"] .offline-target {
+  border-radius: 0;
+}
+
+:root[data-skin="brutal"] .offline-capability,
+:root[data-skin="brutal"] .offline-torrent-drop,
+:root[data-skin="brutal"] .offline-torrent-files,
+:root[data-skin="brutal"] .offline-target {
+  border-color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .offline-capability {
+  border-width: var(--brutal-bw);
+  background: var(--brutal-blue);
+}
+
+/* ===== Select：野兽派下拉 hover 不用黑底，避免账号选择看起来像选中/禁用 ===== */
+:root[data-skin="brutal"] .select__option {
+  border-radius: 0;
+}
+
+:root[data-skin="brutal"] .select__option:hover {
+  background: var(--brutal-yellow);
+  color: var(--brutal-ink);
+}
+
+:root[data-skin="brutal"] .select__option--active {
+  background: var(--brutal-blue);
+  color: var(--brutal-ink);
+  font-weight: 900;
+}
+
+/* ===== 下拉菜单：新建/更多等 hover 菜单保持直角，hover 用黄色而不是圆角软块 ===== */
+:root[data-skin="brutal"] .menu-panel,
+:root[data-skin="brutal"] .menu-panel--comfortable,
+:root[data-skin="brutal"] .menu-panel--context,
+:root[data-skin="brutal"] .menu-panel__item,
+:root[data-skin="brutal"] .breadcrumb-dropdown,
+:root[data-skin="brutal"] .breadcrumb-dropdown-item {
+  border-radius: 0;
+}
+
+:root[data-skin="brutal"] .menu-panel__item:hover:not(:disabled),
+:root[data-skin="brutal"] .menu-panel--comfortable .menu-panel__item:hover:not(:disabled),
+:root[data-skin="brutal"] .menu-panel--context .menu-panel__item:hover:not(:disabled),
+:root[data-skin="brutal"] .breadcrumb-dropdown-item:hover {
+  background: var(--brutal-yellow);
+  color: var(--brutal-ink);
+}
+
+/* ===== 系统设置：卡片 + 分段控件 ===== */
+:root[data-skin="brutal"] .settings-card {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  border-left-width: calc(var(--brutal-bw) * 2);
+  border-radius: 0;
+  box-shadow: var(--shadow-card);
+}
+
+:root[data-skin="brutal"] .settings-card__title {
+  font-weight: 900;
+  text-transform: none;
+}
+
+:root[data-skin="brutal"] .settings-segment {
+  gap: 0;
+  padding: 0;
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  border-radius: 0;
+  background: var(--brutal-ink);
+  box-shadow: var(--shadow-card);
+}
+
+:root[data-skin="brutal"] .settings-segment__btn {
+  border-radius: 0;
+  font-weight: 800;
+  color: var(--brutal-yellow);
+}
+
+:root[data-skin="brutal"] .settings-segment__btn:hover:not(.settings-segment__btn--active) {
+  background: color-mix(in srgb, #fff 12%, var(--brutal-ink));
+  color: var(--brutal-yellow);
+}
+
+:root[data-skin="brutal"] .settings-segment__btn--active,
+:root[data-skin="brutal"] .settings-segment__btn--active:hover {
+  background: var(--brutal-yellow);
+  color: var(--brutal-ink);
+  box-shadow: none;
+}
+
+:root[data-skin="brutal"] .settings-row__badge {
+  border: var(--brutal-bw) solid var(--brutal-ink);
+  border-radius: 0;
+  font-weight: 800;
+  color: var(--brutal-ink);
+  background: var(--brutal-yellow);
+}
+
+/*
+ * 组合搜索框本身已经负责绘制外框。本规则必须位于野兽主题末尾，
+ * 避免通用 input 黑边规则再次套到内层输入框上。
+ */
+:root[data-skin="brutal"] .upload-task-panel label.search-box > input,
+:root[data-skin="brutal"] label.folder-selector__search > input,
+:root[data-skin="brutal"] label.scrape-scope-picker__search > input,
+:root[data-skin="brutal"] label.archive-preview__search > input,
+:root[data-skin="brutal"] .tool-search__box > input,
+:root[data-skin="brutal"] .upload-task-panel label.search-box > input:focus,
+:root[data-skin="brutal"] label.folder-selector__search > input:focus,
+:root[data-skin="brutal"] label.scrape-scope-picker__search > input:focus,
+:root[data-skin="brutal"] label.archive-preview__search > input:focus,
+:root[data-skin="brutal"] .tool-search__box > input:focus {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* 目录选择器和工具搜索原本是软色块，野兽主题只保留一层清晰外框。 */
+:root[data-skin="brutal"] .folder-selector__search,
+:root[data-skin="brutal"] .scrape-scope-picker__search,
+:root[data-skin="brutal"] .archive-preview__search,
+:root[data-skin="brutal"] .tool-search__box {
+  border: 1px solid var(--brutal-ink);
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+}

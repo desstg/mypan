@@ -1,0 +1,114 @@
+/* 番号规则编辑器的公共观感。
+ *
+ * 「删除字符」和「替换字符」两个编辑器必须长得一模一样 —— 抽成公共样式而不是各自
+ * 写一份 scoped CSS，就是为了防止两边慢慢跑偏（改了一个忘了另一个）。
+ * 观感对齐设置页既有的标签编辑器：淡色 chip + 圆角 + 悬浮高亮。
+ */
+
+.jav-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.jav-editor__hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.jav-editor__hint strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.jav-editor__hint code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--border-soft);
+  font-size: 11px;
+}
+
+.jav-editor__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.jav-editor__empty {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* chip 主体 */
+.jav-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 5px 6px 5px 10px;
+  background: color-mix(in srgb, var(--brand) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--brand) 25%, var(--border));
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.2;
+  color: var(--brand);
+}
+
+.jav-chip__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+  font-weight: 500;
+}
+
+/* 替换规则里的 `→`，比正文淡一点，避免和规则内容抢注意力 */
+.jav-chip__arrow {
+  margin: 0 3px;
+  color: color-mix(in srgb, var(--brand) 60%, var(--text-muted));
+}
+
+.jav-chip__btn {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: color-mix(in srgb, var(--brand) 70%, var(--text-muted));
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.jav-chip__btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--brand) 18%, transparent);
+}
+
+.jav-chip__btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.jav-chip__btn--remove {
+  border-radius: 50%;
+}
+
+/* 底部的「添加」区 */
+.jav-editor__add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+/* AppInput 的根元素是 .app-input，自带 width:100%；这里要放开才能和按钮同行 */
+.jav-editor__add-row .app-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}

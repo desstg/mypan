@@ -1,0 +1,84 @@
+version: "2"
+
+run:
+  go: "1.26.4"
+  modules-download-mode: readonly
+  allow-parallel-runners: true
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - staticcheck
+  settings:
+    depguard:
+      rules:
+        api-no-store:
+          files:
+            - "**/internal/api/**"
+            - "!**/*_test.go"
+          deny:
+            - pkg: litepan/internal/store
+              desc: api 层不得 import store
+        core-no-api:
+          files:
+            - "**/internal/file/**"
+            - "**/internal/playback/**"
+            - "**/internal/upload/**"
+            - "!**/*_test.go"
+          deny:
+            - pkg: litepan/internal/api
+              desc: file/playback/upload 不得 import api
+        drivers-pure:
+          files:
+            - "**/drivers/**"
+          deny:
+            - pkg: litepan/internal/file
+              desc: drivers 不得 import file
+            - pkg: litepan/internal/auth
+              desc: drivers 不得 import auth
+            - pkg: litepan/internal/upload
+              desc: drivers 不得 import upload
+        domain-pure:
+          files:
+            - "**/internal/domain/**"
+          deny:
+            - pkg: litepan/internal
+              desc: domain 不得 import internal/*
+        no-driver-leak:
+          files:
+            - "**/internal/**"
+            - "!**/*_test.go"
+          deny:
+            - pkg: litepan/drivers
+              desc: 公共层只认 internal/driver 接口，禁止 import 具体驱动
+        pkg-must-be-pure:
+          files:
+            - "**/pkg/**"
+          deny:
+            - pkg: litepan/internal
+              desc: pkg 是纯工具，禁止依赖业务包
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - web
+      - .bak
+      - node_modules
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

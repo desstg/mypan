@@ -1,0 +1,23 @@
+services:
+  litepan:
+    image: desstg/mypan:beta
+    container_name: litepan
+    restart: unless-stopped
+    ports:
+      - "5211:5211"
+      # 内置 Magnet 的 TCP/uTP/DHT 监听端口；若在后台修改，需同步调整映射
+      - "42069:42069/tcp"
+      - "42069:42069/udp"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/app/data
+      - ./strm:/app/strm
+      - ./mounts:/app/mounts:shared
+
+      # 可选：将 FUSE 读缓存单独映射，建议放到更快的磁盘
+      # - ./fuse_read_cache:/app/data/fuse_read_cache
+    devices:
+      - /dev/fuse:/dev/fuse
+    pid: "host"
+    privileged: true

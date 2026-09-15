@@ -1,0 +1,79 @@
+/* 全局按钮配色与交互统一在此维护，调用方只补布局差异。 */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+.btn--md {
+  padding: 8px 16px;
+}
+.btn--sm {
+  padding: 5px 10px;
+  font-size: 13px;
+}
+.btn--block {
+  width: 100%;
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--brand-gradient-h);
+  color: var(--text-on-brand);
+}
+.btn--primary:not(:disabled):hover {
+  background: var(--brand-gradient-h-hover);
+}
+
+.btn--secondary {
+  background: var(--surface);
+  color: var(--text-regular);
+  border: 1px solid var(--border);
+}
+.btn--secondary.btn--md {
+  padding: 7px 15px;
+}
+.btn--secondary.btn--sm {
+  padding: 4px 9px;
+}
+.btn--secondary:not(:disabled):hover {
+  background: var(--surface-sunken);
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.btn--cancel {
+  background: var(--surface-sunken);
+  color: var(--text-regular);
+}
+.btn--cancel:not(:disabled):hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--text-muted);
+}
+.btn--ghost:not(:disabled):hover {
+  background: var(--border-soft);
+  color: var(--text);
+}
+
+.btn--danger {
+  background: var(--danger);
+  color: #fff;
+}
+.btn--danger:not(:disabled):hover {
+  filter: brightness(1.05);
+}

@@ -1,0 +1,9 @@
+ALTER TABLE upload_tasks ADD COLUMN source_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE upload_tasks ADD COLUMN source_account_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE upload_tasks ADD COLUMN source_account_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE upload_tasks ADD COLUMN source_driver_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE upload_tasks ADD COLUMN source_file_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE upload_tasks ADD COLUMN rel_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE upload_tasks ADD COLUMN rel_dir TEXT NOT NULL DEFAULT '';
+ALTER TABLE upload_tasks ADD COLUMN phase TEXT NOT NULL DEFAULT '';
+ALTER TABLE upload_tasks ADD COLUMN downloaded_bytes INTEGER NOT NULL DEFAULT 0;

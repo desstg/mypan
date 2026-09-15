@@ -1,0 +1,33 @@
+# 仓库内一律存 LF。Windows 检出时如果保留 CRLF，
+# shell 脚本会因 \r 无法执行，Docker 构建也会受影响。
+* text=auto eol=lf
+
+# Go 源码与构建文件显式声明
+*.go    text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+Dockerfile text eol=lf
+Makefile   text eol=lf
+
+# 二进制资源不做任何转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.avif  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.wasm  binary
+*.gz    binary
+*.zip   binary
+
+# 构建产物由 web 阶段重新生成，diff 里不展开
+internal/api/web/** linguist-generated=true
+web/package-lock.json linguist-generated=true

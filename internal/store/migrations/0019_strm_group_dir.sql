@@ -1,0 +1,1 @@
+ALTER TABLE strm_tasks ADD COLUMN group_dir TEXT NOT NULL DEFAULT '';

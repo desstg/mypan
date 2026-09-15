@@ -1,0 +1,44 @@
+# 运行数据与挂载点
+/data/
+/strm/
+/mounts/
+*.db
+*.db-wal
+*.db-shm
+
+# 构建产物
+/litepan
+/dist/
+*.out
+*.test
+
+# 编辑器/系统
+.DS_Store
+.idea/
+.vscode/
+
+# 前端依赖与本地缓存
+web/node_modules/
+web/*.tsbuildinfo
+
+# Docker 镜像导出（NAS load 用）
+dist/*.tar
+dist/*.tar.gz
+
+# 本地修改备份（不入库）
+.bak/
+**/*.bak
+**/*.bak-*
+
+# 环境与密钥
+.env
+.env.*
+drivers/115/
+
+# 本地调试截图与临时脚本（不入库）；注意只锚定根目录，
+# docs/pictures/ 下的配图要正常入库
+/*.png
+2.txt
+.tmp_serve_web.mjs
+.playwright-mcp/
+.backup-logos/
