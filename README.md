@@ -52,7 +52,7 @@
 
 ## ▎ 快速开始
 
-**Docker Compose 部署** · 镜像标签：`beta` 或指定 `v1.0.1`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v1.0.1`
 
 ```yaml
 services:
