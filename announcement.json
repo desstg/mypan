@@ -1,7 +1,7 @@
 {
-  "notice_version": "2026-09-14-1",
+  "notice_version": "2026-09-15-1",
   "badge": "更新",
-  "dialog_title": "MyPan v1.0.1",
+  "dialog_title": "MyPan v1.1.1",
   "banner": "这是一条示例公告。把本文件改成你自己的内容即可，LitePan 会定期拉取并缓存它。\n正文按纯文本渲染，支持换行，但不支持图片、链接和 Markdown。",
   "special": "special 显示在 banner 之下、正文之上，适合放需要强调的中性说明。留空或填 none 则不显示。",
   "lead": "lead 是正文前的导语段落，可以留空。",
