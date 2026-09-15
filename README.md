@@ -58,7 +58,7 @@
 services:
   litepan:
     image: desstg/mypan:beta
-    container_name: litepan
+    container_name: mypan
     restart: unless-stopped
     ports:
       - "5211:5211"
@@ -88,14 +88,3 @@ services:
 打开 `http://你的IP:5211`，默认管理员密码均为admin。  
 需要 FUSE 时请确保宿主机具备 `/dev/fuse` 权限。
 
-> [!WARNING]
-> **本仓库对应的 Go 版镜像已迁移至 `desstg/mypan`，请勿再使用旧的 `ponphil/litepan`。**  
-> 旧的 `ponphil/litepan:latest` 是 Python 版镜像，与 Go 版不通用。若你需要旧版程序与 Compose 脚本，请前往归档仓库：[LitePan-old](https://github.com/Ponphil/LitePan-old)。
-
-</table>
-
-[docker-pulls-shield]: https://img.shields.io/docker/pulls/desstg/mypan?logo=docker&logoColor=white&style=flat-square
-[version-shield]: https://img.shields.io/badge/Version-v1.0.1-6C63FF?style=flat-square
-[license-shield]: https://img.shields.io/badge/License-PolyForm%20NC-red?style=flat-square
-[docker-url]: https://hub.docker.com/r/desstg/mypan
-[license-url]: ./LICENSE
