@@ -10,10 +10,11 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-// 底部三个操作入口（固定链接，新窗口打开）。
-const GITHUB_URL = "https://github.com/Ponphil/LitePan";
-const SPONSOR_URL = "https://www.litepan.top/sponsor.html";
-const CHANGELOG_URL = "https://www.litepan.top/changelog.html";
+// 底部三个操作入口。GitHub 指向本项目仓库，新窗口打开。
+// 「打赏支持」和「更新日志」暂时还没有对应页面，先占位不挂链接 ——
+// 对应的 <div> 带 --placeholder 修饰类，用来去掉 hover 高亮，
+// 免得做成能点却没反应的假象。将来有了地址再换回 <a>。
+const GITHUB_URL = "https://github.com/desstg/mypan";
 
 function closeAll() {
   emit("close");
@@ -54,7 +55,7 @@ function closeAll() {
         </section>
       </div>
 
-      <!-- 操作区：三个小卡片，新窗口打开 -->
+      <!-- 操作区：三个小卡片。GitHub 是新窗口打开的链接，后两个暂为占位（无链接） -->
       <div class="announcement-modal__links">
         <a
           class="announcement-modal__link"
@@ -68,30 +69,20 @@ function closeAll() {
             <small>源码与问题反馈</small>
           </span>
         </a>
-        <a
-          class="announcement-modal__link"
-          :href="SPONSOR_URL"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
+        <div class="announcement-modal__link announcement-modal__link--placeholder">
           <i class="fas fa-heart announcement-modal__link-icon announcement-modal__link-icon--sponsor" aria-hidden="true" />
           <span class="announcement-modal__link-copy">
             <strong>打赏支持</strong>
             <small>赞助 MyPan 开发</small>
           </span>
-        </a>
-        <a
-          class="announcement-modal__link"
-          :href="CHANGELOG_URL"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
+        </div>
+        <div class="announcement-modal__link announcement-modal__link--placeholder">
           <i class="fas fa-list-ul announcement-modal__link-icon announcement-modal__link-icon--log" aria-hidden="true" />
           <span class="announcement-modal__link-copy">
             <strong>更新日志</strong>
             <small>查看历史版本</small>
           </span>
-        </a>
+        </div>
       </div>
     </div>
 
@@ -246,9 +237,14 @@ function closeAll() {
     box-shadow 0.15s ease;
 }
 
-.announcement-modal__link:hover {
+/* 占位卡片没有链接，不参与 hover 高亮，也不显示手型光标 */
+.announcement-modal__link:not(.announcement-modal__link--placeholder):hover {
   border-color: color-mix(in srgb, var(--brand) 40%, var(--border));
   box-shadow: var(--shadow-card);
+}
+
+.announcement-modal__link--placeholder {
+  cursor: default;
 }
 
 .announcement-modal__link-icon {

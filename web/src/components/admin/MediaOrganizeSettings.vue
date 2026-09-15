@@ -484,13 +484,19 @@ defineExpose(
 
       <!-- 番号规则自带卡片布局与草稿，所以整块交给子组件；其余 tab 仍是设置卡片。
            v-if 只负责首次访问时再挂载（省掉没访问过的用户的一次请求），
-           挂载之后就靠 v-show 切换 —— 否则切走会把未保存的草稿一起带走。 -->
-      <MediaOrganizeJavRulesTab
-        v-if="javTabVisited"
-        v-show="activeTab === JAV_TAB"
-        ref="javTabRef"
-        @dirty-change="javRulesDirty = $event"
-      />
+           挂载之后就靠 v-show 切换 —— 否则切走会把未保存的草稿一起带走。
+
+           这层 wrapper 是必须的，别为了"少一层 div"去掉：
+           v-show 靠给根元素写 display:none 生效，而 MediaOrganizeJavRulesTab 是
+           多根节点（loading 的 div + v-else 的 template，加载完共 7 个根），
+           Vue 找不到该写在哪，指令会**静默失效**——表现就是切走 tab 后面板不消失，
+           后面 tab 的卡片被挤到它下方。wrapper 提供一个真实元素来承接 v-show。 -->
+      <div v-if="javTabVisited" v-show="activeTab === JAV_TAB">
+        <MediaOrganizeJavRulesTab
+          ref="javTabRef"
+          @dirty-change="javRulesDirty = $event"
+        />
+      </div>
 
       <SettingsCard v-if="activeTab === TMDB_TAB" :accent="ORGANIZE_SETTINGS_ACCENT">
         <template #head-actions>
