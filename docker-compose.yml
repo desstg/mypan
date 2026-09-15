@@ -1,6 +1,6 @@
 services:
   litepan:
-    image: desstg/mypan:beta
+    image: desstg/mypan:latest
     container_name: litepan
     restart: unless-stopped
     ports:

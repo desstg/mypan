@@ -10,7 +10,7 @@ DOCKER_EXPORT ?= dist/$(DOCKER_IMAGE).tar.gz
 # 发布到 Docker Hub
 VERSION ?= v1.0.1
 RELEASE_IMAGE ?= desstg/mypan
-RELEASE_TAG ?= beta
+RELEASE_TAG ?= latest
 RELEASE_PLATFORMS ?= linux/amd64,linux/arm64
 
 lint:
@@ -44,7 +44,7 @@ docker-save: docker-build
 	@mkdir -p dist
 	docker save $(DOCKER_IMAGE) | gzip > $(DOCKER_EXPORT)
 
-# 构建并推送到 Docker Hub。会同时打 beta 和版本号两个 tag。
+# 构建并推送到 Docker Hub。会同时打 latest 和版本号两个 tag。
 #   单架构（群晖 x86 机型推荐，快很多）：
 #     make docker-push RELEASE_PLATFORMS=linux/amd64
 #   多架构（需要 buildx + QEMU binfmt，NAS 上构建 arm64 会比较慢）：
