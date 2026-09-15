@@ -92,38 +92,7 @@ services:
 > **本仓库对应的 Go 版镜像已迁移至 `desstg/mypan`，请勿再使用旧的 `ponphil/litepan`。**  
 > 旧的 `ponphil/litepan:latest` 是 Python 版镜像，与 Go 版不通用。若你需要旧版程序与 Compose 脚本，请前往归档仓库：[LitePan-old](https://github.com/Ponphil/LitePan-old)。
 
-## ▎ 支持
-
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <h3>支持 LitePan</h3>
-      <p>如果这个项目对你有帮助，欢迎点右上角 <strong>Star</strong>，也欢迎自愿赞赏。</p>
-      <img src="docs/pictures/wechat-tip.png" alt="微信赞赏" width="260">
-    </td>
-    <td width="50%" valign="top">
-      <h3>赞助致谢</h3>
-      <p>感谢每一位支持 LitePan 的朋友。</p>
-      <p>完整致谢名单见官方网站：</p>
-      <p>
-        <a href="https://www.litepan.top/sponsor.html">https://www.litepan.top/sponsor.html</a>
-      </p>
-    </td>
-  </tr>
 </table>
-
-## ▎ 反馈
-
-交流请到 <a href="https://space.bilibili.com/1501989416">B 站主页</a>。  
-暂不接受公开 PR；有维护意愿请私信。
-外部贡献致谢见 [ACKNOWLEDGEMENTS.md](./ACKNOWLEDGEMENTS.md)。
-
----
-
-## ▎ 许可
-
-[PolyForm Noncommercial 1.0.0](./LICENSE) — 个人学习与非商业使用，**禁止商用**。  
-第三方依赖见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。请遵守各网盘服务条款与当地法规。
 
 [docker-pulls-shield]: https://img.shields.io/docker/pulls/desstg/mypan?logo=docker&logoColor=white&style=flat-square
 [version-shield]: https://img.shields.io/badge/Version-v1.0.1-6C63FF?style=flat-square
