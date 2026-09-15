@@ -7,12 +7,37 @@ import (
 	"encoding/hex"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/crypto/scrypt"
 )
 
 const defaultPBKDF2Iterations = 600000
+
+// defaultPasswordCache 缓存「这个存储值是不是默认密码 admin」的判断结果。
+//
+// 为什么要缓存：一次 PBKDF2 是 60 万次迭代（见 defaultPBKDF2Iterations），
+// 在普通 CPU 上验证一次要几百毫秒。而 AssessAdminCredentialState 会在
+// **每一个后台请求**里被调用一次（adminauth.EnsureAdminAccess → credentialState，
+// 用来判断要不要强制改密），后台概况一打开就是十个接口并发轮询 ——
+// 于是每个请求都白白烧掉一遍哈希，单请求被拖到秒级。
+//
+// 缓存是安全的：键就是被验证的输入本身。密码一改，HashPassword 会生成新的
+// 随机盐、哈希串随之改变，键也就变了，缓存自然失效 —— 不存在过期不一致的窗口，
+// 也不需要任何显式清除逻辑。条目数等于改密次数，实际只有一条。
+var defaultPasswordCache sync.Map
+
+// matchesDefaultPassword 判断存储的凭据是不是默认密码 admin。
+// 明文、空串等情况 VerifyAdminPassword 本身会立刻返回 false，走缓存同样正确。
+func matchesDefaultPassword(storedPassword string) bool {
+	if cached, ok := defaultPasswordCache.Load(storedPassword); ok {
+		return cached.(bool)
+	}
+	result := VerifyAdminPassword(storedPassword, "admin")
+	defaultPasswordCache.Store(storedPassword, result)
+	return result
+}
 
 func IsPasswordHash(value string) bool {
 	text := strings.TrimSpace(value)
@@ -29,7 +54,7 @@ type CredentialState struct {
 func AssessAdminCredentialState(username, storedPassword string) CredentialState {
 	normalizedUsername := strings.TrimSpace(username)
 	normalizedPassword := strings.TrimSpace(storedPassword)
-	defaultCredentials := normalizedUsername == "admin" && VerifyAdminPassword(normalizedPassword, "admin")
+	defaultCredentials := normalizedUsername == "admin" && matchesDefaultPassword(normalizedPassword)
 	legacyPlaintext := normalizedPassword != "" && !IsPasswordHash(normalizedPassword)
 	reason := ""
 	switch {
