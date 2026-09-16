@@ -1,0 +1,1 @@
+import{At as e,K as t,S as n,U as r,k as i}from"./vue-vendor-DI9kKSTB.js";import{k as a}from"./index-l8dSPpH7.js";var o=a(i({__name:`AdminStatusPill`,props:{tone:{default:`muted`}},setup(i){return(a,o)=>(r(),n(`span`,{class:e([`admin-status-pill`,`admin-status-pill--${i.tone}`])},[t(a.$slots,`default`,{},void 0,!0)],2))}}),[[`__scopeId`,`data-v-5c1c52a4`]]);export{o as t};

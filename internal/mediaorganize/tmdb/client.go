@@ -508,3 +508,127 @@ func retryExhausted(err error, retries int) error {
 	}
 	return fmt.Errorf("%w（已重试 %d 次）", err, retries)
 }
+
+// —————————————————— 发现 / 类型 / 别名（热门推荐与订阅用） ——————————————————
+
+// DiscoverParams 是 TMDB discover 接口的查询条件。
+type DiscoverParams struct {
+	// Page 从 1 开始。<=0 时按 1 处理。
+	Page int
+	// OriginCountry 是 ISO 3166-1 国家码（如 CN / US / JP）。
+	OriginCountry string
+	// GenreIDs 是 TMDB 类型 id，多个条件按 AND 组合。
+	GenreIDs []int
+	// Year 是年份：电影映射到 primary_release_year，剧集映射到 first_air_date_year。
+	Year int
+	// SortBy 留空时按 popularity.desc。
+	SortBy string
+}
+
+func normalizeMediaType(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case mediaTypeTV:
+		return mediaTypeTV, nil
+	case mediaTypeMovie, "":
+		return mediaTypeMovie, nil
+	}
+	return "", fmt.Errorf("tmdb: unsupported media type %q", raw)
+}
+
+// Discover 拉取 TMDB 的「发现」列表，返回整页 payload（含 page / total_pages / results）。
+//
+// 热门推荐海报墙用它取默认列表；带筛选条件时也从这里走 —— 搜索是单独的 Search。
+func (c *Client) Discover(ctx context.Context, mediaType string, p DiscoverParams) (json.RawMessage, error) {
+	if c == nil || c.apiKey == "" {
+		return nil, fmt.Errorf("tmdb: missing api key")
+	}
+	kind, err := normalizeMediaType(mediaType)
+	if err != nil {
+		return nil, err
+	}
+
+	page := p.Page
+	if page <= 0 {
+		page = 1
+	}
+	q := url.Values{}
+	q.Set("api_key", c.apiKey)
+	q.Set("page", strconv.Itoa(page))
+	if c.language != "" {
+		q.Set("language", c.language)
+	}
+	sortBy := strings.TrimSpace(p.SortBy)
+	if sortBy == "" {
+		sortBy = "popularity.desc"
+	}
+	q.Set("sort_by", sortBy)
+	if country := strings.TrimSpace(p.OriginCountry); country != "" {
+		q.Set("with_origin_country", country)
+	}
+	if len(p.GenreIDs) > 0 {
+		ids := make([]string, 0, len(p.GenreIDs))
+		for _, id := range p.GenreIDs {
+			if id > 0 {
+				ids = append(ids, strconv.Itoa(id))
+			}
+		}
+		if len(ids) > 0 {
+			q.Set("with_genres", strings.Join(ids, "|"))
+		}
+	}
+	if p.Year > 0 {
+		if kind == mediaTypeTV {
+			q.Set("first_air_date_year", strconv.Itoa(p.Year))
+		} else {
+			q.Set("primary_release_year", strconv.Itoa(p.Year))
+		}
+	}
+
+	return c.get(ctx, c.apiBaseURL()+"/discover/"+kind, q)
+}
+
+// Genres 拉取类型列表，供筛选下拉使用。
+func (c *Client) Genres(ctx context.Context, mediaType string) (json.RawMessage, error) {
+	if c == nil || c.apiKey == "" {
+		return nil, fmt.Errorf("tmdb: missing api key")
+	}
+	kind, err := normalizeMediaType(mediaType)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("api_key", c.apiKey)
+	if c.language != "" {
+		q.Set("language", c.language)
+	}
+	return c.get(ctx, c.apiBaseURL()+"/genre/"+kind+"/list", q)
+}
+
+// AlternativeTitles 拉取别名列表。
+//
+// 电影返回 titles[]，剧集返回 results[]（TMDB 两侧字段名不一致）。
+func (c *Client) AlternativeTitles(ctx context.Context, tmdbID string, mediaType string) (json.RawMessage, error) {
+	return c.subResource(ctx, tmdbID, mediaType, "alternative_titles")
+}
+
+// Translations 拉取各语言译名。别名匹配靠它补齐繁简与其它语言版本。
+func (c *Client) Translations(ctx context.Context, tmdbID string, mediaType string) (json.RawMessage, error) {
+	return c.subResource(ctx, tmdbID, mediaType, "translations")
+}
+
+func (c *Client) subResource(ctx context.Context, tmdbID, mediaType, resource string) (json.RawMessage, error) {
+	if c == nil || c.apiKey == "" {
+		return nil, fmt.Errorf("tmdb: missing api key")
+	}
+	id, err := strconv.Atoi(strings.TrimSpace(tmdbID))
+	if err != nil || id <= 0 {
+		return nil, fmt.Errorf("tmdb: invalid id %q", tmdbID)
+	}
+	kind, err := normalizeMediaType(mediaType)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("api_key", c.apiKey)
+	return c.get(ctx, fmt.Sprintf("%s/%s/%d/%s", c.apiBaseURL(), kind, id, resource), q)
+}

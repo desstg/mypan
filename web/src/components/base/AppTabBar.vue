@@ -6,13 +6,19 @@ interface Tab {
   changed?: boolean;
 }
 
-defineProps<{ tabs: Tab[]; modelValue: string }>();
+defineProps<{
+  tabs: Tab[];
+  modelValue: string;
+  /** 可选的分组图标（FontAwesome 名，如 fire）。缺省不渲染，其它页面不受影响。 */
+  icon?: string;
+}>();
 const emit = defineEmits<{ "update:modelValue": [string] }>();
 </script>
 
 <template>
   <div class="tabbar">
     <div class="tabbar__tabs">
+      <i v-if="icon" class="tabbar__icon fas" :class="`fa-${icon}`" aria-hidden="true" />
       <button
         v-for="t in tabs"
         :key="t.key"
@@ -50,6 +56,11 @@ const emit = defineEmits<{ "update:modelValue": [string] }>();
   align-items: center;
   gap: 4px;
   flex-wrap: wrap;
+}
+.tabbar__icon {
+  margin-right: 6px;
+  color: var(--brand);
+  font-size: 14px;
 }
 .tabbar__tab {
   display: inline-flex;

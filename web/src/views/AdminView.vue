@@ -23,6 +23,7 @@ const adminPageLoaders = {
   tools: () => import("@/components/admin/AuxToolsManagement.vue"),
   "cross-transfer": () => import("@/components/admin/CrossDriveTransferPage.vue"),
   share: () => import("@/components/admin/FileShareManagement.vue"),
+  subscribe: () => import("@/components/admin/TGSubscribePage.vue"),
 };
 const DashboardManagement = defineAsyncComponent(adminPageLoaders.dashboard);
 const AccountManagement = defineAsyncComponent(adminPageLoaders.accounts);
@@ -31,6 +32,7 @@ const TaskManagement = defineAsyncComponent(adminPageLoaders.tasks);
 const AuxToolsManagement = defineAsyncComponent(adminPageLoaders.tools);
 const CrossDriveTransferPage = defineAsyncComponent(adminPageLoaders["cross-transfer"]);
 const FileShareManagement = defineAsyncComponent(adminPageLoaders.share);
+const TGSubscribePage = defineAsyncComponent(adminPageLoaders.subscribe);
 import { logout, fetchSystemConfig } from "@/api/auth";
 import { useAuthStore } from "@/stores/auth";
 import { provideAdminPageContext } from "@/composables/useAdminLoadingBar";
@@ -49,6 +51,7 @@ const nav = [
   { key: "tools", label: "辅助工具", icon: "toolbox" },
   { key: "cross-transfer", label: "跨盘传输", icon: "right-left" },
   { key: "share", label: "文件共享", icon: "share-alt" },
+  { key: "subscribe", label: "热门推荐", icon: "fire" },
 ];
 const navKeys = nav.map((n) => n.key);
 
@@ -69,6 +72,7 @@ const PAGE_TABS: Record<string, { defaultTab: string; tabs: Record<string, strin
   },
   share: { defaultTab: "webdav", tabs: { webdav: "WebDAV", fuse: "本地挂载" } },
   "cross-transfer": { defaultTab: "plain", tabs: { plain: "跨盘普传", rapid: "跨盘秒传" } },
+  subscribe: { defaultTab: "movie", tabs: { movie: "电影", tv: "剧集" } },
 };
 
 const route = useRoute();
@@ -290,7 +294,7 @@ onMounted(async () => {
     />
 
     <AdminEmptyState
-      v-if="!cachedPageComponent && !['settings', 'cross-transfer', 'share'].includes(page)"
+      v-if="!cachedPageComponent && !['settings', 'cross-transfer', 'share', 'subscribe'].includes(page)"
       icon="🚧"
       :title="`「${nav.find((n) => n.key === page)?.label}」功能开发中`"
     />
@@ -304,6 +308,7 @@ onMounted(async () => {
       />
       <CrossDriveTransferPage v-else-if="page === 'cross-transfer'" />
       <FileShareManagement v-else-if="page === 'share'" />
+      <TGSubscribePage v-else-if="page === 'subscribe'" />
       <component :is="cachedPageComponent" v-else-if="cachedPageComponent" :key="page" />
     </KeepAlive>
   </AdminShell>

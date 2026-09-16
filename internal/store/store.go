@@ -21,6 +21,12 @@ type Store struct {
 	AutomationRules     domain.AutomationRuleRepository
 	AutomationRuns      domain.AutomationRunRepository
 	QuarkTVBindings     domain.QuarkTVBindingRepository
+
+	TGChannels             domain.TGChannelRepository
+	TGQualityProfiles      domain.TGQualityProfileRepository
+	TGSubscriptions        domain.TGSubscriptionRepository
+	TGSubscriptionEpisodes domain.TGSubscriptionEpisodeRepository
+	TGMatchRecords         domain.TGMatchRecordRepository
 }
 
 // New 基于已打开的 DB 构造仓储集合。
@@ -43,5 +49,11 @@ func New(db *DB) *Store {
 		AutomationRules:     &automationRuleRepo{db: db},
 		AutomationRuns:      &automationRunRepo{db: db},
 		QuarkTVBindings:     &quarktvBindingRepo{db: db},
+
+		TGChannels:             &tgChannelRepo{db: db},
+		TGQualityProfiles:      &tgQualityProfileRepo{db: db},
+		TGSubscriptions:        &tgSubscriptionRepo{db: db},
+		TGSubscriptionEpisodes: &tgSubscriptionEpisodeRepo{db: db},
+		TGMatchRecords:         &tgMatchRecordRepo{db: db},
 	}
 }

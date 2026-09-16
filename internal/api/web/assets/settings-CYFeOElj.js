@@ -1,0 +1,1 @@
+import{x as e}from"./index-l8dSPpH7.js";function t(){return e.get(`/admin/settings`)}function n(t){return e.put(`/admin/settings`,t)}export{n,t};

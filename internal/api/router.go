@@ -48,6 +48,7 @@ import (
 	"litepan/internal/spacecleanup"
 	"litepan/internal/strm"
 	"litepan/internal/strmscrape"
+	"litepan/internal/tgsubscribe"
 	"litepan/internal/upload"
 )
 
@@ -90,6 +91,7 @@ type Deps struct {
 	BackupRestore     *backuprestore.Service
 	SpaceCleanup      *spacecleanup.Service
 	CoverExtract      *coverextract.Service
+	TGSubscribe       *tgsubscribe.Service
 	DataDir           string
 	StrmDir           string
 	OnSettingsUpdated func(map[string]string)
@@ -131,6 +133,7 @@ type Handler struct {
 	backupRestore     *backuprestore.Service
 	spaceCleanup      *spacecleanup.Service
 	coverExtract      *coverextract.Service
+	tgSubscribe       *tgsubscribe.Service
 	dataDir           string
 	strmDir           string
 	onSettingsUpdated func(map[string]string)
@@ -180,6 +183,7 @@ func NewRouter(d Deps) http.Handler {
 		backupRestore:     d.BackupRestore,
 		spaceCleanup:      d.SpaceCleanup,
 		coverExtract:      d.CoverExtract,
+		tgSubscribe:       d.TGSubscribe,
 		dataDir:           d.DataDir,
 		strmDir:           d.StrmDir,
 		onSettingsUpdated: d.OnSettingsUpdated,
@@ -441,6 +445,56 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/mounts/{id}/unmount", h.unmountFuse)
 				})
 			})
+			r.Route("/tg-subscribe", func(r chi.Router) {
+				// 配置
+				r.Get("/config", h.getTGSubscribeConfig)
+				r.Put("/config", h.updateTGSubscribeConfig)
+				r.Post("/config/test", h.testTGSubscribeBot)
+
+				// 热门推荐（TMDB）
+				r.Get("/tmdb/discover", h.tgDiscover)
+				r.Get("/tmdb/search", h.tgSearch)
+				r.Get("/tmdb/genres", h.tgGenres)
+				r.Get("/tmdb/detail", h.tgDetail)
+				r.Get("/poster", h.tgPoster)
+
+				// 频道
+				r.Get("/channels", h.listTGChannels)
+				r.Post("/channels", h.createTGChannel)
+				r.Put("/channels/{id}", h.updateTGChannel)
+				r.Delete("/channels/{id}", h.deleteTGChannel)
+				r.Post("/channels/{id}/test", h.testTGChannel)
+
+				// 订阅
+				r.Get("/subscriptions", h.listTGSubscriptions)
+				r.Get("/subscriptions/by-tmdb", h.getTGSubscriptionByTMDB)
+				r.Get("/subscriptions/{id}", h.getTGSubscription)
+				r.Post("/subscriptions", h.createTGSubscription)
+				r.Put("/subscriptions/{id}", h.updateTGSubscription)
+				r.Delete("/subscriptions/{id}", h.deleteTGSubscription)
+				r.Post("/subscriptions/{id}/status", h.setTGSubscriptionStatus)
+				r.Post("/subscriptions/{id}/reset", h.resetTGSubscription)
+				r.Get("/subscriptions/{id}/episodes", h.listTGSubscriptionEpisodes)
+
+				// 画质方案
+				r.Get("/quality-profiles", h.listTGQualityProfiles)
+				r.Post("/quality-profiles", h.createTGQualityProfile)
+				r.Put("/quality-profiles/{id}", h.updateTGQualityProfile)
+				r.Delete("/quality-profiles/{id}", h.deleteTGQualityProfile)
+				r.Post("/quality-preview", h.previewTGQuality)
+
+				// 匹配历史
+				r.Get("/records", h.listTGRecords)
+				r.Get("/records/{id}", h.getTGRecord)
+				r.Post("/records/{id}/push", h.pushTGRecord)
+				r.Post("/records/{id}/ignore", h.ignoreTGRecord)
+				r.Delete("/records", h.clearTGRecords)
+
+				// 状态
+				r.Get("/stats", h.getTGSubscribeStats)
+				r.Get("/provider-summary", h.getTGProviderSummary)
+			})
+
 			r.Post("/oauth/start", h.startOAuth)
 			r.Get("/oauth/status/{session_id}", h.oauthStatus)
 			r.Post("/oauth/confirm-received/{session_id}", h.oauthConfirmReceived)

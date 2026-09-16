@@ -98,6 +98,28 @@ const (
 	KeyMOJavMaxDirs       = "mo_jav_max_dirs"
 	KeyMOJavDeleteTypes   = "mo_jav_delete_types"
 	KeyMOJavDeleteExclude = "mo_jav_delete_exclude_types"
+
+	// TG 影片订阅。这些项全部 Hidden —— 不希望在「系统设置」里出现第二个入口，
+	// 只在该功能自己的配置弹窗里通过 /api/tg-subscribe/config 读写。
+	KeyTGBotEnabled          = "tg_bot_enabled"
+	KeyTGBotToken            = "tg_bot_token"
+	KeyTGBotAPIHost          = "tg_bot_api_host"
+	KeyTGBotProxyEnabled     = "tg_bot_proxy_enabled"
+	KeyTGBotProxyURL         = "tg_bot_proxy_url"
+	KeyTGBotProxyUsername    = "tg_bot_proxy_username"
+	KeyTGBotProxyPassword    = "tg_bot_proxy_password"
+	KeyTGBotAutoPush         = "tg_bot_auto_push"
+	KeyTGBotDefaultAccountID = "tg_bot_default_account_id"
+	KeyTGBotDefaultParentID  = "tg_bot_default_parent_id"
+	KeyTGBotDefaultPath      = "tg_bot_default_display_path"
+	KeyTGBotProfileID        = "tg_bot_default_quality_profile_id"
+	KeyTGBotCollectWindowMin = "tg_bot_collect_window_min"
+	KeyTGBotMaxPushPerHour   = "tg_bot_max_push_per_hour"
+	KeyTGBotUpdateOffset     = "tg_bot_update_offset"
+	KeyTGBotLastPollAt       = "tg_bot_last_poll_at"
+	KeyTGBotStatus           = "tg_bot_status"
+	KeyTGBotStatusMessage    = "tg_bot_status_message"
+	KeyTGBotBotName          = "tg_bot_name"
 )
 
 // Type 决定后台表单控件与校验方式。
@@ -363,6 +385,29 @@ func defaultSpecs() []Spec {
 			Default: "vidhub",
 			Hidden:  true,
 		},
+
+		// TG 影片订阅：全部 Hidden，由功能自己的配置弹窗读写。
+		// tg_bot_auto_push 默认 false 是刻意的安全设计 —— 用户先开「观察模式」跑一段，
+		// 确认匹配历史里的判定符合预期，再打开自动推送。
+		{Key: KeyTGBotEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyTGBotToken, Type: TypeString, Default: "", Sensitive: true, Hidden: true},
+		{Key: KeyTGBotAPIHost, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyTGBotProxyEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyTGBotProxyURL, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyTGBotProxyUsername, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyTGBotProxyPassword, Type: TypeString, Default: "", Sensitive: true, Hidden: true},
+		{Key: KeyTGBotAutoPush, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyTGBotDefaultAccountID, Type: TypeString, Default: "0", Hidden: true},
+		{Key: KeyTGBotDefaultParentID, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyTGBotDefaultPath, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyTGBotProfileID, Type: TypeString, Default: "0", Hidden: true},
+		{Key: KeyTGBotCollectWindowMin, Type: TypeInt, Default: "5", Min: intp(0), Max: intp(1440), Hidden: true},
+		{Key: KeyTGBotMaxPushPerHour, Type: TypeInt, Default: "20", Min: intp(1), Max: intp(500), Hidden: true},
+		{Key: KeyTGBotUpdateOffset, Type: TypeString, Default: "0", Hidden: true},
+		{Key: KeyTGBotLastPollAt, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyTGBotStatus, Type: TypeString, Default: "unknown", Hidden: true},
+		{Key: KeyTGBotStatusMessage, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyTGBotBotName, Type: TypeString, Default: "", Hidden: true},
 	}
 }
 

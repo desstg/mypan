@@ -8,12 +8,17 @@ interface Tab {
   changed?: boolean;
 }
 
-defineProps<{ tabs: Tab[]; modelValue: string }>();
+defineProps<{ tabs: Tab[]; modelValue: string; icon?: string }>();
 const emit = defineEmits<{ "update:modelValue": [string] }>();
 </script>
 
 <template>
-  <AppTabBar :tabs="tabs" :model-value="modelValue" @update:model-value="emit('update:modelValue', $event)">
+  <AppTabBar
+    :tabs="tabs"
+    :model-value="modelValue"
+    :icon="icon"
+    @update:model-value="emit('update:modelValue', $event)"
+  >
     <template #actions>
       <slot name="actions" />
     </template>

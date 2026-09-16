@@ -26,6 +26,7 @@ import (
 	"litepan/internal/settings"
 	"litepan/internal/strm"
 	"litepan/internal/strmscrape"
+	"litepan/internal/tgsubscribe"
 	"litepan/internal/upload"
 )
 
@@ -50,6 +51,7 @@ type servicesBundle struct {
 	fnosProxy        *fnosproxy.Service
 	favorites        *favorites.Service
 	quarktv          *quarktv.Service
+	tgSubscribe      *tgsubscribe.Service
 }
 
 func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *coreBundle) *servicesBundle {
@@ -188,6 +190,25 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	automationSvc.SetStartupGate(startupGate)
 	automationSvc.Register(core.bus)
 	strmSvc.SetAutomationManagedChecker(automationSvc.IsStrmTaskManaged)
+	// TG 影片订阅：热门推荐（TMDB）+ 频道监听 + 磁链选优推送。
+	// notification 服务在 HTTP 装配阶段才建好，这里先留空，稍后 SetNotifications 补注入。
+	tgSubscribeSvc := tgsubscribe.New(tgsubscribe.Options{
+		Channels: st.store.TGChannels,
+		Quality:  st.store.TGQualityProfiles,
+		Subs:     st.store.TGSubscriptions,
+		Episodes: st.store.TGSubscriptionEpisodes,
+		Records:  st.store.TGMatchRecords,
+		Offline:  offlineDownloadSvc,
+		Folders:  fileSvc,
+		Media:    mediaOrganizeSvc,
+		Settings: st.settings,
+		Bus:      core.bus,
+		Log:      logs.For(logx.ModuleSystem),
+		DataDir:  cfg.DataDir,
+	})
+	tgSubscribeSvc.SetStartupGate(startupGate)
+	// 必须在 offlineDownloadSvc 之后构造，才能订阅它的下载完成事件。
+	tgSubscribeSvc.Register(core.bus)
 	return &servicesBundle{
 		files:            fileSvc,
 		uploads:          uploadSvc,
@@ -209,5 +230,6 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		fnosProxy:        fnosProxySvc,
 		favorites:        favoritesSvc,
 		quarktv:          quarktvSvc,
+		tgSubscribe:      tgSubscribeSvc,
 	}
 }

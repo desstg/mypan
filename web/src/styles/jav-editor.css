@@ -57,6 +57,21 @@
   color: var(--brand);
 }
 
+/* 有序列里的优先级序号：第 N 名就是第 N 优先 */
+.jav-chip__order {
+  flex: none;
+  min-width: 16px;
+  height: 16px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--brand) 22%, transparent);
+  color: var(--brand);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
 .jav-chip__text {
   overflow: hidden;
   text-overflow: ellipsis;

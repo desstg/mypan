@@ -29,6 +29,7 @@ import (
 	"litepan/internal/settings"
 	"litepan/internal/store"
 	"litepan/internal/strm"
+	"litepan/internal/tgsubscribe"
 	"litepan/internal/upload"
 )
 
@@ -55,6 +56,7 @@ type App struct {
 	strm             *strm.Service
 	mediaOrganize    *mediaorganize.Service
 	automation       *automation.Service
+	tgSubscribe      *tgsubscribe.Service
 	fuse             *fusemount.Service
 	cacheRetention   *cacheretention.Service
 	embyProxy        *embyproxy.Service
@@ -138,6 +140,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		strm:             svc.strm,
 		mediaOrganize:    svc.mediaOrganize,
 		automation:       svc.automation,
+		tgSubscribe:      svc.tgSubscribe,
 		fuse:             svc.fuse,
 		cacheRetention:   svc.cacheRetention,
 		embyProxy:        svc.embyProxy,
@@ -164,6 +167,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.automation != nil {
 		a.automation.Start(ctx)
+	}
+	if a.tgSubscribe != nil {
+		a.tgSubscribe.Start(ctx)
 	}
 	if a.fuse != nil {
 		a.fuse.Start(ctx)
@@ -234,6 +240,11 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// TG 订阅必须在 bus.Close 之前停：长轮询回来的消息会去 publish 事件，
+	// 总机关掉之后再 publish 会 panic。
+	if a.tgSubscribe != nil {
+		a.tgSubscribe.Stop()
+	}
 	if a.offlineDownloads != nil {
 		offlineCtx, cancelOffline := context.WithTimeout(ctx, shutdownOfflineBudget)
 		if err := a.offlineDownloads.Stop(offlineCtx); err != nil {

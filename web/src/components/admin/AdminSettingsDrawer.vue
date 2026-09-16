@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import AppButton from "@/components/base/AppButton.vue";
 
-defineProps<{
-  open: boolean;
-  title: string;
-  saving?: boolean;
-  canSave?: boolean;
-}>();
+withDefaults(
+  defineProps<{
+    open: boolean;
+    title: string;
+    saving?: boolean;
+    canSave?: boolean;
+    /** 内容自带保存入口（或根本不需要保存）时隐藏底部操作区。 */
+    hideFoot?: boolean;
+  }>(),
+  { saving: false, canSave: false, hideFoot: false },
+);
 
 const emit = defineEmits<{
   close: [];
@@ -40,7 +45,7 @@ const emit = defineEmits<{
           <div class="admin-settings-drawer__body">
             <slot />
           </div>
-          <div class="admin-settings-drawer__foot">
+          <div v-if="!hideFoot" class="admin-settings-drawer__foot">
             <AppButton type="button" variant="secondary" @click="emit('cancel')">取消</AppButton>
             <AppButton type="button" variant="primary" :disabled="!canSave || saving" @click="emit('save')">
               {{ saving ? "保存中…" : "保存设置" }}

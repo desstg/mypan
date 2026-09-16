@@ -1,0 +1,1 @@
+var e=`webdav_cache_enabled`,t=new Set([`cache_enabled`,`cache_ttl`,`cache_max_items`,`cache_memory_limit_mb`,`cache_persistence_enabled`,`cache_persistence_interval_minutes`,e]);function n(e){return t.has(e)}export{e as n,n as r,t};

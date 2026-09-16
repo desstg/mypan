@@ -69,6 +69,19 @@ func (s *Service) LookupTMDBDetail(ctx context.Context, id, mediaType, language 
 	return client.Lookup(ctx, id, mediaType)
 }
 
+// TMDBClient 按当前设置构造一个 TMDB 客户端（API Key / 语言 / 代理 / 自建反代全部复用
+// 媒体整理那一套配置），供需要直接调 TMDB 的其它功能复用。
+//
+// language 留空时用设置里的默认语言。
+func (s *Service) TMDBClient(language string) (*tmdb.Client, error) {
+	return s.newTMDBClient(language)
+}
+
+// TMDBLanguage 返回设置里的默认 TMDB 语言。
+func (s *Service) TMDBLanguage() string {
+	return stringFromAny(SettingsDict(s.settings)["tmdb_language"])
+}
+
 func normalizeTMDBDetailID(id string) (string, error) {
 	id = strings.TrimSpace(id)
 	numericID, err := strconv.ParseUint(id, 10, 64)
