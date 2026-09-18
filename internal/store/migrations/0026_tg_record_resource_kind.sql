@@ -1,0 +1,13 @@
+-- 记录资源的种类（magnet / ed2k / share_115 / share_quark / http）。
+--
+-- 全部历史行都是磁力，默认值 'magnet' 即为正确回填，不需要 UPDATE。
+--
+-- ⚠️ 两个唯一索引（idx_tg_rec_msg_magnet / idx_tg_rec_sub_magnet）**不需要重建**：
+-- 资源指纹（magnet_hash 列）按类型带前缀 —— ed2k 是 `ed2k:<32位hex>`、
+-- 直链是 `http:<sha1>`、分享是 `115:<code>` / `quark:<code>`，而磁力保持**裸 btih**
+-- （40 位 hex 或 `btmh:` 前缀）。各类型的值域两两不相交，所以现有索引本来就是
+-- 正确的跨类型去重键。
+--
+-- 也因此磁力的指纹绝不能改成带 `magnet:` 前缀：那会让升级前的历史行与升级后新抽的
+-- 值不再相等，去重索引失效，已经推送过的磁力会被重新推送一次。
+ALTER TABLE tg_match_records ADD COLUMN resource_kind TEXT NOT NULL DEFAULT 'magnet';

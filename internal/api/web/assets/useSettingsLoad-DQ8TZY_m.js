@@ -1,1 +1,0 @@
-import{ot as e}from"./vue-vendor-DI9kKSTB.js";import{b as t,j as n}from"./index-l8dSPpH7.js";function r(r=!0){let i=e(r),a=e(!1);async function o(e,r=`加载设置失败`,o){let s=o?.silent===!0;s||(i.value=!0);try{let t=await e();return a.value=!0,t}catch(e){n.error(t(e,r));return}finally{s||(i.value=!1)}}return{loading:i,loaded:a,runLoad:o}}export{r as t};

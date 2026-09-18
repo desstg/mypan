@@ -331,6 +331,37 @@ func (r *tgSubscriptionRepo) List(ctx context.Context, status string) ([]*domain
 	return out, wrapDB(rows.Err())
 }
 
+// SetStatusBatch 一条 UPDATE 改多条订阅的状态。
+//
+// 只写 status 与 pending_deadline_at 两列 —— **不能整行走 Update**：
+// 那是「读出来 → 改一个字段 → 整行写回去」，批量场景下几条并发的批量请求
+// 会互相把对方刚写进去的字段盖掉。
+//
+// 状态不是 active 时窗口里的候选没有意义，这里与单条路径（Service.SetSubscriptionStatus）
+// 保持一致，把 pending_deadline_at 清空。
+func (r *tgSubscriptionRepo) SetStatusBatch(ctx context.Context, ids []int64, status string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, status, tsValue(time.Time{}))
+	if status == domain.TGSubStatusActive {
+		args[1] = nil
+	}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	res, err := r.db.write.ExecContext(ctx, `
+UPDATE tg_subscriptions SET status=?, pending_deadline_at=?, updated_at=CURRENT_TIMESTAMP
+WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return 0, wrapDB(err)
+	}
+	n, err := res.RowsAffected()
+	return n, wrapDB(err)
+}
+
 func (r *tgSubscriptionRepo) ListPending(ctx context.Context, now time.Time) ([]*domain.TGSubscription, error) {
 	rows, err := r.db.read.QueryContext(ctx, `
 SELECT `+tgSubscriptionColumns+` FROM tg_subscriptions
@@ -487,7 +518,7 @@ func (r *tgSubscriptionEpisodeRepo) DeleteBySubscription(ctx context.Context, su
 type tgMatchRecordRepo struct{ db *DB }
 
 const tgMatchRecordColumns = `id, channel_id, chat_title, message_id, message_date, raw_name, name_source,
-       magnet, magnet_hash, size_bytes, parsed_title, parsed_year, season, episode, episode_end, is_batch,
+       resource_kind, magnet, magnet_hash, size_bytes, parsed_title, parsed_year, season, episode, episode_end, is_batch,
        resolution, video_codec, source_tag, subscription_id, match_score, quality_score, status, reason,
        offline_task_id, account_id, target_parent_id, provider_kind, retry_count, next_retry_at,
        created_at, updated_at`
@@ -500,13 +531,13 @@ func (r *tgMatchRecordRepo) Create(ctx context.Context, m *domain.TGMatchRecord)
 	}
 	res, err := r.db.write.ExecContext(ctx, `
 INSERT INTO tg_match_records(channel_id, chat_title, message_id, message_date, raw_name, name_source,
-       magnet, magnet_hash, size_bytes, parsed_title, parsed_year, season, episode, episode_end, is_batch,
+       resource_kind, magnet, magnet_hash, size_bytes, parsed_title, parsed_year, season, episode, episode_end, is_batch,
        resolution, video_codec, source_tag, subscription_id, match_score, quality_score, status, reason,
        offline_task_id, account_id, target_parent_id, provider_kind, retry_count, next_retry_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT DO NOTHING`,
 		m.ChannelID, m.ChatTitle, m.MessageID, tsValue(m.MessageDate), m.RawName, m.NameSource,
-		m.Magnet, m.MagnetHash, m.SizeBytes, m.ParsedTitle, m.ParsedYear, m.Season, m.Episode, m.EpisodeEnd, boolToInt(m.IsBatch),
+		resourceKindOrDefault(m.ResourceKind), m.Magnet, m.MagnetHash, m.SizeBytes, m.ParsedTitle, m.ParsedYear, m.Season, m.Episode, m.EpisodeEnd, boolToInt(m.IsBatch),
 		m.Resolution, m.VideoCodec, m.SourceTag, m.SubscriptionID, m.MatchScore, m.QualityScore, m.Status, m.Reason,
 		m.OfflineTaskID, m.AccountID, m.TargetParentID, m.ProviderKind, m.RetryCount, tsValue(m.NextRetryAt),
 	)
@@ -518,6 +549,18 @@ ON CONFLICT DO NOTHING`,
 	}
 	id, err := res.LastInsertId()
 	return id, wrapDB(err)
+}
+
+// resourceKindOrDefault 把空 Kind 折算成 magnet。
+//
+// 保护两条路径：迁移前的旧行（DB 默认值已经兜住）与内存库测试里手工构造的记录
+// （`&domain.TGMatchRecord{...}` 不会填 Kind）。空字符串直接落库会让
+// 「按 kind 分派投递器」判定成「没有投递器」，把本来能推的磁力误判成不支持。
+func resourceKindOrDefault(kind string) string {
+	if kind = strings.TrimSpace(kind); kind != "" {
+		return kind
+	}
+	return "magnet"
 }
 
 func (r *tgMatchRecordRepo) Update(ctx context.Context, m *domain.TGMatchRecord) error {
@@ -673,6 +716,23 @@ func (r *tgMatchRecordRepo) CountByStatus(ctx context.Context) (map[string]int, 
 	return out, wrapDB(rows.Err())
 }
 
+func (r *tgMatchRecordRepo) CountByChannel(ctx context.Context) (map[int64]int64, error) {
+	rows, err := r.db.read.QueryContext(ctx, `SELECT channel_id, COUNT(*) FROM tg_match_records GROUP BY channel_id`)
+	if err != nil {
+		return nil, wrapDB(err)
+	}
+	defer rows.Close()
+	out := map[int64]int64{}
+	for rows.Next() {
+		var channelID, n int64
+		if err := rows.Scan(&channelID, &n); err != nil {
+			return nil, wrapDB(err)
+		}
+		out[channelID] = n
+	}
+	return out, wrapDB(rows.Err())
+}
+
 func (r *tgMatchRecordRepo) ClearBefore(ctx context.Context, before time.Time) (int64, error) {
 	res, err := r.db.write.ExecContext(ctx,
 		`DELETE FROM tg_match_records WHERE created_at < ?`, before.UTC().Format(tsLayout))
@@ -688,12 +748,13 @@ func scanTGMatchRecord(row tgScanner) (*domain.TGMatchRecord, error) {
 	var messageDate, nextRetryAt, createdAt, updatedAt sql.NullString
 	var isBatch int
 	if err := row.Scan(&m.ID, &m.ChannelID, &m.ChatTitle, &m.MessageID, &messageDate, &m.RawName, &m.NameSource,
-		&m.Magnet, &m.MagnetHash, &m.SizeBytes, &m.ParsedTitle, &m.ParsedYear, &m.Season, &m.Episode, &m.EpisodeEnd, &isBatch,
+		&m.ResourceKind, &m.Magnet, &m.MagnetHash, &m.SizeBytes, &m.ParsedTitle, &m.ParsedYear, &m.Season, &m.Episode, &m.EpisodeEnd, &isBatch,
 		&m.Resolution, &m.VideoCodec, &m.SourceTag, &m.SubscriptionID, &m.MatchScore, &m.QualityScore, &m.Status, &m.Reason,
 		&m.OfflineTaskID, &m.AccountID, &m.TargetParentID, &m.ProviderKind, &m.RetryCount, &nextRetryAt,
 		&createdAt, &updatedAt); err != nil {
 		return nil, wrapDB(err)
 	}
+	m.ResourceKind = resourceKindOrDefault(m.ResourceKind)
 	m.IsBatch = isBatch != 0
 	m.MessageDate = parseTS(messageDate)
 	m.NextRetryAt = parseTS(nextRetryAt)

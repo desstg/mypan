@@ -26,11 +26,6 @@ func (s *Service) GetSettings() Settings {
 	out.TmdbAPIHost = mediaorganize.PlannerTMDBAPIHost(enriched)
 	out.TmdbImageHost = mediaorganize.PlannerTMDBImageHost(enriched)
 	out.TmdbRequestIntervalMS = s.settings.Int(settings.KeyMOTmdbRequestIntervalMS)
-	proxy := mediaorganize.TmdbProxyFromSettings(enriched)
-	out.ProxyEnabled = proxy.Enabled
-	out.ProxyURL = proxy.URL
-	out.ProxyUsername = proxy.Username
-	out.ProxyPassword = proxy.Password
 	return out
 }
 
@@ -52,16 +47,7 @@ func (s *Service) UpdateSettings(ctx context.Context, in Settings) error {
 	if in.TmdbRequestIntervalMS > 0 {
 		payload[settings.KeyMOTmdbRequestIntervalMS] = strconv.Itoa(in.TmdbRequestIntervalMS)
 	}
-	if in.ProxyEnabled {
-		payload[settings.KeyMOProxyEnabled] = "true"
-	} else {
-		payload[settings.KeyMOProxyEnabled] = "false"
-	}
-	payload[settings.KeyMOProxyURL] = strings.TrimSpace(in.ProxyURL)
-	payload[settings.KeyMOProxyUsername] = strings.TrimSpace(in.ProxyUsername)
-	if pwd := strings.TrimSpace(in.ProxyPassword); pwd != "" {
-		payload[settings.KeyMOProxyPassword] = pwd
-	}
+	// 代理已收敛成「系统设置 → 其他设置」里的全局项，这一页不再读写它。
 	return s.settings.Update(ctx, payload)
 }
 

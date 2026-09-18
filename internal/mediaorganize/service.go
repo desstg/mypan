@@ -554,7 +554,7 @@ func (s *Service) ValidateTMDB(ctx context.Context, overrides map[string]any) (m
 	client := tmdb.NewClient(tmdb.Options{
 		APIKey:        apiKey,
 		Language:      language,
-		ProxyURL:      buildProxyURL(merged),
+		ProxyURL:      PlannerProxyURL(merged),
 		APIBaseHost:   stringFromAny(merged["tmdb_api_host"]),
 		ImageBaseHost: stringFromAny(merged["tmdb_image_host"]),
 	})
@@ -566,7 +566,6 @@ func (s *Service) ValidateTMDB(ctx context.Context, overrides map[string]any) (m
 		"image_ok":     image.OK,
 		"image_status": image.StatusCode,
 		"language":     language,
-		"proxy_used":   buildProxyURL(merged) != "",
 	}, nil
 }
 
@@ -936,15 +935,6 @@ func isNormalSkip(errText, reason string) bool {
 		}
 	}
 	return false
-}
-
-func buildProxyURL(settingsDict map[string]any) string {
-	return tmdb.BuildProxyURL(tmdb.ProxyConfig{
-		Enabled:  rules.SettingBool(settingsDict["proxy_enabled"], false),
-		URL:      stringFromAny(settingsDict["proxy_url"]),
-		Username: stringFromAny(settingsDict["proxy_username"]),
-		Password: stringFromAny(settingsDict["proxy_password"]),
-	})
 }
 
 func stringFromAny(v any) string {

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"litepan/internal/domain"
-	"litepan/internal/offlinedownload"
 	"litepan/internal/settings"
 )
 
@@ -30,6 +29,15 @@ type ChannelView struct {
 	LastPostAt    string `json:"last_post_at,omitempty"`
 	MatchedCount  int64  `json:"matched_count"`
 	CreatedAt     string `json:"created_at,omitempty"`
+	// BackfillPosts 只在「新增频道」的那次响应里带值：首次回填落库了多少条历史帖。
+	// 用户刚点完添加时最想知道的就是这个，之后不再有意义。
+	BackfillPosts int64 `json:"backfill_posts,omitempty"`
+	// RecordCount 是这个频道累计产出的匹配记录数。
+	//
+	// 与 MatchedCount 的区别很重要：MatchedCount 其实是「已见帖子数」（repo 里
+	// matched_count 每次 MarkPost 自增），名字在旧架构下就已经误导了。
+	// 帖子数一直涨而产出一直是 0，就是「这个频道抓不到内容」的信号。
+	RecordCount int64 `json:"record_count"`
 }
 
 // SubscriptionView 是订阅的对外形态。
@@ -79,13 +87,18 @@ type EpisodeView struct {
 
 // RecordView 是匹配记录的对外形态。
 type RecordView struct {
-	ID             int64   `json:"id"`
-	ChannelID      int64   `json:"channel_id"`
-	ChatTitle      string  `json:"chat_title"`
-	MessageID      int64   `json:"message_id"`
-	MessageDate    string  `json:"message_date,omitempty"`
-	RawName        string  `json:"raw_name"`
-	NameSource     string  `json:"name_source"`
+	ID          int64  `json:"id"`
+	ChannelID   int64  `json:"channel_id"`
+	ChatTitle   string `json:"chat_title"`
+	MessageID   int64  `json:"message_id"`
+	MessageDate string `json:"message_date,omitempty"`
+	RawName     string `json:"raw_name"`
+	NameSource  string `json:"name_source"`
+	// ResourceKind 是资源类型；KindLabel 是它的中文名，前端直接显示。
+	ResourceKind string `json:"resource_kind"`
+	KindLabel    string `json:"kind_label"`
+	// Magnet 是资源的原始链接。字段名是历史遗留（ed2k 与分享链也在这里），
+	// 前端显示时用 KindLabel 而不是硬编码「磁力链接」。
 	Magnet         string  `json:"magnet"`
 	MagnetHash     string  `json:"magnet_hash"`
 	SizeBytes      int64   `json:"size_bytes"`
@@ -121,15 +134,9 @@ type QualityProfileView struct {
 	Config    domain.TGQualityConfig `json:"config"`
 }
 
-// ConfigView 是配置弹窗要的全部配置（Token 打码）。
+// ConfigView 是配置弹窗要的全部配置。
 type ConfigView struct {
 	Enabled          bool   `json:"enabled"`
-	TokenSet         bool   `json:"token_set"`
-	APPHost          string `json:"api_host"`
-	ProxyEnabled     bool   `json:"proxy_enabled"`
-	ProxyURL         string `json:"proxy_url"`
-	ProxyUsername    string `json:"proxy_username"`
-	ProxyPasswordSet bool   `json:"proxy_password_set"`
 	AutoPush         bool   `json:"auto_push"`
 	DefaultAccountID int64  `json:"default_account_id"`
 	DefaultParentID  string `json:"default_parent_id"`
@@ -137,20 +144,24 @@ type ConfigView struct {
 	QualityProfileID int64  `json:"default_quality_profile_id"`
 	CollectWindowMin int    `json:"collect_window_min"`
 	MaxPushPerHour   int    `json:"max_push_per_hour"`
-	Status           string `json:"status"`
-	StatusMessage    string `json:"status_message"`
-	BotName          string `json:"bot_name"`
+	// PollIntervalSec / BackfillPages 是网页预览抓取的两个可调项。
+	PollIntervalSec int `json:"poll_interval_sec"`
+	BackfillPages   int `json:"backfill_pages"`
+	// EffectiveIntervalSec 是实际生效的每频道间隔 —— 频道一多，基准会被
+	// 「频道数 × 请求间隔」抬高，这个值让用户看得见真实节奏。
+	EffectiveIntervalSec int    `json:"effective_interval_sec"`
+	ChannelCount         int    `json:"channel_count"`
+	Status               string `json:"status"`
+	StatusMessage        string `json:"status_message"`
+	LastPollAt           string `json:"last_poll_at"`
 }
 
-// ConfigInput 是写配置的入参。Token / 密码留空表示「不改」。
+// ConfigInput 是写配置的入参。
+//
+// 代理不在这里 —— 它已收敛成「系统设置 → 其他设置」里的全局项（proxy_*），
+// 这一页只负责抓取相关的参数。
 type ConfigInput struct {
 	Enabled          bool   `json:"enabled"`
-	Token            string `json:"token"`
-	APPHost          string `json:"api_host"`
-	ProxyEnabled     bool   `json:"proxy_enabled"`
-	ProxyURL         string `json:"proxy_url"`
-	ProxyUsername    string `json:"proxy_username"`
-	ProxyPassword    string `json:"proxy_password"`
 	AutoPush         bool   `json:"auto_push"`
 	DefaultAccountID int64  `json:"default_account_id"`
 	DefaultParentID  string `json:"default_parent_id"`
@@ -158,6 +169,8 @@ type ConfigInput struct {
 	QualityProfileID int64  `json:"default_quality_profile_id"`
 	CollectWindowMin int    `json:"collect_window_min"`
 	MaxPushPerHour   int    `json:"max_push_per_hour"`
+	PollIntervalSec  int    `json:"poll_interval_sec"`
+	BackfillPages    int    `json:"backfill_pages"`
 }
 
 // ————————————————————— 配置 —————————————————————
@@ -165,20 +178,16 @@ type ConfigInput struct {
 func (s *Service) ConfigView(ctx context.Context) ConfigView {
 	view := ConfigView{
 		Enabled:          s.settings.Bool(settings.KeyTGBotEnabled),
-		TokenSet:         strings.TrimSpace(s.settings.String(settings.KeyTGBotToken)) != "",
-		APPHost:          strings.TrimSpace(s.settings.String(settings.KeyTGBotAPIHost)),
-		ProxyEnabled:     s.settings.Bool(settings.KeyTGBotProxyEnabled),
-		ProxyURL:         strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotProxyURL)),
-		ProxyUsername:    strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotProxyUsername)),
-		ProxyPasswordSet: strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotProxyPassword)) != "",
 		AutoPush:         s.settings.Bool(settings.KeyTGBotAutoPush),
 		DefaultParentID:  strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotDefaultParentID)),
 		DefaultPath:      strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotDefaultPath)),
 		CollectWindowMin: s.settings.Int(settings.KeyTGBotCollectWindowMin),
 		MaxPushPerHour:   s.maxPushPerHour(),
+		PollIntervalSec:  int(s.pollInterval() / time.Second),
+		BackfillPages:    s.backfillPages(),
 		Status:           strings.TrimSpace(s.settings.String(settings.KeyTGBotStatus)),
 		StatusMessage:    strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotStatusMessage)),
-		BotName:          strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotStatusMessage)),
+		LastPollAt:       s.lastPollAt(),
 	}
 	if raw := strings.TrimSpace(s.settings.String(settings.KeyTGBotDefaultAccountID)); raw != "" {
 		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
@@ -186,19 +195,17 @@ func (s *Service) ConfigView(ctx context.Context) ConfigView {
 		}
 	}
 	view.QualityProfileID = s.defaultQualityProfileID()
-	_ = ctx
+	if rows, err := s.channels.List(ctx, false); err == nil {
+		view.ChannelCount = len(rows)
+	}
+	view.EffectiveIntervalSec = int(effectiveBase(s.pollInterval(), maxInt(view.ChannelCount, 1), s.requestGap()) / time.Second)
 	return view
 }
 
-// UpdateConfig 写配置。Token / 代理密码留空表示保持原值 ——
-// 前端只会拿到「是否已设置」，不该被迫回传明文。
+// UpdateConfig 写配置。代理不在这里 —— 它已收敛成全局项，见 ConfigInput 的注释。
 func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 	patch := map[string]string{
 		settings.KeyTGBotEnabled:          boolString(in.Enabled),
-		settings.KeyTGBotAPIHost:          strings.TrimSpace(in.APPHost),
-		settings.KeyTGBotProxyEnabled:     boolString(in.ProxyEnabled),
-		settings.KeyTGBotProxyURL:         strings.TrimSpace(in.ProxyURL),
-		settings.KeyTGBotProxyUsername:    strings.TrimSpace(in.ProxyUsername),
 		settings.KeyTGBotAutoPush:         boolString(in.AutoPush),
 		settings.KeyTGBotDefaultParentID:  strings.TrimSpace(in.DefaultParentID),
 		settings.KeyTGBotDefaultPath:      strings.TrimSpace(in.DefaultPath),
@@ -207,41 +214,54 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 		settings.KeyTGBotCollectWindowMin: strconv.Itoa(maxInt(in.CollectWindowMin, 0)),
 		settings.KeyTGBotMaxPushPerHour:   strconv.Itoa(maxInt(in.MaxPushPerHour, 1)),
 	}
-	if token := strings.TrimSpace(in.Token); token != "" {
-		patch[settings.KeyTGBotToken] = token
+	// 抓取间隔与回填页数只在用户真的传了值时才写 —— 0 是合法的「不回填」，
+	// 但把它当成「没填」会让关闭回填这个操作失效。所以用 >0 判断间隔，
+	// 回填页数则直接钳制到合法区间。
+	if in.PollIntervalSec > 0 {
+		patch[settings.KeyTGPreviewPollIntervalSec] = strconv.Itoa(in.PollIntervalSec)
 	}
-	if pwd := strings.TrimSpace(in.ProxyPassword); pwd != "" {
-		patch[settings.KeyTGBotProxyPassword] = pwd
+	if in.BackfillPages >= 0 {
+		pages := in.BackfillPages
+		if pages > maxBackfillPages {
+			pages = maxBackfillPages
+		}
+		patch[settings.KeyTGPreviewBackfillPages] = strconv.Itoa(pages)
 	}
 	if err := s.settings.Update(ctx, patch); err != nil {
 		return err
 	}
-	// 配置变了必须重建客户端与匹配快照。
-	s.mu.Lock()
-	s.clientKey = ""
-	s.client = nil
-	s.mu.Unlock()
+	// 配置变了必须重建抓取客户端与匹配快照（超时与间隔都可能改；
+	// 代理改了也会走到这里 —— 全局设置一变，这个缓存就该失效）。
+	s.resetPreviewClient()
 	s.InvalidateSnapshot()
 	return nil
 }
 
-// TestBot 探活：getMe + 网络连通性。
-func (s *Service) TestBot(ctx context.Context) (string, error) {
-	client := s.clientFor()
-	if client == nil || !client.Ready() {
-		return "", domain.Errorf(domain.CodeValidation, "请先填写 Bot Token")
+// probeChannelUsername 是探活用的固定频道：Telegram 官方频道，公开、长期存在、
+// 一定有帖子。用它一次验证三件事：网络通不通、代理对不对、页面结构还认不认得。
+const probeChannelUsername = "telegram"
+
+// TestConnection 抓一次公开预览做探活。
+//
+// 返回一句人类可读的结论。失败时给出可操作的原因（多半是代理没配）。
+func (s *Service) TestConnection(ctx context.Context) (string, error) {
+	fetcher := s.previewFor()
+	if fetcher == nil {
+		return "", errNoFetcher
 	}
-	me, err := client.GetMe(ctx)
+	page, err := fetcher.Fetch(ctx, probeChannelUsername, 0)
 	if err != nil {
-		return "", domain.Errorf(domain.CodeValidation, "连接 Telegram 失败：%s", describeError(err))
+		_ = s.settings.UpdateSilent(ctx, map[string]string{
+			settings.KeyTGBotStatus:        domain.TGChannelStatusError,
+			settings.KeyTGBotStatusMessage: describePreviewError(err),
+		})
+		return "", domain.Errorf(domain.CodeValidation, "%s", describePreviewError(err))
 	}
-	name := "@" + strings.TrimSpace(me.Username)
 	_ = s.settings.UpdateSilent(ctx, map[string]string{
 		settings.KeyTGBotStatus:        domain.TGChannelStatusOK,
 		settings.KeyTGBotStatusMessage: "",
-		settings.KeyTGBotBotName:       name,
 	})
-	return name, nil
+	return "能访问 t.me，抓到 " + page.Title + " 的 " + strconv.Itoa(len(page.Posts)) + " 条帖子", nil
 }
 
 // ————————————————————— 频道 —————————————————————
@@ -251,9 +271,18 @@ func (s *Service) ListChannels(ctx context.Context) ([]ChannelView, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 产出数一次查完再分发，避免每个频道一次查询。
+	counts, err := s.records.CountByChannel(ctx)
+	if err != nil {
+		// 统计失败不该让整个列表挂掉 —— 少一列而已。
+		s.log.Warn("tg subscribe count records by channel failed", "err", err)
+		counts = nil
+	}
 	out := make([]ChannelView, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, channelView(row))
+		view := channelView(row)
+		view.RecordCount = counts[row.ID]
+		out = append(out, view)
 	}
 	return out, nil
 }
@@ -285,108 +314,186 @@ type ChannelProbe struct {
 	Username string `json:"username"`
 	Title    string `json:"title"`
 	Type     string `json:"type"`
-	BotName  string `json:"bot_name"`
-	IsAdmin  bool   `json:"is_admin"`
+	// PostCount 是校验时抓到的帖子数（每页 20 条）。
+	PostCount int `json:"post_count"`
+	// LatestMessageID 是抓到的最新一条帖子的 message id。
+	LatestMessageID int64  `json:"latest_message_id"`
+	LatestPostAt    string `json:"latest_post_at,omitempty"`
+	// URLButtonCount / BareButtonCount 用于判断「这个频道抓不到东西」：
+	// 网页预览只渲染 url_button，靠「点击复制」按钮发资源的频道会全是 bare。
+	URLButtonCount  int `json:"url_button_count"`
+	BareButtonCount int `json:"bare_button_count"`
+
+	// ————— 体检：对最近一页帖子跑一遍真实抽取器的结果 —————
+	//
+	// 这几个字段回答的是「这个频道到底抓得到什么」，比上面两个按钮计数准得多：
+	// 按钮多不代表抓得到资源（可能全是机器人深链或频道互推）。
+	ResourceCounts []ProbeResourceCount `json:"resource_counts"`
+	// ExternalHosts 是正文链接里指向第三方站点的域名（最多 3 个）。非空且一条资源
+	// 都没抽到时，说明这个频道的正文链接都在中转站上。
+	ExternalHosts []string `json:"external_hosts,omitempty"`
+	// BotDeepLinks 是指向 @xxx_bot 的按钮/深链数，点进去私聊机器人才拿得到下载地址。
+	BotDeepLinks int `json:"bot_deep_links"`
+	// DiscardedPosts 是抽到了资源、但发布名不像影视资源因而不会落库的帖子数。
+	DiscardedPosts int `json:"discarded_posts"`
+
+	// Warnings 是「不阻断保存、但你现在就该知道」的提示。
+	Warnings []string `json:"warnings,omitempty"`
+	// RenamedFromID > 0 表示这个地址解析出的数字 id 命中库里已有的一条记录 ——
+	// 也就是同一个频道改了用户名，而不是新频道。
+	RenamedFromID int64 `json:"-"`
 }
 
-// ProbeChannel 校验一个频道是否可用。
+// ProbeChannel 校验一个频道是否可订阅。
 //
-// 校验链：getChat 可见 → 类型是频道/超级群 → bot 是管理员。
-// **必须把 @username 解析出来的数字 chat_id 固化下来**：频道改名后 @name 会失效，
-// 只有数字 id 稳定。私有频道也只能用数字 id。
+// 校验链：预览页可访问 → 能解析出数字 chat_id → 至少有一条帖子。
+// 全程不需要任何凭据，也不要求任何机器人/账号是频道成员 —— 这正是这次重构的目的。
+//
+// 数字 chat_id 仍然要固化下来：它是频道的稳定指纹，用来识别「@用户名 被回收后
+// 指向了另一个频道」以及「同一个频道改了名」。
 func (s *Service) ProbeChannel(ctx context.Context, input string) (*ChannelProbe, error) {
-	chatID, err := NormalizeChannelInput(input)
+	ref, err := parseChannelRef(input)
 	if err != nil {
 		return nil, err
 	}
-	client := s.clientFor()
-	if client == nil || !client.Ready() {
-		return nil, domain.Errorf(domain.CodeValidation, "请先配置并保存 Bot Token")
-	}
 
-	chat, err := client.GetChat(ctx, chatID)
-	if err != nil {
-		return nil, domain.Errorf(domain.CodeValidation, "读取频道「%s」失败：%s", chatID, describeError(err))
+	fetcher := s.previewFor()
+	if fetcher == nil {
+		return nil, errNoFetcher
 	}
-	if chat.Type != "channel" && chat.Type != "supergroup" {
-		return nil, domain.Errorf(domain.CodeValidation, "「%s」不是频道（类型为 %s）", chatID, chat.Type)
-	}
-
-	me, err := client.GetMe(ctx)
+	page, err := fetcher.Fetch(ctx, ref.Username, 0)
 	if err != nil {
-		return nil, domain.Errorf(domain.CodeValidation, "读取 Bot 信息失败：%s", describeError(err))
+		return nil, domain.Errorf(domain.CodeValidation, "%s", describePreviewError(err))
+	}
+	if page.ChannelID == 0 {
+		return nil, domain.Errorf(domain.CodeValidation,
+			"能打开 t.me/s/%s，但页面里解析不出频道 ID —— Telegram 可能改了页面结构，请升级 LitePan。", ref.Username)
+	}
+	if len(page.Posts) == 0 {
+		return nil, domain.Errorf(domain.CodeValidation,
+			"「@%s」没有可读取的公开帖子。可能原因：频道刚建立还没有内容；"+
+				"频道开启了内容保护；或者这个用户名指向的不是频道。", ref.Username)
 	}
 
 	probe := &ChannelProbe{
-		ChatID:   strconv.FormatInt(chat.ID, 10),
-		Username: chat.Username,
-		Title:    chat.Title,
-		Type:     chat.Type,
-		BotName:  "@" + me.Username,
+		ChatID:          strconv.FormatInt(page.ChannelID, 10),
+		Username:        page.Username,
+		Title:           page.Title,
+		Type:            "channel",
+		PostCount:       len(page.Posts),
+		LatestMessageID: page.Posts[len(page.Posts)-1].Message.MessageID,
+	}
+	newest := page.Posts[len(page.Posts)-1].Message
+	if newest.Date > 0 {
+		probe.LatestPostAt = time.Unix(newest.Date, 0).UTC().Format(time.RFC3339)
+	}
+	for i := range page.Posts {
+		probe.URLButtonCount += page.Posts[i].URLButtonCount
+		probe.BareButtonCount += page.Posts[i].BareButtonCount
 	}
 
-	member, err := client.GetChatMember(ctx, probe.ChatID, me.ID)
-	if err != nil {
-		return probe, domain.Errorf(domain.CodeValidation,
-			"Bot 不在该频道内，请先把 %s 拉进频道并设为管理员", probe.BotName)
+	// 体检：对最近一页帖子跑一遍真实抽取器，把「为什么没产出」变成看得见的数字。
+	// 只统计、不落库。
+	scan := s.scanPage(page)
+	probe.ResourceCounts = s.probeResourceCounts(scan)
+	probe.ExternalHosts = scan.topHosts(3)
+	probe.BotDeepLinks = scan.botLinks
+	probe.DiscardedPosts = scan.discarded
+
+	// 改名检测：数字 id 命中库里已有记录 → 是同一个频道换了用户名。
+	if existing, _ := s.channels.GetByChatID(ctx, probe.ChatID); existing != nil {
+		probe.RenamedFromID = existing.ID
 	}
-	if member.Status != "administrator" && member.Status != "creator" {
-		return probe, domain.Errorf(domain.CodeValidation,
-			"Bot 在频道内的身份是「%s」，必须是管理员才能收到频道消息", describeMemberStatus(member.Status))
-	}
-	probe.IsAdmin = true
+
+	// 兼容性提示。不阻断保存 —— 频道可能只是最近几天没发资源。
+	probe.Warnings = s.probeWarnings(scan, probe.URLButtonCount)
 	return probe, nil
 }
 
-// NormalizeChannelInput 把用户输入整理成 Bot API 能接受的 chat_id 形式。
+// ————————————————————— 频道输入归一化 —————————————————————
+
+// channelRef 是解析后的频道引用。
+type channelRef struct {
+	// Username 是裸用户名，不带 @ —— 网页预览只能按用户名抓。
+	Username string
+}
+
+// parseChannelRef 把用户输入解析成可抓取的频道引用。
 //
-// 支持三种输入：@channelname、https://t.me/xxx、-100xxxxxxxxxx。
-func NormalizeChannelInput(input string) (string, error) {
+// 支持：@channelname / https://t.me/xxx / t.me/s/xxx（顺带清掉 ?before= 之类的尾巴）。
+//
+// **数字 ID 与邀请链接不再接受**：/s/ 预览只认用户名，从数字 id 反解用户名需要
+// 用户账号会话（MTProto），那不是这个功能要走的路。以前数字 ID 是「订阅私有频道」
+// 的唯一途径，现在这条能力主动放弃 —— 但必须明确报错，不能让它静默失败。
+func parseChannelRef(input string) (channelRef, error) {
 	raw := strings.TrimSpace(input)
 	if raw == "" {
-		return "", domain.Errorf(domain.CodeValidation, "请填写频道")
+		return channelRef{}, domain.Errorf(domain.CodeValidation, "请填写频道地址")
 	}
+	// 先去开头的 @：用户经常把 @ 和链接一起粘进来（@https://t.me/xxx）。
+	// 顺序反过来的话，「@」会挡住下面的前缀匹配，接着又优先在第一个「/」处截断，
+	// 于是整串被解析成「@https:」这种东西 —— 报错只说 chat not found，
+	// 用户完全看不出是自己输入的形态没被认出来。
+	raw = strings.TrimPrefix(raw, "@")
+	raw = strings.TrimSpace(raw)
+
 	lower := strings.ToLower(raw)
-	for _, prefix := range []string{"https://t.me/", "http://t.me/", "t.me/", "https://telegram.me/", "telegram.me/"} {
+	for _, prefix := range []string{"https://t.me/s/", "http://t.me/s/", "t.me/s/",
+		"https://telegram.me/s/", "telegram.me/s/",
+		"https://t.me/", "http://t.me/", "t.me/", "https://telegram.me/", "telegram.me/"} {
 		if strings.HasPrefix(lower, prefix) {
 			raw = raw[len(prefix):]
 			break
 		}
 	}
-	// 去掉 /s/ 前缀（网页版预览链接）与查询串。
-	if strings.HasPrefix(raw, "s/") {
-		raw = raw[2:]
-	}
+	// 去掉查询串与锚点（?before=11139、#fragment）。
 	if idx := strings.IndexAny(raw, "?/#"); idx >= 0 {
 		raw = raw[:idx]
 	}
 	raw = strings.TrimSpace(raw)
 
 	if raw == "" {
-		return "", domain.Errorf(domain.CodeValidation, "频道地址不完整")
+		return channelRef{}, domain.Errorf(domain.CodeValidation, "频道地址不完整")
 	}
-	if strings.HasPrefix(raw, "@") {
-		return raw, nil
+	if strings.HasPrefix(raw, "+") {
+		return channelRef{}, domain.Errorf(domain.CodeValidation,
+			"这是私有邀请频道（t.me/+xxx），没有公开网页预览，无法订阅。请改用公开频道的 @用户名 或 https://t.me/xxx。")
 	}
 	if _, err := strconv.ParseInt(raw, 10, 64); err == nil {
-		return raw, nil
+		return channelRef{}, domain.Errorf(domain.CodeValidation,
+			"网页预览方式只能按 @用户名 订阅，不支持数字 ID。请填 https://t.me/xxx 或 @channelname。")
 	}
-	// 剩下的当作公开频道的用户名。
-	return "@" + raw, nil
+	if !isValidChannelUsername(raw) {
+		return channelRef{}, domain.Errorf(domain.CodeValidation,
+			"「%s」不像一个频道用户名。用户名是 5–32 位的字母、数字或下划线。", raw)
+	}
+	return channelRef{Username: raw}, nil
 }
 
-func describeMemberStatus(status string) string {
-	switch status {
-	case "member":
-		return "普通成员"
-	case "restricted":
-		return "受限成员"
-	case "left":
-		return "已离开"
-	case "kicked":
-		return "已被移除"
+// isValidChannelUsername 按 Telegram 的用户名规则校验（5–32 位 [A-Za-z0-9_]）。
+func isValidChannelUsername(s string) bool {
+	if len(s) < 5 || len(s) > 32 {
+		return false
 	}
-	return status
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// NormalizeChannelInput 返回带 @ 的用户名。
+//
+// 保留这个名字是因为它被大量既有调用点与测试引用；实际解析逻辑在 parseChannelRef。
+func NormalizeChannelInput(input string) (string, error) {
+	ref, err := parseChannelRef(input)
+	if err != nil {
+		return "", err
+	}
+	return "@" + ref.Username, nil
 }
 
 // ChannelInput 是新增/编辑频道的入参。
@@ -399,13 +506,20 @@ type ChannelInput struct {
 
 // CreateChannel 校验并添加频道。
 //
-// 校验成功后才落库，并且存的是**解析后的数字 chat_id** —— 公开频道的 @name
-// 在改名后会失效，存 @name 等于埋一个静默失效的坑。
+// 校验成功后才落库。存两样东西：**数字 chat_id**（频道的稳定指纹，用于识别
+// @用户名 被回收或频道改名）与 **username**（抓取时真正用的键 —— t.me/s/ 只认用户名）。
 func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (*ChannelView, error) {
 	probe, err := s.ProbeChannel(ctx, in.Chat)
 	if err != nil {
 		return nil, err
 	}
+	// 数字 id 已经存在 → 这是同一个频道改了用户名，不是新频道。让用户去编辑那一条，
+	// 否则会出现两条记录抢同一个 id（UNIQUE 会拦，但报错信息不可读）。
+	if probe.RenamedFromID > 0 {
+		return nil, domain.Errorf(domain.CodeValidation,
+			"这个频道已经在列表里了（可能是它改了用户名）。请到列表里编辑那一条，而不是新增。")
+	}
+
 	channel := &domain.TGChannel{
 		ChatID:   probe.ChatID,
 		Username: probe.Username,
@@ -421,6 +535,26 @@ func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (*ChannelV
 	}
 	channel.ID = id
 	view := channelView(channel)
+
+	// 首次回填：新频道 LastMessageID 为 0，catchUpPlan 会算出回填模式。
+	// 同步做而不是丢给后台 —— 用户刚点完「添加」，最想知道的就是「抓到东西了没有」。
+	// 失败不改判新增结果：频道已经存下来了，下一轮排程会继续追。
+	backfilled := int64(0)
+	if _, err := s.catchUp(ctx, channel, catchUpPlan(channel.LastMessageID, s.backfillPages())); err != nil {
+		s.log.Warn("tg subscribe initial backfill failed", "channel", id, "err", err)
+		_ = s.channels.MarkStatus(ctx, id, domain.TGChannelStatusError, "首次回填失败："+describePreviewError(err))
+	} else if fresh, getErr := s.channels.Get(ctx, id); getErr == nil {
+		backfilled = fresh.MatchedCount
+	}
+	// 回填改变了进度与帖子数，必须重新读一次 —— 否则前端拿到的是添加瞬间的旧快照
+	// （last_message_id 还是 0，用户会以为回填没跑）。
+	if fresh, getErr := s.channels.Get(ctx, id); getErr == nil {
+		view = channelView(fresh)
+		view.BackfillPosts = backfilled
+	}
+	// 补加的推荐频道从「待补加」清单里摘掉（手动添加的频道不在清单里，是空操作）。
+	// 放在最后：频道确实已经入库了才摘，失败的话它还留在清单里可以重试。
+	s.ClearPendingRecommended(ctx, probe.Username)
 	return &view, nil
 }
 
@@ -434,11 +568,21 @@ func (s *Service) UpdateChannel(ctx context.Context, id int64, in ChannelInput) 
 	}
 	channel.Level = normalizeLevel(in.Level)
 	channel.Enabled = in.Enabled
-	// 改了频道地址就重新校验一次，顺便把新的 chat_id 固化下来。
-	if chat := strings.TrimSpace(in.Chat); chat != "" && chat != channel.ChatID && chat != "@"+channel.Username {
+	// 改了频道地址就重新校验一次，顺便把新的 chat_id / username 固化下来。
+	chat := strings.TrimSpace(in.Chat)
+	if chat != "" && !refMatchesChannel(chat, channel) {
 		probe, err := s.ProbeChannel(ctx, chat)
 		if err != nil {
 			return nil, err
+		}
+		if probe.RenamedFromID > 0 && probe.RenamedFromID != channel.ID {
+			return nil, domain.Errorf(domain.CodeValidation,
+				"这个地址指向的是列表里另一个已存在的频道，不能重复添加。")
+		}
+		if probe.ChatID != channel.ChatID {
+			// 换了一个频道 → 进度必须清零。否则新频道会从旧频道的 last_message_id
+			// 之后开始抓，中间一大段历史永远抓不到。
+			channel.LastMessageID = 0
 		}
 		channel.ChatID = probe.ChatID
 		channel.Username = probe.Username
@@ -453,20 +597,49 @@ func (s *Service) UpdateChannel(ctx context.Context, id int64, in ChannelInput) 
 	return &view, nil
 }
 
+// refMatchesChannel 判断用户填的地址跟已存的是不是同一个频道，避免无谓的重校验。
+func refMatchesChannel(input string, ch *domain.TGChannel) bool {
+	ref, err := parseChannelRef(input)
+	if err != nil {
+		return false
+	}
+	if ch.Username != "" && strings.EqualFold(ref.Username, ch.Username) {
+		return true
+	}
+	return ref.Username == strings.TrimSpace(ch.ChatID)
+}
+
 func (s *Service) DeleteChannel(ctx context.Context, id int64) error {
 	return s.channels.Delete(ctx, id)
 }
 
 // TestChannel 重新校验已保存频道的可用性。
+//
+// 语义从「重新校验 Bot 权限」变成「重新抓一次预览页，确认频道仍可访问，
+// 并刷新标题与数字 ID」。
 func (s *Service) TestChannel(ctx context.Context, id int64) (*ChannelProbe, error) {
 	channel, err := s.channels.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	probe, probeErr := s.ProbeChannel(ctx, channel.ChatID)
+	// 旧版按数字 ID 添加的频道没有用户名，没法按用户名重新校验。
+	if strings.TrimSpace(channel.Username) == "" {
+		err := errNoUsername
+		_ = s.channels.MarkStatus(ctx, id, domain.TGChannelStatusError, describePreviewError(err))
+		return nil, domain.Errorf(domain.CodeValidation, "%s", describePreviewError(err))
+	}
+	probe, probeErr := s.ProbeChannel(ctx, "@"+channel.Username)
 	if probeErr != nil {
 		_ = s.channels.MarkStatus(ctx, id, domain.TGChannelStatusError, probeErr.Error())
 		return nil, probeErr
+	}
+	if probe.ChatID != channel.ChatID {
+		// 用户名被回收后指向了别的频道 —— 不能默默接受，否则等于把别人的频道
+		// 当成了自己的订阅源。要求用户显式改配置。
+		msg := "这个 @用户名 现在指向另一个频道（期望 " + channel.ChatID + "，实际 " + probe.ChatID +
+			"）。频道可能已改名，请编辑并填入新的公开地址。"
+		_ = s.channels.MarkStatus(ctx, id, domain.TGChannelStatusError, msg)
+		return nil, domain.Errorf(domain.CodeValidation, "%s", msg)
 	}
 	_ = s.channels.MarkStatus(ctx, id, domain.TGChannelStatusOK, "")
 	return probe, nil
@@ -693,6 +866,43 @@ func (s *Service) SetSubscriptionStatus(ctx context.Context, id int64, status st
 	return nil
 }
 
+// SetSubscriptionStatusBatch 批量改状态，返回实际改动的条数。
+//
+// 与单条路径共用同一条校验与清理规则（非 active 要清掉聚合窗口的截止时间），
+// 区别只在落库方式：这里走 repo 的单条 UPDATE，而不是逐条「读—改—写」。
+func (s *Service) SetSubscriptionStatusBatch(ctx context.Context, ids []int64, status string) (int64, error) {
+	status = strings.TrimSpace(status)
+	switch status {
+	case domain.TGSubStatusActive, domain.TGSubStatusPaused, domain.TGSubStatusCompleted:
+	default:
+		return 0, domain.Errorf(domain.CodeValidation, "未知的订阅状态：%s", status)
+	}
+	// 去重：前端理论上不会传来重复 id，但 IN (...) 里重复无所谓、计数会偏，
+	// 而返回的条数是要显示给用户的，不能糊。
+	uniq := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return 0, domain.Errorf(domain.CodeValidation, "请先选择要修改的订阅")
+	}
+	n, err := s.subs.SetStatusBatch(ctx, uniq, status)
+	if err != nil {
+		return 0, err
+	}
+	// 订阅状态参与匹配（只有 active 的会被匹配、才会进聚合窗口），必须让快照失效。
+	s.InvalidateSnapshot()
+	return n, nil
+}
+
 // ResetSubscription 清掉已收集进度，重新开始追。
 func (s *Service) ResetSubscription(ctx context.Context, id int64) (int64, error) {
 	sub, err := s.subs.Get(ctx, id)
@@ -905,6 +1115,8 @@ func recordView(rec *domain.TGMatchRecord, subTitle string) RecordView {
 		MessageDate:    formatTime(rec.MessageDate),
 		RawName:        rec.RawName,
 		NameSource:     rec.NameSource,
+		ResourceKind:   recordKind(rec),
+		KindLabel:      labelKind(recordKind(rec)),
 		Magnet:         rec.Magnet,
 		MagnetHash:     rec.MagnetHash,
 		SizeBytes:      rec.SizeBytes,
@@ -957,8 +1169,30 @@ func (s *Service) ManualPush(ctx context.Context, recordID, subscriptionID int64
 		return nil, domain.Errorf(domain.CodeValidation, "订阅「%s」当前是%s状态，请先恢复订阅", sub.Title, statusLabelText(sub.Status))
 	}
 
+	// 静态就投不出去的类型要在**改动记录之前**拦掉。
+	//
+	// 不拦的话，pushRecord 会返回 nil 投递器的错误，下面那段把它记成 failed 并
+	// RetryCount++，接着 ListRetryable 会把它捞出来重试 5 次、每次都失败 ——
+	// 无效重试换个入口又回来了。这里只做静态判断（有没有投递器），
+	// 至于「这个网盘支不支持」留给 pushRecord 去报精确错误：用户可能刚换了账号，
+	// 那条错误信息是有意义的。
+	if s.delivererFor(recordKind(rec)) == nil {
+		return nil, domain.Errorf(domain.CodeValidation,
+			"当前版本只识别%s、不支持投递，无法手动推送", labelKind(recordKind(rec)))
+	}
+
 	rec.SubscriptionID = sub.ID
 	if err := s.pushRecord(ctx, sub, rec); err != nil {
+		// 确定性失败（提取码错 / 分享失效 / 目录对不上）标成「不会重试」：
+		// 这类错误 RetryCount++ 只会让它进 ListRetryable 被白重试 5 次，
+		// 而每次重试都会真的去调一次 115 —— 那正是触发风控的姿势。
+		if isPermanentDeliveryError(err) {
+			rec.Status = domain.TGRecordUnretryable
+			rec.Reason = "手动推送失败，重试也不会好：" + err.Error()
+			rec.NextRetryAt = time.Time{}
+			_ = s.records.Update(ctx, rec)
+			return nil, err
+		}
 		rec.Status = domain.TGRecordFailed
 		rec.Reason = "手动推送失败：" + err.Error()
 		rec.RetryCount++
@@ -1155,19 +1389,27 @@ func maxInt(a, b int) int {
 }
 
 // ProviderSummary 汇总可用性与降级提示，供前端在订阅详情里提示用户。
-func (s *Service) ProviderSummary(ctx context.Context, accountID int64) string {
-	if accountID <= 0 || s.offline == nil {
+//
+// kind 为空按磁力处理，这样老的调用点（不带 ?kind=）行为完全不变。
+func (s *Service) ProviderSummary(ctx context.Context, accountID int64, kind string) string {
+	if accountID <= 0 || s.prober == nil {
 		return ""
 	}
-	caps, err := s.offline.Capabilities(ctx, accountID)
+	if strings.TrimSpace(kind) == "" {
+		kind = KindMagnet
+	}
+	// 静态就不支持的类型（分享链在分享转存投递器上线前）在这里直接答复，
+	// 不必为了它去探一次网盘能力。
+	if s.delivererFor(kind) == nil {
+		return "unsupported"
+	}
+	caps, err := s.capabilities(ctx, accountID)
 	if err != nil {
 		return "无法探测网盘能力，将使用内置下载器"
 	}
-	if caps.SupportsURLs && containsFold(caps.URLSchemes, "magnet") {
-		return offlinedownload.ProviderNative
+	provider, _, err := chooseProvider(caps, "", kind)
+	if err != nil {
+		return "unsupported"
 	}
-	if caps.BuiltinEnabled && containsFold(caps.BuiltinURLSchemes, "magnet") {
-		return offlinedownload.ProviderBuiltin
-	}
-	return "unsupported"
+	return provider
 }

@@ -1,1 +1,0 @@
-import{x as e}from"./index-l8dSPpH7.js";function t(){return e.get(`/admin/cache/stats`)}function n(){return e.post(`/admin/clear-cache`,{})}export{t as n,n as t};

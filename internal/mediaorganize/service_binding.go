@@ -84,7 +84,7 @@ func (s *Service) replanMatchedGroup(
 	tmdbClient := tmdb.NewClient(tmdb.Options{
 		APIKey:        PlannerTMDBAPIKey(plannerSettings),
 		Language:      PlannerTMDBLanguage(plannerSettings),
-		ProxyURL:      tmdb.BuildProxyURL(TmdbProxyFromSettings(plannerSettings)),
+		ProxyURL:      PlannerProxyURL(plannerSettings),
 		APIBaseHost:   PlannerTMDBAPIHost(plannerSettings),
 		ImageBaseHost: PlannerTMDBImageHost(plannerSettings),
 	})

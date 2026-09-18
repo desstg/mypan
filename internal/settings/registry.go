@@ -33,43 +33,50 @@ const (
 	KeyLogErrorAckAt               = "log_error_ack_at"
 	KeyAnnouncementReadVersion     = "announcement_read_version"
 	KeyAnnouncementURL             = "announcement_url"
-	KeyEmbyEnabled                 = "emby_enabled"
-	KeyEmbyProxyInstances          = "emby_proxy_instances"
-	KeyFnosEnabled                 = "fnos_enabled"
-	KeyFnosName                    = "fnos_name"
-	KeyFnosURL                     = "fnos_url"
-	KeyFnosProxyPort               = "fnos_proxy_port"
-	KeyFnosStrmPathMaps            = "fnos_strm_path_maps"
-	KeyFnosDirectSTRMClients       = "fnos_direct_strm_clients"
-	KeyStrmToken                   = "strm_token"
-	KeyStrmBaseURL                 = "strm_base_url"
-	KeyStrmSignatureEnabled        = "strm_signature_enabled"
-	KeyStrmDefaultScanInterval     = "strm_default_scan_interval"
-	KeyStrmDefaultExtensions       = "strm_default_extensions"
-	KeyStrmISOFilenameEnabled      = "strm_iso_filename_enabled"
-	KeyStrmMinFileSizeMB           = "strm_min_file_size_mb"
-	KeyStrmConflictPolicy          = "strm_conflict_policy"
-	KeyStrmTaskConcurrency         = "strm_task_concurrency"
-	KeyStrmMetadataExtensions      = "strm_metadata_extensions"
-	KeyStrmMetadataMaxSizeMB       = "strm_metadata_max_size_mb"
-	KeyStrmMetadataParentEnabled   = "strm_metadata_parent_enabled"
-	KeyStrmMetadataSyncMode        = "strm_metadata_sync_mode"
-	KeyStrmTool115TreeEnabled      = "strm_tool_115_tree_enabled"
-	KeyLocalUploadEnabled          = "local_upload_enabled"
-	KeyLocalUploadMappings         = "local_upload_mappings"
-	KeyCoverExtractEnabled         = "cover_extract_enabled"
-	KeyCoverExtractStyle           = "cover_extract_style"
-	KeyQuarkTVEnabled              = "quark_tv_enabled"
-	KeyQuarkTVPlayMode             = "quark_tv_play_mode"
-	KeyQuarkTVClientListMode       = "quark_tv_client_list_mode"
-	KeyQuarkTVProxyClients         = "quark_tv_proxy_clients"
-	KeyStrmScrapeWriteMode         = "strm_scrape_write_mode"
-	KeyStrmScrapeScopes            = "strm_scrape_scopes"
 
-	KeyMOProxyEnabled          = "mo_proxy_enabled"
-	KeyMOProxyURL              = "mo_proxy_url"
-	KeyMOProxyUsername         = "mo_proxy_username"
-	KeyMOProxyPassword         = "mo_proxy_password"
+	// 全局出站代理。TMDB（目录整理 / STRM 刮削 / 分类整理）与 TG 频道抓取共用这一份 ——
+	// 以前它们各有一套 mo_proxy_* / tg_bot_proxy_*，同一个代理要在两个页面各填一遍。
+	// 裸名键，和 announcement_url / log_level 一样属于「其他设置」页。
+	KeyProxyEnabled  = "proxy_enabled"
+	KeyProxyURL      = "proxy_url"
+	KeyProxyUsername = "proxy_username"
+	// KeyProxyPassword 标 Sensitive：后端回传的是掩码，密码不出浏览器。
+	// 代价是通用表单不能直接渲染它（见 SystemSettings.vue 的 PROXY_PASSWORD_KEY 特判）。
+	KeyProxyPassword = "proxy_password"
+
+	KeyEmbyEnabled               = "emby_enabled"
+	KeyEmbyProxyInstances        = "emby_proxy_instances"
+	KeyFnosEnabled               = "fnos_enabled"
+	KeyFnosName                  = "fnos_name"
+	KeyFnosURL                   = "fnos_url"
+	KeyFnosProxyPort             = "fnos_proxy_port"
+	KeyFnosStrmPathMaps          = "fnos_strm_path_maps"
+	KeyFnosDirectSTRMClients     = "fnos_direct_strm_clients"
+	KeyStrmToken                 = "strm_token"
+	KeyStrmBaseURL               = "strm_base_url"
+	KeyStrmSignatureEnabled      = "strm_signature_enabled"
+	KeyStrmDefaultScanInterval   = "strm_default_scan_interval"
+	KeyStrmDefaultExtensions     = "strm_default_extensions"
+	KeyStrmISOFilenameEnabled    = "strm_iso_filename_enabled"
+	KeyStrmMinFileSizeMB         = "strm_min_file_size_mb"
+	KeyStrmConflictPolicy        = "strm_conflict_policy"
+	KeyStrmTaskConcurrency       = "strm_task_concurrency"
+	KeyStrmMetadataExtensions    = "strm_metadata_extensions"
+	KeyStrmMetadataMaxSizeMB     = "strm_metadata_max_size_mb"
+	KeyStrmMetadataParentEnabled = "strm_metadata_parent_enabled"
+	KeyStrmMetadataSyncMode      = "strm_metadata_sync_mode"
+	KeyStrmTool115TreeEnabled    = "strm_tool_115_tree_enabled"
+	KeyLocalUploadEnabled        = "local_upload_enabled"
+	KeyLocalUploadMappings       = "local_upload_mappings"
+	KeyCoverExtractEnabled       = "cover_extract_enabled"
+	KeyCoverExtractStyle         = "cover_extract_style"
+	KeyQuarkTVEnabled            = "quark_tv_enabled"
+	KeyQuarkTVPlayMode           = "quark_tv_play_mode"
+	KeyQuarkTVClientListMode     = "quark_tv_client_list_mode"
+	KeyQuarkTVProxyClients       = "quark_tv_proxy_clients"
+	KeyStrmScrapeWriteMode       = "strm_scrape_write_mode"
+	KeyStrmScrapeScopes          = "strm_scrape_scopes"
+
 	KeyMOTmdbAPIKey            = "mo_tmdb_api_key"
 	KeyMOTmdbLanguage          = "mo_tmdb_language"
 	KeyMOTmdbAPIHost           = "mo_tmdb_api_host"
@@ -101,13 +108,12 @@ const (
 
 	// TG 影片订阅。这些项全部 Hidden —— 不希望在「系统设置」里出现第二个入口，
 	// 只在该功能自己的配置弹窗里通过 /api/tg-subscribe/config 读写。
+	//
+	// 取消息方式已从 Bot API 长轮询改为抓 t.me 公开网页预览（见 internal/tgsubscribe/preview），
+	// 所以 token / API 反代地址 / update offset 这几个键都不再存在；
+	// 代理也已收敛成全局的 proxy_*，不再有 tg_bot_proxy_*。
+	// 键名里的 tg_bot 是历史遗留，改名要动数据迁移，收益不抵风险。
 	KeyTGBotEnabled          = "tg_bot_enabled"
-	KeyTGBotToken            = "tg_bot_token"
-	KeyTGBotAPIHost          = "tg_bot_api_host"
-	KeyTGBotProxyEnabled     = "tg_bot_proxy_enabled"
-	KeyTGBotProxyURL         = "tg_bot_proxy_url"
-	KeyTGBotProxyUsername    = "tg_bot_proxy_username"
-	KeyTGBotProxyPassword    = "tg_bot_proxy_password"
 	KeyTGBotAutoPush         = "tg_bot_auto_push"
 	KeyTGBotDefaultAccountID = "tg_bot_default_account_id"
 	KeyTGBotDefaultParentID  = "tg_bot_default_parent_id"
@@ -115,11 +121,28 @@ const (
 	KeyTGBotProfileID        = "tg_bot_default_quality_profile_id"
 	KeyTGBotCollectWindowMin = "tg_bot_collect_window_min"
 	KeyTGBotMaxPushPerHour   = "tg_bot_max_push_per_hour"
-	KeyTGBotUpdateOffset     = "tg_bot_update_offset"
 	KeyTGBotLastPollAt       = "tg_bot_last_poll_at"
 	KeyTGBotStatus           = "tg_bot_status"
 	KeyTGBotStatusMessage    = "tg_bot_status_message"
-	KeyTGBotBotName          = "tg_bot_name"
+
+	// 网页预览抓取的调参项。前两个暴露到前端表单，后两个只在排障时改。
+	KeyTGPreviewPollIntervalSec = "tg_preview_poll_interval_sec"
+	KeyTGPreviewBackfillPages   = "tg_preview_backfill_pages"
+	KeyTGPreviewRequestGapMs    = "tg_preview_request_gap_ms"
+	KeyTGPreviewTimeoutSec      = "tg_preview_timeout_sec"
+
+	// KeyTGRecommendedSeeded 记录「内置推荐频道已经入库过一次」。
+	//
+	// 一次性播种的**唯一**凭据：靠它才能做到「首次启动自动添加」，同时保证
+	// 用户删掉某个推荐频道之后不会被下次启动塞回来。
+	KeyTGRecommendedSeeded = "tg_recommended_seeded"
+
+	// KeyTGRecommendedPending 是「播种时没加成功的推荐频道」的用户名列表（逗号分隔）。
+	//
+	// 有它才能把两件事分开：**没加成功**（该给用户一个补加入口）与
+	// **用户自己删掉的**（不该再冒出来）。没有这个区分的话，用户删掉一个默认频道，
+	// 界面上就会立刻多出一行「未添加 · 补加」，看起来像是删除没生效。
+	KeyTGRecommendedPending = "tg_recommended_pending"
 )
 
 // Type 决定后台表单控件与校验方式。
@@ -170,6 +193,14 @@ func boolSpec(key, category, label, description, def string) Spec {
 
 func stringSpec(key, category, label, description, def string) Spec {
 	return Spec{Key: key, Type: TypeString, Category: category, Label: label, Description: description, Default: def}
+}
+
+// secretSpec 是 stringSpec 的 Sensitive 版本：后端下发时把值掩成 ******。
+//
+// 用它的时候前端必须自己处理「留空表示不修改」—— 通用表单会把掩码当成用户改动，
+// 一保存就把字面量 ****** 写进库。参考 SystemSettings.vue 里代理密码那一段。
+func secretSpec(key, category, label, description string) Spec {
+	return Spec{Key: key, Type: TypeString, Category: category, Label: label, Description: description, Sensitive: true}
 }
 
 func intSpec(key, category, label, description, def, unit string, min, max int) Spec {
@@ -238,10 +269,15 @@ func defaultSpecs() []Spec {
 		}),
 		stringSpec(KeyStrmScrapeWriteMode, "strm", "STRM 刮削写入策略", "missing_only=仅补缺；overwrite=覆盖已有 nfo/海报。", "missing_only"),
 		{Key: KeyStrmScrapeScopes, Type: TypeString, Default: "{}", Hidden: true},
-		boolSpec(KeyMOProxyEnabled, "media_organize", "启用代理", "TMDB 请求经代理出站。", "false"),
-		stringSpec(KeyMOProxyURL, "media_organize", "代理地址", "HTTP/HTTPS 代理地址，例如 http://127.0.0.1:7890。", ""),
-		stringSpec(KeyMOProxyUsername, "media_organize", "代理用户名", "代理认证用户名，无认证可留空。", ""),
-		stringSpec(KeyMOProxyPassword, "media_organize", "代理密码", "代理认证密码。", ""),
+
+		// 全局代理。顺序即卡片上的行序（Snapshot 复用声明顺序）。
+		boolSpec(KeyProxyEnabled, "proxy", "启用代理",
+			"开启后，TMDB（目录整理 / STRM 刮削 / 分类整理）与 TG 频道抓取都经此代理出站。其它功能（网盘 API、播放串流）不走代理。", "false"),
+		stringSpec(KeyProxyURL, "proxy", "代理地址",
+			"HTTP/HTTPS 代理地址，例如 http://127.0.0.1:7890。暂不支持 socks5 —— 请填代理软件提供的 HTTP 端口。", ""),
+		stringSpec(KeyProxyUsername, "proxy", "代理用户名", "代理认证用户名，无认证可留空。", ""),
+		secretSpec(KeyProxyPassword, "proxy", "代理密码", "代理认证密码，无认证可留空。"),
+
 		stringSpec(KeyMOTmdbAPIKey, "media_organize", "TMDB API Key", "The Movie Database API 密钥。", ""),
 		stringSpec(KeyMOTmdbLanguage, "media_organize", "TMDB 搜索语言", "TMDB 搜索与详情语言，例如 zh-CN。", "zh-CN"),
 		stringSpec(KeyMOTmdbAPIHost, "media_organize", "TMDB API 主域名", "自建反代时填写主域名，程序自动补 /3。", "https://api.themoviedb.org"),
@@ -388,14 +424,8 @@ func defaultSpecs() []Spec {
 
 		// TG 影片订阅：全部 Hidden，由功能自己的配置弹窗读写。
 		// tg_bot_auto_push 默认 false 是刻意的安全设计 —— 用户先开「观察模式」跑一段，
-		// 确认匹配历史里的判定符合预期，再打开自动推送。
+		// 确认匹配历史里的判定符合预期，再打开自动推送。回填历史帖时也靠它兜底。
 		{Key: KeyTGBotEnabled, Type: TypeBool, Default: "false", Hidden: true},
-		{Key: KeyTGBotToken, Type: TypeString, Default: "", Sensitive: true, Hidden: true},
-		{Key: KeyTGBotAPIHost, Type: TypeString, Default: "", Hidden: true},
-		{Key: KeyTGBotProxyEnabled, Type: TypeBool, Default: "false", Hidden: true},
-		{Key: KeyTGBotProxyURL, Type: TypeString, Default: "", Hidden: true},
-		{Key: KeyTGBotProxyUsername, Type: TypeString, Default: "", Hidden: true},
-		{Key: KeyTGBotProxyPassword, Type: TypeString, Default: "", Sensitive: true, Hidden: true},
 		{Key: KeyTGBotAutoPush, Type: TypeBool, Default: "false", Hidden: true},
 		{Key: KeyTGBotDefaultAccountID, Type: TypeString, Default: "0", Hidden: true},
 		{Key: KeyTGBotDefaultParentID, Type: TypeString, Default: "", Hidden: true},
@@ -403,11 +433,19 @@ func defaultSpecs() []Spec {
 		{Key: KeyTGBotProfileID, Type: TypeString, Default: "0", Hidden: true},
 		{Key: KeyTGBotCollectWindowMin, Type: TypeInt, Default: "5", Min: intp(0), Max: intp(1440), Hidden: true},
 		{Key: KeyTGBotMaxPushPerHour, Type: TypeInt, Default: "20", Min: intp(1), Max: intp(500), Hidden: true},
-		{Key: KeyTGBotUpdateOffset, Type: TypeString, Default: "0", Hidden: true},
 		{Key: KeyTGBotLastPollAt, Type: TypeString, Default: "", Hidden: true},
 		{Key: KeyTGBotStatus, Type: TypeString, Default: "unknown", Hidden: true},
 		{Key: KeyTGBotStatusMessage, Type: TypeString, Default: "", Hidden: true},
-		{Key: KeyTGBotBotName, Type: TypeString, Default: "", Hidden: true},
+
+		// 网页预览抓取。t.me/s/ 不是给程序用的接口，没有公开配额，
+		// 默认值刻意保守：10 分钟一轮、每请求间隔 2 秒。
+		{Key: KeyTGPreviewPollIntervalSec, Type: TypeInt, Default: "600", Min: intp(30), Max: intp(86400), Hidden: true},
+		{Key: KeyTGPreviewBackfillPages, Type: TypeInt, Default: "1", Min: intp(0), Max: intp(20), Hidden: true},
+		{Key: KeyTGPreviewRequestGapMs, Type: TypeInt, Default: "2000", Min: intp(0), Max: intp(30000), Hidden: true},
+		{Key: KeyTGPreviewTimeoutSec, Type: TypeInt, Default: "20", Min: intp(5), Max: intp(120), Hidden: true},
+		// 一次性播种的标记与「没加成功的清单」，纯内部状态。
+		{Key: KeyTGRecommendedSeeded, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyTGRecommendedPending, Type: TypeString, Default: "", Hidden: true},
 	}
 }
 
@@ -417,6 +455,7 @@ func categories() []Category {
 		{ID: "system", Label: "系统设置"},
 		{ID: "account_display", Label: "网盘账号显示"},
 		{ID: "announcement", Label: "后台公告"},
+		{ID: "proxy", Label: "网络代理"},
 		{ID: "performance", Label: "性能设置"},
 		{ID: "strm", Label: "STRM 设置"},
 		{ID: "media_organize", Label: "媒体整理设置"},

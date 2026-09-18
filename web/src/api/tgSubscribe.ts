@@ -1,10 +1,13 @@
 import { http } from "./client";
 import type {
   TGChannel,
+  TGChannelProbe,
   TGConfig,
   TGConfigInput,
   TGDiscoverPayload,
+  TGHistorySearchResult,
   TGQualityConfig,
+  TGRecommendedChannel,
   TGQualityPreview,
   TGQualityProfile,
   TGMatchRecord,
@@ -28,8 +31,9 @@ export function saveTGConfig(input: TGConfigInput) {
   return http.put<TGConfig>(`${BASE}/config`, input);
 }
 
-export function testTGBot() {
-  return http.post<{ bot_name: string }>(`${BASE}/config/test`);
+/** 探活：抓一次 t.me 的公开预览，验证网络、代理与页面结构。 */
+export function testTGConnection() {
+  return http.post<{ detail: string }>(`${BASE}/config/test`);
 }
 
 // ——————————————————— 热门推荐 ———————————————————
@@ -87,6 +91,16 @@ export function fetchTGChannels() {
   return http.get<TGChannel[]>(`${BASE}/channels`);
 }
 
+/**
+ * 内置推荐频道（附「已添加」标记）。
+ *
+ * 首次启动时它们已经自动入库成普通频道，所以这里通常返回空。
+ * 还有内容只剩一种情况：当时没加成功（多半是还没配代理），用户后来配好了手动补加。
+ */
+export function fetchRecommendedTGChannels() {
+  return http.get<TGRecommendedChannel[]>(`${BASE}/channels/recommended`);
+}
+
 export function createTGChannel(input: TGChannelInput) {
   return http.post<TGChannel>(`${BASE}/channels`, input);
 }
@@ -100,9 +114,7 @@ export function deleteTGChannel(id: number) {
 }
 
 export function testTGChannel(id: number) {
-  return http.post<{ chat_id: string; title: string; bot_name: string; is_admin: boolean }>(
-    `${BASE}/channels/${id}/test`,
-  );
+  return http.post<TGChannelProbe>(`${BASE}/channels/${id}/test`);
 }
 
 // ——————————————————— 订阅 ———————————————————
@@ -126,6 +138,16 @@ export interface TGSubscriptionInput {
 
 export function fetchTGSubscriptions(status?: TGSubscriptionStatus | "") {
   return http.get<TGSubscription[]>(`${BASE}/subscriptions`, status ? { status } : undefined);
+}
+
+/**
+ * 批量改状态（「已订阅」页的批量操作）。
+ *
+ * 没有单条接口那样的失败明细：后端一条 UPDATE 要么全成要么全不成，
+ * 返回的 updated 是要显示给用户的条数。
+ */
+export function batchSetTGSubscriptionStatus(ids: number[], status: TGSubscriptionStatus) {
+  return http.post<{ updated: number }>(`${BASE}/subscriptions/status`, { ids, status });
 }
 
 export function fetchTGSubscription(id: number) {
@@ -246,4 +268,14 @@ export function fetchTGProviderSummary(accountId: number) {
   return http.get<{ provider: string }>(`${BASE}/provider-summary`, {
     account_id: String(accountId),
   });
+}
+
+/**
+ * 搜索这条订阅在频道里的历史帖。
+ *
+ * 补的是增量抓取的盲区：订阅之前就发过的帖子永远抓不到（首次订阅只回填 1 页）。
+ * 只落库、不推送，命中会以「待确认」出现在匹配历史里，由用户确认后手动推。
+ */
+export function searchTGHistory(subscriptionId: number) {
+  return http.post<TGHistorySearchResult>(`${BASE}/subscriptions/${subscriptionId}/search`, {});
 }

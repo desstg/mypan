@@ -32,25 +32,31 @@ type FieldSchema struct {
 
 // DriverInfo 是驱动对外暴露的元信息 + 表单 schema。
 type DriverInfo struct {
-	Name                   string        `json:"name"`
-	DisplayName            string        `json:"display_name"`
-	Description            string        `json:"description,omitempty"`
-	CardTags               []string      `json:"card_tags,omitempty"`
-	SortOrder              int           `json:"sort_order,omitempty"`
-	AuthLabel              string        `json:"auth_label,omitempty"`
-	CardColor              string        `json:"card_color"`
-	CardLogo               string        `json:"card_logo,omitempty"`
-	ProvideHashes          []string      `json:"provide_hashes,omitempty"`
-	RapidUpload            []string      `json:"rapid_upload,omitempty"`
-	UploadConflictPolicies []string      `json:"upload_conflict_policies,omitempty"`
-	AuthType               string        `json:"auth_type"`
-	SupportsOAuth          bool          `json:"supports_oauth"`
-	SupportsQRLogin        bool          `json:"supports_qr_login"`
-	OAuthName              string        `json:"oauth_name,omitempty"`
-	QRDevices              []FieldOption `json:"qr_devices,omitempty"`
-	QRDeviceField          string        `json:"qr_device_field,omitempty"`
-	InternalExperimental   bool          `json:"internal_experimental,omitempty"`
-	Fields                 []FieldSchema `json:"fields"`
+	Name                   string   `json:"name"`
+	DisplayName            string   `json:"display_name"`
+	Description            string   `json:"description,omitempty"`
+	CardTags               []string `json:"card_tags,omitempty"`
+	SortOrder              int      `json:"sort_order,omitempty"`
+	AuthLabel              string   `json:"auth_label,omitempty"`
+	CardColor              string   `json:"card_color"`
+	CardLogo               string   `json:"card_logo,omitempty"`
+	ProvideHashes          []string `json:"provide_hashes,omitempty"`
+	RapidUpload            []string `json:"rapid_upload,omitempty"`
+	UploadConflictPolicies []string `json:"upload_conflict_policies,omitempty"`
+	AuthType               string   `json:"auth_type"`
+	SupportsOAuth          bool     `json:"supports_oauth"`
+	SupportsQRLogin        bool     `json:"supports_qr_login"`
+	// SupportsShareReceive 报告驱动是否具备分享转存能力（类型层面）。
+	// 具体账号当下能不能转要看 ShareReceiver.ShareReceiveCapabilities ——
+	// 115 就是这样：类型支持，但只有配了网页 Cookie 的账号才真的能转。
+	SupportsShareReceive bool          `json:"supports_share_receive"`
+	OAuthName            string        `json:"oauth_name,omitempty"`
+	QRDevices            []FieldOption `json:"qr_devices,omitempty"`
+	QRDeviceField        string        `json:"qr_device_field,omitempty"`
+	// QRPollLongPoll 标记状态查询是长轮询，前端据此放宽轮询节奏（见 Config.QRPollLongPoll）。
+	QRPollLongPoll       bool          `json:"qr_poll_long_poll,omitempty"`
+	InternalExperimental bool          `json:"internal_experimental,omitempty"`
+	Fields               []FieldSchema `json:"fields"`
 }
 
 type entry struct {
@@ -69,6 +75,7 @@ func Register(c Constructor) {
 	cfg := d.Config()
 	_, supportsOAuth := d.(OAuthConsumer)
 	_, supportsQRLogin := d.(QRLoginProvider)
+	_, supportsShareReceive := d.(ShareReceiver)
 	info := DriverInfo{
 		Name:                   cfg.Name,
 		DisplayName:            cfg.DisplayName,
@@ -84,9 +91,11 @@ func Register(c Constructor) {
 		AuthType:               string(cfg.AuthType),
 		SupportsOAuth:          supportsOAuth,
 		SupportsQRLogin:        supportsQRLogin,
+		SupportsShareReceive:   supportsShareReceive,
 		OAuthName:              cfg.OAuthName,
 		QRDevices:              append([]FieldOption(nil), cfg.QRDevices...),
 		QRDeviceField:          cfg.QRDeviceField,
+		QRPollLongPoll:         cfg.QRPollLongPoll,
 		InternalExperimental:   cfg.InternalExperimental,
 		Fields:                 buildSchema(d.GetAddition()),
 	}

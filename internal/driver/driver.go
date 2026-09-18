@@ -41,6 +41,11 @@ type Config struct {
 	QRDevices []FieldOption
 	// QRDeviceField 是 Addition 中保存设备来源的 JSON 字段名，与 QRDevices 配套。
 	QRDeviceField string
+	// QRPollLongPoll 报告这个驱动的状态查询是**长轮询**（请求会挂住若干秒才返回）。
+	//
+	// 前端的扫码弹窗默认「每 2 秒问一次」；对长轮询型驱动，那样会并发堆积请求。
+	// 标记之后前端改成「拿到响应就立刻再问一次」。115 就是这样（实测每次挂 30 秒）。
+	QRPollLongPoll bool
 	// InternalExperimental 为内部实验性驱动：默认不展示在前端驱动列表，需解锁开发模式后可见。
 	InternalExperimental   bool
 	SupportsAccountProfile bool

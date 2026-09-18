@@ -90,10 +90,6 @@ export interface MediaOrganizeLogEntry {
 }
 
 export interface MediaOrganizeSettings {
-  proxy_enabled: boolean;
-  proxy_url: string;
-  proxy_username: string;
-  proxy_password: string;
   tmdb_api_key: string;
   tmdb_language: string;
   tmdb_api_host: string;
@@ -270,7 +266,6 @@ export function testMediaOrganizeTmdb(payload?: Partial<MediaOrganizeSettings>) 
     image_ok?: boolean;
     image_status?: number;
     language?: string;
-    proxy_used?: boolean;
   }>("/admin/media-organize/test-tmdb", payload ?? {});
 }
 

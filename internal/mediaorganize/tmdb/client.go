@@ -23,13 +23,6 @@ const (
 	mediaTypeAuto    = "auto"
 )
 
-type ProxyConfig struct {
-	Enabled  bool
-	URL      string
-	Username string
-	Password string
-}
-
 type Client struct {
 	apiKey         string
 	language       string
@@ -58,13 +51,9 @@ func NewClient(opts Options) *Client {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	var proxy func(*http.Request) (*url.URL, error)
-	if u := strings.TrimSpace(opts.ProxyURL); u != "" {
-		parsed, err := url.Parse(u)
-		if err == nil {
-			proxy = http.ProxyURL(parsed)
-		}
-	}
+	// 代理地址由调用方从全局设置算好传进来（internal/settings.ProxyURL）。
+	// ProxyFunc 对空串返回 nil，正好让 Transport 保持原样、继续认 HTTP_PROXY 环境变量。
+	proxy := httpx.ProxyFunc(opts.ProxyURL)
 	maxRetries := opts.MaxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
@@ -90,26 +79,8 @@ func NewClient(opts Options) *Client {
 	}
 }
 
-func BuildProxyURL(cfg ProxyConfig) string {
-	if !cfg.Enabled {
-		return ""
-	}
-	raw := strings.TrimSpace(cfg.URL)
-	if raw == "" {
-		return ""
-	}
-	user := strings.TrimSpace(cfg.Username)
-	pwd := strings.TrimSpace(cfg.Password)
-	if user == "" || pwd == "" {
-		return raw
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return raw
-	}
-	parsed.User = url.UserPassword(user, pwd)
-	return parsed.String()
-}
+// BuildProxyURL 已移除：代理设置收敛成全局项（internal/settings/proxy.go 的 ProxyURL），
+// 由调用方算好后通过 Options.ProxyURL 传进来。
 
 func (c *Client) ValidateConnection(ctx context.Context) bool {
 	if c == nil || c.apiKey == "" {

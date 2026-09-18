@@ -38,16 +38,52 @@ func (s *Service) onOfflineDownloadCompleted(ctx context.Context, event eventbus
 		return
 	}
 
+	s.applyDeliveryProgress(ctx, sub, rec, deliveredInfo{
+		TaskID:     event.TaskID,
+		AccountID:  event.AccountID,
+		FileID:     event.FileID,
+		TargetPath: event.TargetDisplayPath,
+	})
+}
+
+// deliveredInfo 是一次成功投递落地后的信息，用于回写订阅进度。
+type deliveredInfo struct {
+	// TaskID 是离线任务 ID。分享转存不产生离线任务，这里为空。
+	TaskID    string
+	AccountID int64
+	FileID    string
+	// TargetPath 是文件最终落到的展示路径。
+	TargetPath string
+}
+
+// applyDeliveryProgress 回写订阅进度：剧集入库 + 通知 + 完成判定。
+//
+// 抽出来是因为它有两个入口，语义必须完全一致：
+//   - 离线下载完成事件；
+//   - 分享转存这种**不产生离线任务**的投递，由 pushRecord 在推送成功后直接调用。
+//
+// 各写一份的话，将来改一处漏一处 —— 表现是「某条通道的订阅进度永远不更新」，
+// 而且没有任何报错，极难排查。
+func (s *Service) applyDeliveryProgress(
+	ctx context.Context,
+	sub *domain.TGSubscription,
+	rec *domain.TGMatchRecord,
+	info deliveredInfo,
+) {
+	if s == nil || sub == nil || rec == nil || s.episodes == nil {
+		return
+	}
+
 	if sub.MediaType == domain.TGMediaTypeTV && rec.Season >= 0 && rec.Episode >= 0 {
 		if err := s.episodes.Upsert(ctx, &domain.TGSubscriptionEpisode{
 			SubscriptionID: sub.ID,
 			Season:         rec.Season,
 			Episode:        rec.Episode,
 			RecordID:       rec.ID,
-			OfflineTaskID:  event.TaskID,
-			AccountID:      event.AccountID,
-			FileID:         event.FileID,
-			TargetPath:     event.TargetDisplayPath,
+			OfflineTaskID:  info.TaskID,
+			AccountID:      info.AccountID,
+			FileID:         info.FileID,
+			TargetPath:     info.TargetPath,
 		}); err != nil {
 			s.log.Warn("tg subscribe upsert episode failed", "sub", sub.ID, "err", err)
 		}

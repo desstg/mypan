@@ -3,11 +3,11 @@ package tgsubscribe
 import (
 	"context"
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"litepan/internal/core/driverexec"
 	"litepan/internal/domain"
 	"litepan/internal/eventbus"
 	filesvc "litepan/internal/file"
@@ -17,6 +17,7 @@ import (
 	"litepan/internal/settings"
 	"litepan/internal/startupwait"
 	"litepan/internal/tgsubscribe/telegram"
+	"litepan/pkg/singleflight"
 )
 
 // 调度常量。dispatcher 的 tick 与 automation 的 10s 对齐，便于对照两边的日志。
@@ -24,10 +25,6 @@ const (
 	dispatchInterval       = 10 * time.Second
 	startupDelayAfterAuth  = 15 * time.Second
 	recordRetention        = 30 * 24 * time.Hour
-	pollBackoffMin         = 1 * time.Second
-	pollBackoffMax         = 60 * time.Second
-	longPollTimeoutSec     = 30
-	longPollLimit          = 100
 	channelIdleWarnAfter   = 6 * time.Hour
 	subscriptionSyncForced = 24 * time.Hour
 )
@@ -47,6 +44,17 @@ type Options struct {
 	Bus      *eventbus.Bus
 	Log      *slog.Logger
 	DataDir  string
+	// Exec 用于分享转存这类「直接调驱动」的投递方式；为空时分享转存不可用
+	// （分享链会落 unsupported，不会去重试）。
+	Exec *driverexec.Executor
+}
+
+// capabilityProber 是「探测某个账号的离线下载能力」这一步的最小依赖。
+//
+// 抽成接口只为一件事：让测试能注入一张能力矩阵，把「哪种类型在哪个网盘上投得出去」
+// 的各种组合都跑一遍。*offlinedownload.Service 天然满足它。
+type capabilityProber interface {
+	Capabilities(ctx context.Context, accountID int64) (offlinedownload.Capabilities, error)
 }
 
 // Service 是 TG 影片订阅的门面。
@@ -57,6 +65,8 @@ type Service struct {
 	episodes domain.TGSubscriptionEpisodeRepository
 	records  domain.TGMatchRecordRepository
 	offline  *offlinedownload.Service
+	// prober 默认就是 offline；只有测试会把它换成桩。
+	prober   capabilityProber
 	folders  *filesvc.Service
 	media    *mediaorganize.Service
 	settings *settings.Service
@@ -68,15 +78,26 @@ type Service struct {
 	registry   *telegram.Registry
 	deliverers []Deliverer
 	pusher     *Pusher
+	shareSaver *ShareSaveDeliverer
 	tmdb       tmdbThrottle
 
-	mu        sync.Mutex
-	client    *telegram.Client
-	clientKey string
-	started   bool
-	polling   bool
-	appCtx    context.Context
-	cancel    context.CancelFunc
+	// folderGroup 合并并发的同名目录创建请求：多个订阅指向同一个网盘同一目录时，
+	// 并发创建会产生一堆同名重复目录。两条投递通道共用它。
+	folderGroup singleflight.Group[*domain.FileItem]
+	// exec 是调用驱动的统一中轴（认证闸门 + 网络熔断 + 被动刷新），
+	// 分享转存走它才能拿到带账号级退避与限速的驱动实例。
+	exec *driverexec.Executor
+
+	mu         sync.Mutex
+	preview    PageFetcher
+	previewKey string
+	// fetcher 是测试注入口（见 previewFor）：非 nil 时优先于按设置构造的客户端。
+	// 生产代码永远不设置它。
+	fetcher PageFetcher
+	started bool
+	polling bool
+	appCtx  context.Context
+	cancel  context.CancelFunc
 	// pushTimes 是每小时推送限流用的滑动窗口。
 	pushTimes []time.Time
 	// lastPollOK 用于「只在状态跳变时发通知」，避免连接不上时把通知中心刷爆。
@@ -104,6 +125,7 @@ func New(opts Options) *Service {
 		episodes:     opts.Episodes,
 		records:      opts.Records,
 		offline:      opts.Offline,
+		prober:       opts.Offline,
 		folders:      opts.Folders,
 		media:        opts.Media,
 		settings:     opts.Settings,
@@ -111,12 +133,16 @@ func New(opts Options) *Service {
 		bus:          opts.Bus,
 		log:          log,
 		dataDir:      opts.DataDir,
+		exec:         opts.Exec,
 		registry:     newRegistry(),
 		channelPosts: make(map[int64]time.Time),
 		lastPollOK:   true,
 	}
 	s.pusher = &Pusher{svc: s}
-	s.deliverers = []Deliverer{s.pusher}
+	s.shareSaver = &ShareSaveDeliverer{svc: s}
+	// 顺序即优先级：Pusher 只管离线下载能投的那几种（kindSchemes 覆盖到的），
+	// 分享链它明确返回 false，落到 shareSaver 手里。
+	s.deliverers = []Deliverer{s.pusher, s.shareSaver}
 	return s
 }
 
@@ -126,6 +152,15 @@ func (s *Service) SetStartupGate(gate <-chan struct{}) {
 		return
 	}
 	s.startupGate = gate
+}
+
+// capabilities 探测账号的离线下载能力。没注入探测器时返回错误 ——
+// 调用方把「探测不到」当作「不可判定」处理，绝不当成「不支持」。
+func (s *Service) capabilities(ctx context.Context, accountID int64) (offlinedownload.Capabilities, error) {
+	if s == nil || s.prober == nil {
+		return offlinedownload.Capabilities{}, domain.Errorf(domain.CodeInternal, "离线下载服务未就绪")
+	}
+	return s.prober.Capabilities(ctx, accountID)
 }
 
 // SetNotifications 在 HTTP 装配阶段补注入，避免与 notification 服务形成循环依赖。
@@ -167,13 +202,16 @@ func (s *Service) Start(ctx context.Context) {
 		if !startupwait.Delay(ctx, startupDelayAfterAuth) {
 			return
 		}
-		s.pollLoop(inner)
+		// 播种必须在 schedulerLoop 之前、且在**同一个 goroutine** 里 ——
+		// 两者都会抓同一个频道，串行才能避免同时给一个频道做首次回填。
+		s.SeedRecommendedChannels(inner)
+		s.schedulerLoop(inner)
 	}()
 	go s.dispatchLoop(inner)
 }
 
 // Stop 停掉两个 loop。调用方必须保证它在 eventbus.Close 之前执行 ——
-// 否则长轮询回来的消息会去 publish 一个已经关掉的总线。
+// 否则抓取回来的消息会去 publish 一个已经关掉的总线。
 func (s *Service) Stop() {
 	if s == nil {
 		return
@@ -188,30 +226,8 @@ func (s *Service) Stop() {
 	}
 }
 
-// clientFor 按当前设置构造 Bot 客户端。设置变了就重建 —— 代理与 token 都可能改。
-func (s *Service) clientFor() *telegram.Client {
-	if s == nil || s.settings == nil {
-		return nil
-	}
-	token := strings.TrimSpace(s.settings.String(settings.KeyTGBotToken))
-	host := strings.TrimSpace(s.settings.String(settings.KeyTGBotAPIHost))
-	proxy := buildTGProxyURL(s.settings)
-
-	key := strings.Join([]string{token, host, proxy}, "\x00")
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.client != nil && s.clientKey == key {
-		return s.client
-	}
-	s.client = telegram.NewClient(telegram.ClientOptions{
-		Token:    token,
-		APIHost:  host,
-		ProxyURL: proxy,
-	})
-	s.clientKey = key
-	return s.client
-}
-
+// clientFor 已移除：取消息层从 Bot API 长轮询换成了抓 t.me 公开网页预览，
+// 客户端构造搬到 preview_fetch.go 的 previewFor()。
 // botEnabled 报告用户是否打开了开关。
 func (s *Service) botEnabled() bool {
 	if s == nil || s.settings == nil {
@@ -338,14 +354,17 @@ func (s *Service) markStatus(ctx context.Context, status, message string) {
 type Status struct {
 	Enabled      bool   `json:"enabled"`
 	AutoPush     bool   `json:"auto_push"`
-	TokenSet     bool   `json:"token_set"`
-	BotName      string `json:"bot_name"`
 	Connected    bool   `json:"connected"`
 	Status       string `json:"status"`
 	StatusMsg    string `json:"status_message"`
-	Offset       int64  `json:"offset"`
 	ChannelCount int    `json:"channel_count"`
 	Subscription int    `json:"subscription_count"`
+	// PollIntervalSec 是用户配置的基准抓取间隔（实际间隔还会按优先级与频道数放大）。
+	PollIntervalSec int `json:"poll_interval_sec"`
+	// BackfillPages 是新频道首次订阅时往回翻的页数。
+	BackfillPages int `json:"backfill_pages"`
+	// LastPollAt 是最近一次成功抓到帖子的时间（RFC3339，UTC）。
+	LastPollAt string `json:"last_poll_at"`
 }
 
 // Status 汇总当前状态。不发起网络请求 —— 连通性取自后台 loop 的最近一次结果。
@@ -356,13 +375,11 @@ func (s *Service) Status(ctx context.Context) Status {
 	}
 	out.Enabled = s.botEnabled()
 	out.AutoPush = s.autoPush()
-	out.TokenSet = strings.TrimSpace(s.settings.String(settings.KeyTGBotToken)) != ""
-	// BotName 与状态文案是两个东西：前者是 @username，后者是人类可读的连通性说明。
-	// 混用会让界面上「Bot 名字」的位置显示成一句报错。
-	out.BotName = strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotBotName))
 	out.StatusMsg = strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotStatusMessage))
-	out.Offset = int64(s.settings.Int(settings.KeyTGBotUpdateOffset))
 	out.Status = strings.TrimSpace(s.settings.String(settings.KeyTGBotStatus))
+	out.PollIntervalSec = int(s.pollInterval() / time.Second)
+	out.BackfillPages = s.backfillPages()
+	out.LastPollAt = s.lastPollAt()
 	s.mu.Lock()
 	out.Connected = s.lastPollOK && s.polling
 	s.mu.Unlock()
@@ -376,25 +393,4 @@ func (s *Service) Status(ctx context.Context) Status {
 	return out
 }
 
-// buildTGProxyURL 组装代理地址，复用 TMDB 那套「地址 + 可选认证」的形式。
-func buildTGProxyURL(svc *settings.Service) string {
-	if svc == nil || !svc.Bool(settings.KeyTGBotProxyEnabled) {
-		return ""
-	}
-	raw := strings.TrimSpace(svc.StringAllowEmpty(settings.KeyTGBotProxyURL))
-	if raw == "" {
-		return ""
-	}
-	user := strings.TrimSpace(svc.StringAllowEmpty(settings.KeyTGBotProxyUsername))
-	pwd := strings.TrimSpace(svc.StringAllowEmpty(settings.KeyTGBotProxyPassword))
-	if user == "" || pwd == "" {
-		return raw
-	}
-	// 认证信息用 net/url 拼；地址解析失败就退回不含认证的形式。
-	u, err := url.Parse(raw)
-	if err != nil {
-		return raw
-	}
-	u.User = url.UserPassword(user, pwd)
-	return u.String()
-}
+// buildTGProxyURL 已移除：代理收敛成全局项，直接用 settings.ProxyURL（见 preview_fetch.go）。

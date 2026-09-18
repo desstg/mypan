@@ -2,6 +2,7 @@ package tgsubscribe
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,35 +10,70 @@ import (
 	"litepan/internal/tgsubscribe/telegram"
 )
 
-// 频道输入要能接受用户实际会粘贴的三种形态。
-func TestNormalizeChannelInput(t *testing.T) {
+// 频道输入要能接受用户实际会粘贴的形态。
+//
+// 注意与旧版的差别：数字 ID 与邀请链接**不再接受**。网页预览只能按 @用户名 抓，
+// 从数字 id 反解用户名需要用户账号会话，不是这个功能要走的路 —— 所以这条能力
+// 是主动放弃的，必须报错而不是静默失败。
+func TestParseChannelRef(t *testing.T) {
 	cases := map[string]string{
-		"@somechannel":             "@somechannel",
-		"somechannel":              "@somechannel",
-		"https://t.me/somechannel": "@somechannel",
-		"http://t.me/somechannel":  "@somechannel",
-		"t.me/somechannel":         "@somechannel",
-		"https://telegram.me/xyz":  "@xyz",
-		"https://t.me/s/xyz":       "@xyz",
-		"https://t.me/xyz?single":  "@xyz",
-		"https://t.me/xyz/123":     "@xyz",
-		"  @padded  ":              "@padded",
-		"-1001234567890":           "-1001234567890",
-		"https://t.me/+AbCdEf":     "@+AbCdEf",
+		"@somechannel":               "somechannel",
+		"somechannel":                "somechannel",
+		"https://t.me/somechannel":   "somechannel",
+		"http://t.me/somechannel":    "somechannel",
+		"t.me/somechannel":           "somechannel",
+		"https://telegram.me/xyzabc": "xyzabc",
+		"https://t.me/s/xyzabc":      "xyzabc",
+		"https://t.me/xyzabc?single": "xyzabc",
+		"https://t.me/xyzabc/123":    "xyzabc",
+		"  @paddedname  ":            "paddedname",
+		// 「@」和链接一起粘进来：以前会在第一个「/」处把整串截成「@https:」，
+		// 报错只说 chat not found，用户看不出是自己输入的形态没被认出来。
+		"@https://t.me/somechannel": "somechannel",
+		"@http://t.me/xyzabc":       "xyzabc",
+		"@t.me/somechannel":         "somechannel",
+		"@https://t.me/s/xyzabc":    "xyzabc",
+		// 顺便贴了网页预览链接（带翻页参数）也要认得。
+		"https://t.me/s/QukanMovie?before=11139": "QukanMovie",
 	}
 	for in, want := range cases {
-		got, err := NormalizeChannelInput(in)
+		ref, err := parseChannelRef(in)
 		if err != nil {
-			t.Errorf("NormalizeChannelInput(%q) error: %v", in, err)
+			t.Errorf("parseChannelRef(%q) error: %v", in, err)
 			continue
 		}
-		if got != want {
-			t.Errorf("NormalizeChannelInput(%q) = %q, want %q", in, got, want)
+		if ref.Username != want {
+			t.Errorf("parseChannelRef(%q) = %q, want %q", in, ref.Username, want)
 		}
 	}
 
-	if _, err := NormalizeChannelInput("   "); err == nil {
-		t.Error("空输入应当报错")
+	bad := map[string]string{
+		"   ":                    "空输入",
+		"@":                      "只有 @",
+		"@https://t.me/":         "只有前缀",
+		"-1001234567890":         "数字 ID 不再支持",
+		"https://t.me/+AbCdEf":   "私有邀请频道",
+		"t.me/+AbCdEf":           "私有邀请频道",
+		"abc":                    "用户名太短",
+		"has space":              "含空格",
+		"https://t.me/bad-name!": "含非法字符",
+	}
+	for in, why := range bad {
+		if _, err := parseChannelRef(in); err == nil {
+			t.Errorf("parseChannelRef(%q) 应当报错（%s）", in, why)
+		}
+	}
+}
+
+// 数字 ID 与邀请链接的报错要说清楚「为什么不行、该填什么」。
+func TestParseChannelRefErrorMessages(t *testing.T) {
+	_, err := parseChannelRef("-1001234567890")
+	if err == nil || !strings.Contains(err.Error(), "@用户名") {
+		t.Errorf("数字 ID 的报错没指向正确填法: %v", err)
+	}
+	_, err = parseChannelRef("https://t.me/+AbCdEf")
+	if err == nil || !strings.Contains(err.Error(), "私有") {
+		t.Errorf("邀请链接的报错没说清原因: %v", err)
 	}
 }
 
@@ -166,6 +202,106 @@ func TestResourceFromRefFallsBackToText(t *testing.T) {
 	)
 	if onlyLink.DisplayName != "Dune.2021.1080p" {
 		t.Fatalf("应跳过磁力链那一行，实际 %q", onlyLink.DisplayName)
+	}
+}
+
+// 「首行是资源链接」对每一种资源类型都要跳过，不能只认磁力。
+func TestFallbackDisplayNameSkipsEveryResourceLine(t *testing.T) {
+	const title = "生逢其时 (2026) S01E15 4K WEB-DL"
+	cases := map[string]string{
+		"磁力":     "magnet:?xt=urn:btih:ce5ef90c7cf08c9a1902a5e2a73362da32ae3418",
+		"ed2k":   "ed2k://|file|Movie.mkv|100|4d517deece354c11fe7e497999956663|/",
+		"115 分享": "https://115.com/s/swsa2t23zrk?password=t58d",
+		"夸克分享":   "https://pan.quark.cn/s/6d2b3b2b4c1a",
+		"直链":     "https://cdn.x.com/a/b/Movie.2024.1080p.mkv",
+	}
+	for name, link := range cases {
+		t.Run(name, func(t *testing.T) {
+			msg := &telegram.Message{Text: link + "\n" + title}
+			if got := fallbackDisplayName(msg); got != title {
+				t.Errorf("应跳到下一行，实际 %q", got)
+			}
+		})
+	}
+}
+
+// 实测频道的发布名首尾带装饰 emoji，会让片名候选退化成「📺 生逢其时」——
+// 词元覆盖度只能拿 55 分，而干净的「生逢其时」精确命中是 65 分。
+func TestFallbackDisplayNameStripsDecorativeEmoji(t *testing.T) {
+	cases := map[string]string{
+		"📺 生逢其时 (2026) S01E15 ✨4K WEB-DL DDP 5 1": "生逢其时 (2026) S01E15 ✨4K WEB-DL DDP 5 1",
+		"🎬 迪迦奥特曼 剧场版：最终圣战 (2000) 1080p":           "迪迦奥特曼 剧场版：最终圣战 (2000) 1080p",
+		"★ Movie.2024.1080p ★":                    "Movie.2024.1080p",
+		"  🔥🔥 海贼王 第1100集 🔥🔥  ":                    "海贼王 第1100集",
+	}
+	for in, want := range cases {
+		if got := fallbackDisplayName(&telegram.Message{Text: in}); got != want {
+			t.Errorf("fallbackDisplayName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// 剥装饰不能误伤：`+` 是 unicode.Sm 不是 So，`C++` 必须原样保留。
+func TestStripDecorativeEdgesKeepsMeaningfulSymbols(t *testing.T) {
+	cases := map[string]string{
+		"C++ Primer 2020.mkv": "C++ Primer 2020.mkv",
+		"#活着 (1994) 1080p":    "#活着 (1994) 1080p",
+		"+ 加法 (2020)":         "+ 加法 (2020)",
+	}
+	for in, want := range cases {
+		if got := stripDecorativeEdges(in); got != want {
+			t.Errorf("stripDecorativeEdges(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// 整行都是装饰时不产出名字，让调用方继续往下看。
+func TestFallbackDisplayNameSkipsPureDecorationLine(t *testing.T) {
+	msg := &telegram.Message{Text: "🔥🔥🔥\nMovie.2024.1080p"}
+	if got := fallbackDisplayName(msg); got != "Movie.2024.1080p" {
+		t.Errorf("应跳过纯装饰行，实际 %q", got)
+	}
+}
+
+// ed2k 的 |file| 名是链接自带的名字，与磁力的 dn= 同一可信层 ——
+// 必须标 dn，否则会被 matcher 当作「取自正文」扣 5 分。
+func TestResourceFromED2KUsesFileName(t *testing.T) {
+	res := resourceFromRef(
+		telegram.ResourceRef{
+			Kind:        KindED2K,
+			Raw:         "ed2k://|file|Movie.mkv|100|4d517deece354c11fe7e497999956663|/",
+			InfoHash:    "ed2k:4d517deece354c11fe7e497999956663",
+			DisplayName: "Movie.2024.1080p.REMUX.mkv",
+			SizeBytes:   100,
+		},
+		&telegram.Message{Text: "无关正文"},
+	)
+	if res.DisplayName != "Movie.2024.1080p.REMUX.mkv" {
+		t.Fatalf("应以链接自带的名字为准，实际 %q", res.DisplayName)
+	}
+	if res.NameSource != "dn" {
+		t.Fatalf("来源应标 dn（免扣分），实际 %q", res.NameSource)
+	}
+	if res.SizeBytes != 100 {
+		t.Fatalf("SizeBytes 应透传，实际 %d", res.SizeBytes)
+	}
+}
+
+// 分享链没有自带名字，回退正文首行并标 text（会被扣 5 分，符合可信度预期）。
+func TestResourceFromShareFallsBackToText(t *testing.T) {
+	res := resourceFromRef(
+		telegram.ResourceRef{
+			Kind:     KindShare115,
+			Raw:      "https://115.com/s/swsa2t23zrk?password=t58d",
+			InfoHash: "115:swsa2t23zrk",
+		},
+		&telegram.Message{Text: "生逢其时 (2026) S01E15 4K WEB-DL\n🔗 链接： 点击跳转"},
+	)
+	if res.DisplayName != "生逢其时 (2026) S01E15 4K WEB-DL" {
+		t.Fatalf("应回退正文首行，实际 %q", res.DisplayName)
+	}
+	if res.NameSource != "text" {
+		t.Fatalf("来源应标 text，实际 %q", res.NameSource)
 	}
 }
 

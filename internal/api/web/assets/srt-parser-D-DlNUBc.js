@@ -1,2 +1,0 @@
-import{a as e,i as t,r as n}from"./prod-CtPwjIn4.js";var r=/,/g,i=`-->`,a=class extends e{parse(e,r){if(e===``)this.a&&=(this.j.push(this.a),this.f.onCue?.(this.a),null),this.c=n.None;else if(this.c===n.Cue)this.a.text+=(this.a.text?`
-`:``)+e;else if(e.includes(i)){let i=this.o(e,r);i&&(this.a=new t(i[0],i[1],i[2].join(` `)),this.a.id=this.l,this.c=n.Cue)}this.l=e}o(e,t){return super.o(e.replace(r,`.`),t)}};function o(){return new a}export{o as default};

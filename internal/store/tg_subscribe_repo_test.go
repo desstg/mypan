@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -324,6 +325,69 @@ func TestTGMatchRecordDedupe(t *testing.T) {
 	_ = base
 }
 
+// 资源指纹带类型前缀，值域两两不相交 —— 所以两种类型可以共用同一对唯一索引，
+// 不需要重建索引。这条测试就是「不用重建索引」这个判断的凭据。
+func TestTGMatchRecordDedupeAcrossKinds(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	mk := func(kind, hash string, subID int64) *domain.TGMatchRecord {
+		return &domain.TGMatchRecord{
+			ChannelID: 7, MessageID: 100, ResourceKind: kind, MagnetHash: hash,
+			Magnet: "x", SubscriptionID: subID, Status: domain.TGRecordPending,
+			Season: -1, Episode: -1, EpisodeEnd: -1,
+		}
+	}
+
+	// 同一条消息里的三种资源必须都能落库 —— 指纹不同，唯一索引不该互相拦。
+	kinds := []struct{ kind, hash string }{
+		{"magnet", "ce5ef90c7cf08c9a1902a5e2a73362da32ae3418"},
+		{"ed2k", "ed2k:4d517deece354c11fe7e497999956663"},
+		{"share_115", "115:swsa2t23zrk"},
+	}
+	for _, k := range kinds {
+		id, err := s.TGMatchRecords.Create(ctx, mk(k.kind, k.hash, 5))
+		if err != nil {
+			t.Fatalf("create %s: %v", k.kind, err)
+		}
+		if id == 0 {
+			t.Fatalf("%s 被判成重复 —— 指纹前缀没起作用", k.kind)
+		}
+	}
+
+	// 同类型同指纹仍然要去重。
+	dup, err := s.TGMatchRecords.Create(ctx, mk("share_115", "115:swsa2t23zrk", 5))
+	if err != nil {
+		t.Fatalf("create dup: %v", err)
+	}
+	if dup != 0 {
+		t.Fatalf("同类型同指纹应当去重，得到 id=%d", dup)
+	}
+
+	// resource_kind 要能往返，且空值折算成 magnet（保护旧行与手工构造的记录）。
+	got, err := s.TGMatchRecords.Get(ctx, 1)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ResourceKind != "magnet" {
+		t.Fatalf("ResourceKind = %q, want magnet", got.ResourceKind)
+	}
+	empty, err := s.TGMatchRecords.Create(ctx, &domain.TGMatchRecord{
+		ChannelID: 11, MessageID: 900, MagnetHash: "hash-empty-kind",
+		Status: domain.TGRecordUnmatched, Season: -1, Episode: -1, EpisodeEnd: -1,
+	})
+	if err != nil || empty == 0 {
+		t.Fatalf("create without kind: id=%d err=%v", empty, err)
+	}
+	roundTripped, err := s.TGMatchRecords.Get(ctx, empty)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if roundTripped.ResourceKind != "magnet" {
+		t.Fatalf("空 Kind 应折算成 magnet，得到 %q", roundTripped.ResourceKind)
+	}
+}
+
 func TestTGMatchRecordListAndRetry(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -365,16 +429,24 @@ func TestTGMatchRecordListAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list by sub: %v", err)
 	}
-	if total != 3 {
-		t.Fatalf("expected 3 records for subscription 5, got %d", total)
+	if total != 3 || len(list) != 3 {
+		t.Fatalf("expected 3 records for subscription 5, got %d (total %d)", len(list), total)
+	}
+	for _, rec := range list {
+		if rec.SubscriptionID != 5 {
+			t.Fatalf("订阅筛选漏了别的订阅的记录：%+v", rec)
+		}
 	}
 
 	list, total, err = s.TGMatchRecords.List(ctx, domain.TGMatchRecordFilter{Keyword: "Remux", Limit: 10})
 	if err != nil {
 		t.Fatalf("list by keyword: %v", err)
 	}
-	if total != 1 {
-		t.Fatalf("expected 1 keyword hit, got %d", total)
+	if total != 1 || len(list) != 1 {
+		t.Fatalf("expected 1 keyword hit, got %d (total %d)", len(list), total)
+	}
+	if !strings.Contains(list[0].RawName, "Remux") {
+		t.Fatalf("关键词筛选没命中：%+v", list[0])
 	}
 
 	pending, err := s.TGMatchRecords.ListPendingBySubscription(ctx, 5)

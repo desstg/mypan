@@ -280,6 +280,7 @@ function handleClose() {
     :config="buildConfig()"
     :device-options="selectedDriver?.qr_devices ?? []"
     :device-field="selectedDriver?.qr_device_field ?? ''"
+    :long-poll="Boolean(selectedDriver?.qr_poll_long_poll)"
     @success="onQRSuccess"
     @close="qrOpen = false"
   />

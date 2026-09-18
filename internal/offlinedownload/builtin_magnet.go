@@ -71,6 +71,26 @@ func builtinURLSchemes() []string {
 	return []string{"http", "https", "magnet"}
 }
 
+// BuiltinSupportsSchemes 报告内置下载器是否支持给定的全部 scheme。
+//
+// 导出是给 tgsubscribe 用的：它必须在「网盘能力探测失败」时判断
+// 能不能安全地降级到内置 —— 见 pusher.go 的 resolveProvider。
+func BuiltinSupportsSchemes(schemes []string) bool {
+	for _, want := range schemes {
+		ok := false
+		for _, have := range builtinURLSchemes() {
+			if strings.EqualFold(strings.TrimSpace(have), strings.TrimSpace(want)) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return len(schemes) > 0
+}
+
 func executeBuiltinTaskByType(ctx context.Context, s *Service, taskID string) {
 	s.mu.Lock()
 	task, ok := s.tasks[taskID]

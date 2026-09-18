@@ -72,7 +72,10 @@ const PAGE_TABS: Record<string, { defaultTab: string; tabs: Record<string, strin
   },
   share: { defaultTab: "webdav", tabs: { webdav: "WebDAV", fuse: "本地挂载" } },
   "cross-transfer": { defaultTab: "plain", tabs: { plain: "跨盘普传", rapid: "跨盘秒传" } },
-  subscribe: { defaultTab: "movie", tabs: { movie: "电影", tv: "剧集" } },
+  subscribe: {
+    defaultTab: "subscribed",
+    tabs: { subscribed: "已订阅", movie: "电影", tv: "剧集", jav: "番号" },
+  },
 };
 
 const route = useRoute();

@@ -5,6 +5,7 @@ import AppInput from "@/components/base/AppInput.vue";
 import AdminStatusPill from "@/components/admin/AdminStatusPill.vue";
 import SectionTabBar from "@/components/admin/SectionTabBar.vue";
 import TGDiscoverWall from "@/components/admin/TGDiscoverWall.vue";
+import TGSubscribedPanel from "@/components/admin/TGSubscribedPanel.vue";
 import TGSubscribeSettingsDrawer from "@/components/admin/TGSubscribeSettingsDrawer.vue";
 import TGTitleDetailModal from "@/components/admin/TGTitleDetailModal.vue";
 import { getApiErrorMessage } from "@/api/client";
@@ -15,19 +16,41 @@ import { toast } from "@/composables/useToast";
 import type { TGMediaType, TGStats, TGSubscription, TGTMDBSearchResult } from "@/types/tg-subscribe";
 import "@/styles/tg-subscribe.css";
 
-// 顶栏形态照 8.png：左侧「图标 + 电影 / 剧集」，右侧「搜索框 + 齿轮」。
+// 顶栏形态照 8.png：左侧「图标 + tab」，右侧「搜索框 + 齿轮」。
 // 主题切换不在这里重复做 —— AdminGlobalActions 里已经有了。
 
-const { activeTab, setActiveTab } = useSectionTabRoute("movie", ["movie", "tv"]);
+// 「已订阅」放在最左：它是这一页的「我的」，后面三个才是去外面找片。
+const TAB_SUBSCRIBED = "subscribed";
+const TAB_MOVIE = "movie";
+const TAB_TV = "tv";
+const TAB_JAV = "jav";
+
+const { activeTab, setActiveTab } = useSectionTabRoute(TAB_SUBSCRIBED, [
+  TAB_SUBSCRIBED,
+  TAB_MOVIE,
+  TAB_TV,
+  TAB_JAV,
+]);
 
 const accountsStore = useAccountsStore();
 
-const mediaType = computed<TGMediaType>(() => (activeTab.value === "tv" ? "tv" : "movie"));
+/**
+ * 当前 tab 对应的 TMDB 媒体类型。
+ *
+ * 只看**发现墙用不用得上**：已订阅读的是本地订阅表，番号是占位空档 ——
+ * 两者都不打 TMDB，所以统一回落成 movie 只是给不渲染的组件一个合法值。
+ */
+const mediaType = computed<TGMediaType>(() => (activeTab.value === TAB_TV ? "tv" : "movie"));
 
 const TABS = [
-  { key: "movie", label: "电影" },
-  { key: "tv", label: "剧集" },
+  { key: TAB_SUBSCRIBED, label: "已订阅" },
+  { key: TAB_MOVIE, label: "电影" },
+  { key: TAB_TV, label: "剧集" },
+  { key: TAB_JAV, label: "番号" },
 ];
+
+/** 发现墙只在电影/剧集两个 tab 出现；搜索框也一样。 */
+const discoverVisible = computed(() => activeTab.value === TAB_MOVIE || activeTab.value === TAB_TV);
 
 const subscriptions = ref<TGSubscription[]>([]);
 const stats = ref<TGStats | null>(null);
@@ -52,19 +75,23 @@ const subscribedKeys = computed(() => {
 
 const subscriptionCount = computed(() => subscriptions.value.filter((s) => s.status === "active").length);
 
-const botHint = computed(() => {
+const fetchHint = computed(() => {
   const status = stats.value?.status;
   if (!status) return null;
-  if (!status.token_set) {
-    return { tone: "warning" as const, text: "还没有配置 Bot Token，点右上角齿轮去设置。" };
+  if (!status.enabled) {
+    return { tone: "warning" as const, text: "TG 订阅未启用，点右上角齿轮打开。" };
   }
   if (status.status === "error") {
-    return { tone: "danger" as const, text: `TG 连接异常：${status.status_message || "请检查代理与 Token"}` };
+    return { tone: "danger" as const, text: `抓取异常：${status.status_message || "请到「系统设置 → 其他设置 → 网络代理」检查代理"}` };
   }
   if (status.connected) {
-    return { tone: "success" as const, text: `Bot ${status.bot_name || ""} 已连接`.trim() };
+    const mins = Math.max(1, Math.round(status.poll_interval_sec / 60));
+    return {
+      tone: "success" as const,
+      text: `正在监听 ${status.channel_count} 个频道，约每 ${mins} 分钟抓取一次`,
+    };
   }
-  return { tone: "muted" as const, text: "TG 订阅未启用或尚未开始轮询。" };
+  return { tone: "muted" as const, text: "等待首轮抓取…" };
 });
 
 async function loadSubscriptions() {
@@ -130,7 +157,7 @@ async function onChanged() {
   await Promise.all([loadSubscriptions(), loadStats()]);
 }
 
-// 切换 电影 / 剧集 时清掉搜索词 —— 上一个是关键词的结果留在另一个 tab 里很突兀。
+// 切换 tab 时清掉搜索词 —— 上一个是关键词的结果留在另一个 tab 里很突兀。
 watch(activeTab, () => clearSearch());
 
 onMounted(async () => {
@@ -148,7 +175,7 @@ onMounted(async () => {
     >
       <template #actions>
         <div style="display: flex; align-items: center; gap: 10px">
-          <div style="width: 240px">
+          <div v-if="discoverVisible" style="width: 240px">
             <AppInput
               v-model="keywordInput"
               placeholder="搜索影片，回车或稍候自动搜索"
@@ -156,7 +183,7 @@ onMounted(async () => {
               @keyup.enter="keyword = keywordInput"
             />
           </div>
-          <AppButton v-if="keyword" type="button" variant="ghost" size="sm" @click="clearSearch">
+          <AppButton v-if="discoverVisible && keyword" type="button" variant="ghost" size="sm" @click="clearSearch">
             清除
           </AppButton>
           <button
@@ -172,14 +199,26 @@ onMounted(async () => {
       </template>
     </SectionTabBar>
 
-    <div v-if="botHint" style="display: flex; align-items: center; gap: 10px">
-      <AdminStatusPill :tone="botHint.tone">{{ botHint.text }}</AdminStatusPill>
+    <div v-if="fetchHint" style="display: flex; align-items: center; gap: 10px">
+      <AdminStatusPill :tone="fetchHint.tone">{{ fetchHint.text }}</AdminStatusPill>
       <span v-if="subscriptionCount" class="tg-detail__sub">
         正在追更 {{ subscriptionCount }} 部 · 共 {{ subscriptions.length }} 条订阅
       </span>
     </div>
 
+    <TGSubscribedPanel v-if="activeTab === TAB_SUBSCRIBED" @changed="onChanged" />
+
+    <!-- 番号：后端还没有这个媒体类型，所以这里只放一句说明。
+         做成空状态而不是把电影的内容伪装成番号 —— 那会让人以为筛选坏了。 -->
+    <AdminEmptyState
+      v-else-if="activeTab === TAB_JAV"
+      icon="🚧"
+      title="番号订阅还没开放"
+      description="这一档只是先占个位置。番号订阅还没有实现，等做出来再回到这里。"
+    />
+
     <TGDiscoverWall
+      v-else
       :media-type="mediaType"
       :keyword="keyword"
       :subscribed-keys="subscribedKeys"

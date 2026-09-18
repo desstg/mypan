@@ -12,10 +12,6 @@ import (
 )
 
 var moSettingFieldToKey = map[string]string{
-	"proxy_enabled":            settings.KeyMOProxyEnabled,
-	"proxy_url":                settings.KeyMOProxyURL,
-	"proxy_username":           settings.KeyMOProxyUsername,
-	"proxy_password":           settings.KeyMOProxyPassword,
 	"tmdb_api_key":             settings.KeyMOTmdbAPIKey,
 	"tmdb_language":            settings.KeyMOTmdbLanguage,
 	"tmdb_api_host":            settings.KeyMOTmdbAPIHost,
@@ -76,7 +72,7 @@ func UpdateSettings(ctx context.Context, svc *settings.Service, updates map[stri
 		if err != nil {
 			return domain.Errorf(domain.CodeValidation, "%v", err)
 		}
-		if (field == "tmdb_api_key" || field == "proxy_password") && strings.TrimSpace(val) == "" {
+		if field == "tmdb_api_key" && strings.TrimSpace(val) == "" {
 			continue
 		}
 		normalized[key] = val

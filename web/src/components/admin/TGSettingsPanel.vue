@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import AppButton from "@/components/base/AppButton.vue";
 import AppInput from "@/components/base/AppInput.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
@@ -14,7 +14,7 @@ import {
   fetchTGConfig,
   fetchTGQualityProfiles,
   saveTGConfig,
-  testTGBot,
+  testTGConnection,
 } from "@/api/tgSubscribe";
 import { useAccountsStore } from "@/stores/accounts";
 import { confirm } from "@/composables/useConfirm";
@@ -41,12 +41,6 @@ const baseline = ref("");
 
 const draft = reactive<TGConfigInput>({
   enabled: false,
-  token: "",
-  api_host: "",
-  proxy_enabled: false,
-  proxy_url: "",
-  proxy_username: "",
-  proxy_password: "",
   auto_push: false,
   default_account_id: 0,
   default_parent_id: "",
@@ -54,23 +48,16 @@ const draft = reactive<TGConfigInput>({
   default_quality_profile_id: 0,
   collect_window_min: 5,
   max_push_per_hour: 20,
+  poll_interval_sec: 600,
+  backfill_pages: 1,
 });
 
 const pickerOpen = ref(false);
 
-/**
- * 脏判断只看用户能编辑、且会回传的字段。
- *
- * Token 与代理密码是「留空表示不修改」，所以单独比较草稿值 —— 用户只是打开
- * 面板再关掉时它们都是空串，不会误判成有未保存改动。
- */
+/** 脏判断只看用户能编辑、且会回传的字段。 */
 function snapshot() {
   return JSON.stringify({
     enabled: draft.enabled,
-    api_host: draft.api_host,
-    proxy_enabled: draft.proxy_enabled,
-    proxy_url: draft.proxy_url,
-    proxy_username: draft.proxy_username,
     auto_push: draft.auto_push,
     default_account_id: draft.default_account_id,
     default_parent_id: draft.default_parent_id,
@@ -78,8 +65,8 @@ function snapshot() {
     default_quality_profile_id: draft.default_quality_profile_id,
     collect_window_min: draft.collect_window_min,
     max_push_per_hour: draft.max_push_per_hour,
-    token: draft.token,
-    proxy_password: draft.proxy_password,
+    poll_interval_sec: draft.poll_interval_sec,
+    backfill_pages: draft.backfill_pages,
   });
 }
 
@@ -103,13 +90,6 @@ const defaultTargetText = computed(() => {
 function applyConfig(cfg: TGConfig) {
   status.value = cfg;
   draft.enabled = cfg.enabled;
-  // Token 与代理密码不回传明文，留空即「不改」。
-  draft.token = "";
-  draft.proxy_password = "";
-  draft.api_host = cfg.api_host;
-  draft.proxy_enabled = cfg.proxy_enabled;
-  draft.proxy_url = cfg.proxy_url;
-  draft.proxy_username = cfg.proxy_username;
   draft.auto_push = cfg.auto_push;
   draft.default_account_id = cfg.default_account_id;
   draft.default_parent_id = cfg.default_parent_id;
@@ -117,6 +97,8 @@ function applyConfig(cfg: TGConfig) {
   draft.default_quality_profile_id = cfg.default_quality_profile_id;
   draft.collect_window_min = cfg.collect_window_min;
   draft.max_push_per_hour = cfg.max_push_per_hour;
+  draft.poll_interval_sec = cfg.poll_interval_sec || 600;
+  draft.backfill_pages = cfg.backfill_pages;
   baseline.value = snapshot();
   loaded.value = true;
 }
@@ -155,11 +137,11 @@ function revert() {
 async function runTest() {
   testing.value = true;
   try {
-    const { bot_name } = await testTGBot();
-    toast.success(`连接成功：${bot_name}`);
+    const { detail } = await testTGConnection();
+    toast.success(`连接正常：${detail}`);
     status.value = await fetchTGConfig();
   } catch (error) {
-    toast.error(getApiErrorMessage(error, "连接 Telegram 失败"));
+    toast.error(getApiErrorMessage(error, "连接 t.me 失败"));
   } finally {
     testing.value = false;
   }
@@ -191,23 +173,27 @@ async function toggleAutoPush(next: boolean) {
   draft.auto_push = next;
 }
 
-const botStatusText = computed(() => {
+const fetchStatusText = computed(() => {
   const s = status.value?.status;
-  if (s === "ok") return status.value?.bot_name || "已连接";
-  if (s === "error") return "连接异常";
+  if (s === "ok") {
+    const at = status.value?.last_poll_at;
+    return at ? `正常（上次抓取 ${timeAgo(at)}）` : "正常";
+  }
+  if (s === "error") return "抓取异常";
   return "未检测";
 });
 
-watch(
-  () => draft.proxy_enabled,
-  (enabled) => {
-    if (!enabled) {
-      draft.proxy_url = "";
-      draft.proxy_username = "";
-      draft.proxy_password = "";
-    }
-  },
-);
+/** 把 RFC3339 时间戳说成「几分钟前」。 */
+function timeAgo(iso: string): string {
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return "刚刚";
+  const mins = Math.floor((Date.now() - ts) / 60000);
+  if (mins < 1) return "刚刚";
+  if (mins < 60) return `${mins} 分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
 
 // 改了没保存就切页时要拦一下，和其余设置页一致。
 useSettingsPageDirty(isDirty, revert);
@@ -233,9 +219,9 @@ defineExpose(
     <div v-if="loading" class="settings-card__loading">加载中…</div>
 
     <template v-else>
-      <SettingsCard title="Bot 连接" :accent="ACCENT">
+      <SettingsCard title="抓取设置" :accent="ACCENT">
         <template #head-aside>
-          <span>{{ botStatusText }}</span>
+          <span>{{ fetchStatusText }}</span>
         </template>
         <template #head-actions>
           <AppButton type="button" variant="secondary" size="sm" :disabled="testing" @click="runTest">
@@ -255,78 +241,39 @@ defineExpose(
         <SettingsRow>
           <template #info>
             <SettingsRowLabel
-              label="Bot Token"
-              help-title="Bot Token"
-              help-text="在 Telegram 里找 @BotFather 创建 Bot，把拿到的 Token 填在这里。留空表示不修改已保存的值。"
+              label="抓取间隔（秒）"
+              help-title="抓取间隔"
+              help-text="每个频道多久抓一次 Telegram 网页预览。t.me 不是给程序用的接口，填太小有被限流的风险，建议 300–900。频道多的时候会自动放大实际间隔。"
             />
           </template>
           <template #control>
-            <AppInput
-              v-model="draft.token"
-              type="password"
-              ignore-autofill
-              :placeholder="status?.token_set ? '已设置，留空不修改' : '123456:ABC-DEF...'"
-            />
+            <AppInput v-model="draft.poll_interval_sec" type="number" placeholder="600" />
           </template>
         </SettingsRow>
 
         <SettingsRow>
           <template #info>
-            <SettingsRowLabel
-              label="API 地址"
-              help-title="API 地址"
-              help-text="留空走官方 api.telegram.org。国内直连不通，可以填自建反代的域名。"
-            />
+            <SettingsRowLabel label="首次订阅回填页数" help-title="回填页数">
+              <p>新加频道时往回翻多少页历史，每页 20 条。</p>
+              <p>填 1 表示回填最近 20 条；填 0 表示只从最新一条开始追新。</p>
+              <p>
+                回填出来的历史帖同样会参与匹配。若已打开「自动推送」，它们也会被推送 ——
+                受每小时推送上限约束，建议先看过匹配历史再开自动推送。
+              </p>
+              <p v-if="status?.effective_interval_sec">
+                当前共 {{ status.channel_count }} 个频道，实际每
+                {{ Math.round(status.effective_interval_sec / 60) }} 分钟抓完一轮。
+              </p>
+            </SettingsRowLabel>
           </template>
           <template #control>
-            <AppInput v-model="draft.api_host" placeholder="https://api.telegram.org" />
+            <AppInput v-model="draft.backfill_pages" type="number" placeholder="1" />
           </template>
         </SettingsRow>
 
-        <SettingsRow>
-          <template #info>
-            <SettingsRowLabel
-              label="使用代理"
-              help-title="代理说明"
-              help-text="Telegram API 与网盘无关，只影响 Bot 连接。"
-            />
-          </template>
-          <template #control>
-            <SettingsBoolSegment v-model="draft.proxy_enabled" label="使用代理" />
-          </template>
-        </SettingsRow>
-
-        <template v-if="draft.proxy_enabled">
-          <SettingsRow>
-            <template #info>
-              <SettingsRowLabel label="代理地址" help-title="代理地址" help-text="支持 http / https / socks5。" />
-            </template>
-            <template #control>
-              <AppInput v-model="draft.proxy_url" placeholder="http://127.0.0.1:7890" />
-            </template>
-          </SettingsRow>
-          <SettingsRow>
-            <template #info>
-              <SettingsRowLabel label="代理用户名" help-title="代理用户名" help-text="无认证可留空。" />
-            </template>
-            <template #control>
-              <AppInput v-model="draft.proxy_username" placeholder="留空表示无认证" />
-            </template>
-          </SettingsRow>
-          <SettingsRow>
-            <template #info>
-              <SettingsRowLabel label="代理密码" help-title="代理密码" help-text="留空表示不修改已保存的值。" />
-            </template>
-            <template #control>
-              <AppInput
-                v-model="draft.proxy_password"
-                type="password"
-                ignore-autofill
-                :placeholder="status?.proxy_password_set ? '已设置，留空不修改' : '留空表示无认证'"
-              />
-            </template>
-          </SettingsRow>
-        </template>
+        <p class="tg-form__hint">
+          抓取走「系统设置 → 其他设置 → 网络代理」里的全局代理；国内直连 t.me 通常不通，建议先去那里配好。
+        </p>
       </SettingsCard>
 
       <SettingsCard title="推送" :accent="ACCENT">

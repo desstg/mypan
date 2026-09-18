@@ -103,7 +103,7 @@ func (s *Service) newTMDBClient(language string) (*tmdb.Client, error) {
 	return tmdb.NewClient(tmdb.Options{
 		APIKey:        apiKey,
 		Language:      language,
-		ProxyURL:      buildProxyURL(settingsDict),
+		ProxyURL:      PlannerProxyURL(settingsDict),
 		APIBaseHost:   stringFromAny(settingsDict["tmdb_api_host"]),
 		ImageBaseHost: stringFromAny(settingsDict["tmdb_image_host"]),
 	}), nil

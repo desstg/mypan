@@ -40,8 +40,12 @@ export interface DriverInfo {
   auth_type: string;
   supports_oauth?: boolean;
   supports_qr_login?: boolean;
+  /** 驱动是否具备分享转存能力（类型层面）。账号当下能不能转要看它配没配网页 Cookie。 */
+  supports_share_receive?: boolean;
   qr_devices?: FieldOption[];
   qr_device_field?: string;
+  /** 状态查询是长轮询（每次请求会挂住若干秒）。前端据此改成「拿到响应就立刻再问」。 */
+  qr_poll_long_poll?: boolean;
   internal_experimental?: boolean;
   fields: FieldSchema[];
 }

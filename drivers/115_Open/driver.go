@@ -25,16 +25,19 @@ type Driver struct {
 	mu      sync.Mutex
 	token   string
 	refresh string
+	cookie  string
 
 	pickMu sync.RWMutex
 	pickBy map[string]string
 }
 
 var config = driver.Config{
-	Name:                   "115_open",
-	DisplayName:            "115网盘Open",
-	Description:            "115网盘官方API接入，支持文件管理、上传下载等功能",
-	CardTags:               []string{"官方授权", "OAuth", "支持302", "SHA1"},
+	Name:        "115_open",
+	DisplayName: "115网盘Open",
+	Description: "115网盘官方API接入，支持文件管理、上传下载等功能",
+	// 网页 Cookie 是这一轮加的，但它不是「另一种登录方式」：文件管理/离线下载/上传
+	// 全都走开放平台，Cookie 只有分享转存这一个用途（见 share.go 与 Addition.Cookie）。
+	CardTags:               []string{"官方授权", "OAuth", "网页Cookie", "支持302", "SHA1"},
 	SortOrder:              2,
 	AuthLabel:              "OAuth",
 	CardColor:              "#22A7F0",
@@ -46,6 +49,18 @@ var config = driver.Config{
 	TokenLifetime:          2 * time.Hour,
 	RefreshAdvance:         15 * time.Minute,
 	ProvideHashes:          []string{"sha1"},
+	// 扫码登录：默认 alipaymini，见 qrlogin.go 顶部关于互踢与风控的说明。
+	QRDevices: []driver.FieldOption{
+		{Value: "alipaymini", Label: "支付宝小程序（推荐）"},
+		{Value: "wechatmini", Label: "微信小程序"},
+		{Value: "tv", Label: "TV 端"},
+		{Value: "android", Label: "安卓 App"},
+		{Value: "ios", Label: "iOS App"},
+		{Value: "web", Label: "网页版（会踢掉浏览器登录，且最易触发风控）"},
+	},
+	QRDeviceField: "qr_device",
+	// 115 的状态查询是长轮询：实测每次请求挂满 30 秒。前端必须等响应回来再问下一次。
+	QRPollLongPoll: true,
 }
 
 func New() driver.Driver { return &Driver{} }
@@ -56,11 +71,18 @@ func (d *Driver) Config() driver.Config { return config }
 
 func (d *Driver) GetAddition() any { return &d.add }
 
+func (d *Driver) currentCookie() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cookie
+}
+
 func (d *Driver) SetAuthCredentials(creds domain.AuthCredentials) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.token = strings.TrimSpace(creds.AccessToken)
 	d.refresh = strings.TrimSpace(creds.RefreshToken)
+	d.cookie = strings.TrimSpace(creds.Cookie)
 }
 
 func (d *Driver) SetAuthPersister(fn driver.AuthPersistFunc) { d.persist = fn }
@@ -72,6 +94,15 @@ func (d *Driver) SetRequestIntervalGate(gate driver.RequestIntervalGate) { d.int
 func (d *Driver) Init(ctx context.Context) error {
 	if d.client == nil {
 		d.client = httpx.NewClient(httpx.ClientOptions{Timeout: 30 * time.Second})
+	}
+	// Cookie 只是附加凭据：没有也不影响初始化，只是分享转存用不了
+	// （见 share.go 的 ShareReceiveCapabilities）。
+	if cookie := strings.TrimSpace(d.currentCookie()); cookie == "" {
+		if fallback := strings.TrimSpace(d.add.Cookie); fallback != "" {
+			d.mu.Lock()
+			d.cookie = fallback
+			d.mu.Unlock()
+		}
 	}
 	d.mu.Lock()
 	token := d.token
@@ -234,4 +265,7 @@ var (
 	_ driver.OfflineTaskRefresher     = (*Driver)(nil)
 	_ driver.OfflineTaskDeleter       = (*Driver)(nil)
 	_ driver.OfflineTorrentDownloader = (*Driver)(nil)
+	_ driver.ShareReceiver            = (*Driver)(nil)
+	_ driver.ShareMetaPeeker          = (*Driver)(nil)
+	_ driver.QRLoginProvider          = (*Driver)(nil)
 )

@@ -24,20 +24,24 @@ const modeOptions = [
   { value: "nocode", label: "无番号" },
 ];
 
-// 折叠状态是**纯界面状态**，不进数据、不参与脏判断 —— 它只是让你把已经调好的
-// 规则收起来，避免十几条规则堆成一面墙。
+// 折叠状态是**纯界面状态**，不进数据、不参与脏判断 —— 它只是让你把规则收起来，
+// 避免十几条规则堆成一面墙。
+//
+// 默认**收起**：规则一多，一屏就能看全「优先级 + 规则名 → 目标目录」的脉络，
+// 要改哪条再展开哪条。收起时卡片头那行摘要就是为此存在的。
 //
 // 按「下标」而不是按对象引用来记：patch() 每次编辑都产生新对象，按引用记的话
 // 一敲键盘折叠状态就丢；而规则本身没有稳定 id（数据模型里只有 name/target_name/…）。
 // 代价是上下移动规则时，折叠状态跟着「位置」走而不是跟着规则走 —— 可以接受。
 const collapsed = reactive<Record<number, boolean>>({});
 
+// 只有被显式展开过（记成 false）才算展开，没记录过的默认收起
 function isCollapsed(index: number): boolean {
-  return collapsed[index] === true;
+  return collapsed[index] !== false;
 }
 
 function toggleCollapsed(index: number) {
-  collapsed[index] = !collapsed[index];
+  collapsed[index] = !isCollapsed(index);
 }
 
 function update(next: MediaOrganizeJavClassifyRule[]) {
@@ -78,10 +82,14 @@ function setMode(index: number, mode: string) {
 }
 
 function addRule() {
-  update([
+  const next = [
     ...props.modelValue,
     { name: `规则 ${props.modelValue.length + 1}`, target_name: "", includes: [] },
-  ]);
+  ];
+  // 新加的一条显式展开：规则默认是收起的，不特判的话刚点完「添加」
+  // 就得再点一次展开才能填内容。
+  collapsed[next.length - 1] = false;
+  update(next);
 }
 
 function removeRule(index: number) {

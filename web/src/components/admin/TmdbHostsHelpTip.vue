@@ -39,7 +39,9 @@ const open = ref(false);
         <pre class="tmdb-hosts-panel__code">extra_hosts:
   - "api.themoviedb.org:可用IP"
   - "image.tmdb.org:可用IP"</pre>
-        <p class="tmdb-hosts-panel__foot">改完后重建/重启容器即可；这与程序内的「启用代理」是两条路，一般二选一。</p>
+        <p class="tmdb-hosts-panel__foot">
+          改完后重建/重启容器即可；这与「系统设置 → 其他设置 → 网络代理」里的全局代理是两条路，一般二选一。
+        </p>
       </div>
     </template>
   </AppDropdown>

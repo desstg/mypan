@@ -14,10 +14,12 @@ import { getApiErrorMessage } from "@/api/client";
 import {
   createTGSubscription,
   deleteTGSubscription,
+  fetchTGSubscription,
   fetchTGSubscriptionByTMDB,
   fetchTGSubscriptionEpisodes,
   fetchTGQualityProfiles,
   resetTGSubscription,
+  searchTGHistory,
   setTGSubscriptionStatus,
   tgPosterURL,
   updateTGSubscription,
@@ -36,8 +38,26 @@ import type {
 
 const props = defineProps<{
   open: boolean;
+  /** TMDB 条目（海报墙点进来的形态）。 */
   item: TGTMDBSearchResult | null;
-  mediaType: TGMediaType;
+  /**
+   * item 那一侧的媒体类型。
+   *
+   * 只有海报墙会走到这条分支（它一定传），所以在「已订阅」那种只给
+   * subscription 的入口可以省略 —— 省掉调用方为了凑一个不用的参数
+   * 去猜 media_type。
+   */
+  mediaType?: TGMediaType;
+  /**
+   * 已有订阅（「已订阅」页点卡片进来的形态）。
+   *
+   * 两个入口二选一：海报墙给 item（弹窗先去查「订没订过」），
+   * 「已订阅」页给 subscription（那条订阅已经拿在手里，不用再查）。
+   *
+   * 有 subscription 时表单直接用这条订阅的真实配置填充，并且**不再**打 TMDB ——
+   * 列表页拿到的就是同一条记录，再查一次只会多一次往返、还多一个「查不到」的分支。
+   */
+  subscription?: TGSubscription | null;
 }>();
 
 const emit = defineEmits<{ close: []; changed: [] }>();
@@ -46,6 +66,7 @@ const accountsStore = useAccountsStore();
 
 const loading = ref(false);
 const saving = ref(false);
+const searching = ref(false);
 const profiles = ref<TGQualityProfile[]>([]);
 const subscription = ref<TGSubscription | null>(null);
 const episodes = ref<TGSubscriptionEpisode[]>([]);
@@ -158,18 +179,43 @@ const episodeGrid = computed(() => {
     });
 });
 
-/** 弹窗打开时重置并加载。 */
+/** 弹窗打开时重置并加载。两种入口：海报墙给 item，已订阅页给 subscription。 */
 watch(
-  () => [props.open, props.item] as const,
-  async ([open, item]) => {
-    if (!open || !item) return;
-    form.tmdb_id = String(item.id);
-    form.media_type = props.mediaType;
-    form.title = item.title || item.name || "";
-    form.original_title = item.original_title || item.original_name || "";
-    form.year = Number((item.release_date || item.first_air_date || "").slice(0, 4)) || 0;
-    form.poster_path = item.poster_path || "";
-    form.overview = item.overview || "";
+  () => [props.open, props.item, props.subscription] as const,
+  async ([open]) => {
+    if (!open) return;
+    if (!props.item && !props.subscription) return;
+
+    // 两条入口填的表单字段完全一样，区别只在数据来源与「要不要再查一次」：
+    // 已订阅页那条订阅自带全部字段，海报墙那条得先问后端订没订过。
+    const asSub = props.subscription ?? null;
+    const asItem = props.subscription ? null : props.item;
+
+    form.tmdb_id = String(asItem ? asItem.id : asSub!.tmdb_id);
+    // 海报墙那条：mediaType 是父级给的当前 tab。它缺失只可能是因为调用方走错了入口，
+    // 而电影是最无害的回落（列表里点进来的那条本来就带自己的 media_type）。
+    form.media_type = asItem ? (props.mediaType ?? "movie") : (asSub!.media_type as TGMediaType);
+    form.title = (asItem ? asItem.title || asItem.name : asSub!.title) || "";
+    form.original_title =
+      (asItem ? asItem.original_title || asItem.original_name : asSub!.original_title) || "";
+    form.year =
+      (asItem
+        ? Number((asItem.release_date || asItem.first_air_date || "").slice(0, 4))
+        : asSub!.year) || 0;
+    form.poster_path = (asItem ? asItem.poster_path : asSub!.poster_path) || "";
+    form.overview = (asItem ? asItem.overview : asSub!.overview) || "";
+
+    episodes.value = [];
+
+    if (asSub) {
+      // 已经拿在手里了，不会再变 —— 直接铺开，连 loading 都不用摆。
+      applySubscription(asSub);
+      subscription.value = asSub;
+      if (asSub.media_type === "tv") await loadEpisodes(asSub.id);
+      return;
+    }
+
+    // 海报墙那条：先问后端订没订过，顺带把画质方案清单拉回来。
     form.quality_profile_id = 0;
     form.target_account_id = 0;
     form.target_parent_id = "";
@@ -177,25 +223,20 @@ watch(
     form.push_provider = "auto";
     form.collect_window_min = 5;
     form.upgrade_enabled = true;
+    subscription.value = null;
 
     loading.value = true;
-    episodes.value = [];
     try {
       const [subs, list] = await Promise.all([
-        fetchTGSubscriptionByTMDB(item.id, props.mediaType),
+        // 用已经落进表单的媒体类型，而不是 props：上面那一行已经把它归一到非空值了。
+        fetchTGSubscriptionByTMDB(asItem!.id, form.media_type),
         profiles.value.length ? Promise.resolve(profiles.value) : fetchTGQualityProfiles(),
       ]);
       profiles.value = list;
       subscription.value = subs;
       // 已订阅时用真实配置覆盖表单，方便「已订阅」形态直接改。
       if (subs) {
-        form.quality_profile_id = subs.quality_profile_id;
-        form.target_account_id = subs.target_account_id;
-        form.target_parent_id = subs.target_parent_id;
-        form.target_display_path = subs.target_display_path;
-        form.push_provider = subs.push_provider;
-        form.collect_window_min = subs.collect_window_min;
-        form.upgrade_enabled = subs.upgrade_enabled;
+        applySubscription(subs);
         if (subs.media_type === "tv") {
           await loadEpisodes(subs.id);
         }
@@ -208,6 +249,17 @@ watch(
   },
   { immediate: true },
 );
+
+/** 把一条订阅的真实配置铺进表单，供「已订阅」形态直接编辑。 */
+function applySubscription(sub: TGSubscription) {
+  form.quality_profile_id = sub.quality_profile_id;
+  form.target_account_id = sub.target_account_id;
+  form.target_parent_id = sub.target_parent_id;
+  form.target_display_path = sub.target_display_path;
+  form.push_provider = sub.push_provider;
+  form.collect_window_min = sub.collect_window_min;
+  form.upgrade_enabled = sub.upgrade_enabled;
+}
 
 /** 拉取已入库的集数明细。失败只影响进度明细，不打断整个弹窗。 */
 async function loadEpisodes(subscriptionId: number) {
@@ -257,11 +309,23 @@ async function changeStatus(status: "active" | "paused" | "completed") {
   try {
     await setTGSubscriptionStatus(subscription.value.id, status);
     toast.success(status === "paused" ? "已暂停追更" : status === "completed" ? "已标记完成" : "已恢复追更");
-    subscription.value = await fetchTGSubscriptionByTMDB(form.tmdb_id, props.mediaType);
+    subscription.value = await refetch();
     emit("changed");
   } catch (error) {
     toast.error(getApiErrorMessage(error, "操作失败"));
   }
+}
+
+/**
+ * 重新取一次当前这条订阅。
+ *
+ * 两个入口的取法不同：海报墙形态只有 TMDB id（要重新查），
+ * 已订阅页形态手里就有 id（直接按 id 查）—— 后者更准，不受「改了 tmdb_id」影响。
+ */
+async function refetch(): Promise<TGSubscription | null> {
+  const id = subscription.value?.id;
+  if (id) return fetchTGSubscription(id);
+  return fetchTGSubscriptionByTMDB(form.tmdb_id, form.media_type);
 }
 
 async function resetProgress() {
@@ -280,11 +344,38 @@ async function resetProgress() {
   try {
     const { removed } = await resetTGSubscription(subscription.value.id);
     toast.success(`已重置，清除了 ${removed} 条进度记录`);
-    subscription.value = await fetchTGSubscriptionByTMDB(form.tmdb_id, props.mediaType);
+    subscription.value = await refetch();
     episodes.value = [];
     emit("changed");
   } catch (error) {
     toast.error(getApiErrorMessage(error, "重置失败"));
+  }
+}
+
+/**
+ * 搜历史帖。
+ *
+ * 补的是增量抓取的盲区：一条已经播到第 10 集的剧，你订阅时前 9 集是抓不到的
+ * （首次订阅只回填 1 页）。这个按钮走 t.me 的频道内搜索去翻旧账。
+ *
+ * 产物只落库、不推送：命中的会以「待确认」出现在匹配历史里，你确认后再手动推。
+ * 所以这里不做二次确认弹窗 —— 它没有任何不可逆的副作用。
+ */
+async function searchHistory() {
+  if (!subscription.value) return;
+  searching.value = true;
+  try {
+    const res = await searchTGHistory(subscription.value.id);
+    if (res.hit_records > 0) {
+      toast.success(res.message);
+      emit("changed");
+    } else {
+      toast.info(res.message);
+    }
+  } catch (error) {
+    toast.error(getApiErrorMessage(error, "搜索历史失败"));
+  } finally {
+    searching.value = false;
   }
 }
 
@@ -334,7 +425,7 @@ async function unsubscribe() {
             </template>
           </div>
           <div class="tg-detail__badges">
-            <AdminStatusPill tone="brand">{{ mediaType === "movie" ? "电影" : "剧集" }}</AdminStatusPill>
+            <AdminStatusPill tone="brand">{{ form.media_type === "movie" ? "电影" : "剧集" }}</AdminStatusPill>
             <AdminStatusPill v-if="form.year" tone="muted">{{ form.year }}</AdminStatusPill>
             <AdminStatusPill v-if="item?.vote_average" tone="warning">
               ★ {{ item.vote_average.toFixed(1) }}
@@ -455,6 +546,15 @@ async function unsubscribe() {
       <template v-if="subscribed">
         <AppButton type="button" variant="ghost" @click="unsubscribe">取消订阅</AppButton>
         <AppButton type="button" variant="ghost" @click="resetProgress">重置进度</AppButton>
+        <AppButton
+          type="button"
+          variant="ghost"
+          :disabled="searching"
+          title="去频道里搜这条订阅的历史帖，补上订阅之前发过的内容"
+          @click="searchHistory"
+        >
+          {{ searching ? "搜索中…" : "搜历史帖" }}
+        </AppButton>
         <AppButton
           v-if="subscription?.status !== 'paused'"
           type="button"

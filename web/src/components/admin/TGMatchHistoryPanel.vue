@@ -35,11 +35,17 @@ const props = withDefaults(
 const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "全部" },
   { value: "pushed", label: "已推送" },
+  { value: "upgraded", label: "洗版升级" },
   { value: "pending", label: "等待选优" },
   { value: "ambiguous", label: "待确认" },
   { value: "unmatched", label: "未匹配" },
+  { value: "unsupported", label: "暂不支持投递" },
   { value: "filtered", label: "被过滤" },
+  { value: "superseded", label: "已被取代" },
+  { value: "duplicate", label: "已处理过" },
   { value: "failed", label: "失败" },
+  { value: "unretryable", label: "失败（不重试）" },
+  { value: "ignored", label: "已忽略" },
 ];
 
 const loading = ref(false);
@@ -64,12 +70,20 @@ const statusToneMap: Record<TGRecordStatus, "success" | "warning" | "brand" | "d
   pending: "brand",
   filtered: "warning",
   ambiguous: "warning",
+  unsupported: "warning",
   unmatched: "muted",
   duplicate: "muted",
   superseded: "muted",
   ignored: "muted",
   failed: "danger",
+  // 比 failed 更重：failed 还有重试机会，unretryable 是判死的。
+  unretryable: "danger",
 };
+
+/** 记录不能手动推送的原因：类型本身没有投递器时，点了必然失败。 */
+const pushBlockedReason = computed(() =>
+  active.value?.status === "unsupported" ? active.value.reason : "",
+);
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
 
@@ -269,6 +283,7 @@ defineExpose({ load });
               <th style="width: 150px">时间</th>
               <th style="width: 130px">频道</th>
               <th>发布名</th>
+              <th style="width: 110px">类型</th>
               <th style="width: 130px">订阅</th>
               <th style="width: 110px">画质</th>
               <th style="width: 90px">状态</th>
@@ -286,6 +301,7 @@ defineExpose({ load });
                   <span v-if="record.is_batch">整季包 · </span>{{ record.name_source || "—" }}
                 </div>
               </td>
+              <td>{{ record.kind_label || "—" }}</td>
               <td>{{ record.subscription_title || "—" }}</td>
               <td>{{ qualityText(record) }}</td>
               <td>
@@ -307,7 +323,7 @@ defineExpose({ load });
         v-else-if="!loading"
         icon="🔍"
         title="还没有匹配记录"
-        :description="compact ? '这个订阅还没匹配到任何资源。' : '确认 Bot 已启用、频道已添加，然后等频道有新消息。'"
+        :description="compact ? '这个订阅还没匹配到任何资源。' : '确认 TG 订阅已启用、频道已添加，然后等频道有新消息。'"
       />
 
       <div v-if="!compact && total > pageSize" class="tg-wall__footer">
@@ -368,7 +384,8 @@ defineExpose({ load });
           <div class="tg-form__value tg-record__hash">{{ active.offline_task_id }}</div>
         </div>
         <div class="tg-form__field tg-form__field--stack">
-          <label class="tg-form__label">磁力链接</label>
+          <!-- 类型可能是 ed2k / 115 分享 / 直链，不能硬编码「磁力链接」。 -->
+          <label class="tg-form__label">{{ active.kind_label || "资源链接" }}</label>
           <div class="tg-form__value">
             <code class="tg-magnet">{{ active.magnet || "—" }}</code>
             <div style="margin-top: 8px">
@@ -381,8 +398,9 @@ defineExpose({ load });
         <div class="tg-form__field">
           <label class="tg-form__label">推送到</label>
           <div class="tg-form__value">
-            <AppSelect v-model="manualSubId" :options="subscriptionOptions" />
-            <p class="tg-form__hint">
+            <AppSelect v-model="manualSubId" :options="subscriptionOptions" :disabled="!!pushBlockedReason" />
+            <p v-if="pushBlockedReason" class="tg-form__hint">{{ pushBlockedReason }}</p>
+            <p v-else class="tg-form__hint">
               待确认或未匹配的记录需要在这里手动指定订阅 —— 系统不敢替你赌是哪一部片。
             </p>
           </div>
@@ -392,7 +410,14 @@ defineExpose({ load });
       <template #footer>
         <AppButton type="button" variant="ghost" :disabled="pushing" @click="ignore">忽略</AppButton>
         <AppButton type="button" variant="secondary" @click="detailOpen = false">关闭</AppButton>
-        <AppButton type="button" variant="primary" :disabled="pushing" @click="manualPush">
+        <!-- 暂不支持投递的记录点了必然失败，直接禁用并说明原因。 -->
+        <AppButton
+          type="button"
+          variant="primary"
+          :disabled="pushing || !!pushBlockedReason"
+          :title="pushBlockedReason"
+          @click="manualPush"
+        >
           {{ pushing ? "提交中…" : "立即推送" }}
         </AppButton>
       </template>

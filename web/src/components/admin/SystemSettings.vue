@@ -145,16 +145,31 @@ const tabs = computed(() => [
 const systemItems = computed(() => items.value.filter((it) => it.category === "system"));
 const accountDisplayItems = computed(() => items.value.filter((it) => it.category === "account_display"));
 const announcementItems = computed(() => items.value.filter((it) => it.category === "announcement"));
+
+// 代理密码单独管：它是 Sensitive，后端回传的是掩码 ******，
+// 通用脏判断会把掩码当成「用户改过了」，一保存就把字面量 ****** 写进库。
+// 所以它不进 form，改用一个 draft + 「留空表示不修改」的约定。
+const PROXY_PASSWORD_KEY = "proxy_password";
+const proxyItems = computed(() => items.value.filter((it) => it.category === "proxy"));
+const proxyItemsForForm = computed(() => proxyItems.value.filter((it) => it.key !== PROXY_PASSWORD_KEY));
+const proxyPasswordDraft = ref("");
+const proxyPasswordSet = computed(() =>
+  proxyItems.value.some((it) => it.key === PROXY_PASSWORD_KEY && it.value !== ""),
+);
+
 const otherSettingsItems = computed(() => [
   ...systemItems.value,
   ...accountDisplayItems.value,
+  ...proxyItemsForForm.value,
   ...announcementItems.value,
 ]);
 const systemChangedKeys = computed(() => otherSettingsItems.value.filter((it) => isChanged(it)).map((it) => it.key));
 const systemChangedCount = computed(() => systemChangedKeys.value.length);
+// 「网络代理」排在「后台公告」前面 —— 用户要的位置就是公告地址上面。
 const serviceSettingsCards = computed(() => [
   { key: "auth-log", title: "授权与日志", items: systemItems.value },
   { key: "account-display", title: "网盘账号显示", items: accountDisplayItems.value },
+  { key: "proxy", title: "网络代理", items: proxyItems.value },
   { key: "announcement", title: "后台公告", items: announcementItems.value },
 ].filter((group) => group.items.length > 0));
 
@@ -183,7 +198,7 @@ const homepageDirty = computed(
     skinDraft.value !== skinSaved.value,
 );
 
-const servicesDirty = computed(() => systemChangedCount.value > 0);
+const servicesDirty = computed(() => systemChangedCount.value > 0 || proxyPasswordDraft.value !== "");
 
 function revertSecurityDraft() {
   securityForm.admin_username = securityOriginal.admin_username;
@@ -199,6 +214,7 @@ function revertHomepageDraft() {
 
 function revertServicesDraft() {
   for (const it of otherSettingsItems.value) form[it.key] = original[it.key];
+  proxyPasswordDraft.value = "";
 }
 
 function isTabDirty(tab: string): boolean {
@@ -276,6 +292,9 @@ function applyPayload(payload: { categories: SettingCategory[]; items: SettingIt
   items.value = filtered.items;
   settingsLoaded.value = true;
   for (const it of items.value) {
+    // 代理密码是 Sensitive，后端回传的是掩码；塞进 form 会被通用脏判断当成用户改动。
+    // 它由 proxyPasswordDraft 单独管（见上面的 PROXY_PASSWORD_KEY）。
+    if (it.key === PROXY_PASSWORD_KEY) continue;
     form[it.key] = it.value;
     original[it.key] = it.value;
   }
@@ -423,9 +442,14 @@ async function saveServices() {
   try {
     const changed: Record<string, string> = {};
     for (const key of systemChangedKeys.value) changed[key] = form[key];
+    // 代理密码只在用户真的敲了新值时才提交 —— 留空表示保持原值。
+    // 掩码 ****** 永远不会走到这里，因为它压根没进 form。
+    const proxyPassword = proxyPasswordDraft.value.trim();
+    if (proxyPassword !== "") changed[PROXY_PASSWORD_KEY] = proxyPassword;
     const accountDisplayChanged = Object.keys(changed).some((key) => ACCOUNT_DISPLAY_SETTING_KEYS.has(key));
     if (Object.keys(changed).length > 0) {
       applyPayload(await saveSettings(changed));
+      proxyPasswordDraft.value = "";
     }
     if (accountDisplayChanged) await accountsStore.loadAccounts();
     toast.success("其他设置已保存");
@@ -826,6 +850,17 @@ async function submit() {
 
                 <div v-else-if="it.type === 'int'" class="field-num">
                   <AppInput v-model="form[it.key]" type="number" :placeholder="it.default" />
+                </div>
+
+                <!-- 代理密码：后端只回传掩码，这里按「留空表示不修改」处理，
+                     不走通用分支 —— 否则会把 ****** 当成值提交回去。 -->
+                <div v-else-if="it.key === PROXY_PASSWORD_KEY" class="field-text">
+                  <AppInput
+                    v-model="proxyPasswordDraft"
+                    type="password"
+                    ignore-autofill
+                    :placeholder="proxyPasswordSet ? '已设置，留空不修改' : '无认证可留空'"
+                  />
                 </div>
 
                 <div v-else class="field-text">

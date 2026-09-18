@@ -73,7 +73,7 @@ func (a plannerAdapter) Build(
 	tmdbClient := tmdb.NewClient(tmdb.Options{
 		APIKey:        apiKey,
 		Language:      mediaorganize.PlannerTMDBLanguage(plannerSettings),
-		ProxyURL:      tmdb.BuildProxyURL(mediaorganize.TmdbProxyFromSettings(plannerSettings)),
+		ProxyURL:      mediaorganize.PlannerProxyURL(plannerSettings),
 		APIBaseHost:   mediaorganize.PlannerTMDBAPIHost(plannerSettings),
 		ImageBaseHost: mediaorganize.PlannerTMDBImageHost(plannerSettings),
 	})

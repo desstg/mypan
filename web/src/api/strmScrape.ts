@@ -62,10 +62,6 @@ export interface StrmScrapeSettings {
   tmdb_api_host: string;
   tmdb_image_host: string;
   tmdb_request_interval_ms: number;
-  proxy_enabled: boolean;
-  proxy_url: string;
-  proxy_username: string;
-  proxy_password: string;
 }
 
 export interface StrmScrapeItemListQuery {

@@ -205,6 +205,8 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		Bus:      core.bus,
 		Log:      logs.For(logx.ModuleSystem),
 		DataDir:  cfg.DataDir,
+		// 分享转存（115 分享链）直接调驱动，不走离线下载服务，所以单独要一份执行器。
+		Exec: core.exec,
 	})
 	tgSubscribeSvc.SetStartupGate(startupGate)
 	// 必须在 offlineDownloadSvc 之后构造，才能订阅它的下载完成事件。

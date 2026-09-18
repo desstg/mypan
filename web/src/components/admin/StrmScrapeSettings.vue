@@ -12,7 +12,6 @@ import AppButton from "@/components/base/AppButton.vue";
 import AppInput from "@/components/base/AppInput.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import AppStateBlock from "@/components/base/AppStateBlock.vue";
-import SettingsBoolSegment from "@/components/admin/SettingsBoolSegment.vue";
 import SettingsCard from "@/components/admin/SettingsCard.vue";
 import SettingsHelpTooltip from "@/components/admin/SettingsHelpTooltip.vue";
 import SettingsRow from "@/components/admin/SettingsRow.vue";
@@ -52,10 +51,6 @@ const {
   tmdb_api_host: "https://api.themoviedb.org",
   tmdb_image_host: "https://image.tmdb.org",
   tmdb_request_interval_ms: 300,
-  proxy_enabled: false,
-  proxy_url: "",
-  proxy_username: "",
-  proxy_password: "",
 });
 
 async function loadSettings(opts?: { silent?: boolean }) {
@@ -69,10 +64,6 @@ async function loadSettings(opts?: { silent?: boolean }) {
         tmdb_api_host: data.tmdb_api_host || "https://api.themoviedb.org",
         tmdb_image_host: data.tmdb_image_host || "https://image.tmdb.org",
         tmdb_request_interval_ms: Number(data.tmdb_request_interval_ms) || 300,
-        proxy_enabled: Boolean(data.proxy_enabled),
-        proxy_url: data.proxy_url || "",
-        proxy_username: data.proxy_username || "",
-        proxy_password: "",
       });
     },
     "加载 STRM 刮削设置失败",
@@ -92,7 +83,6 @@ async function saveSettings() {
       ...settings,
       write_mode: (data.write_mode as StrmScrapeWriteMode) || settings.write_mode,
       tmdb_api_key: data.tmdb_api_key || settings.tmdb_api_key,
-      proxy_password: "",
     });
     snapshotBaseline();
     toast.success("刮削设置已保存");
@@ -112,10 +102,6 @@ async function testTmdb() {
       tmdb_language: settings.tmdb_language,
       tmdb_api_host: settings.tmdb_api_host,
       tmdb_image_host: settings.tmdb_image_host,
-      proxy_enabled: settings.proxy_enabled,
-      proxy_url: settings.proxy_url,
-      proxy_username: settings.proxy_username,
-      proxy_password: settings.proxy_password,
       tmdb_request_interval_ms: Number(settings.tmdb_request_interval_ms),
     });
     const apiOK = result.api_ok ?? result.ok;
@@ -168,7 +154,8 @@ defineExpose(
 
       <SettingsCard title="TMDB 设置" :accent="SCRAPE_SETTINGS_ACCENT">
         <template #head-aside>
-          <p class="scrape-settings-tip">与「目录整理」共用同一套 TMDB / 代理配置，修改后两边同步生效。</p>
+          <p class="scrape-settings-tip">与「目录整理」共用同一套 TMDB 配置，修改后两边同步生效。</p>
+          <TmdbHostsHelpTip />
         </template>
         <template #head-actions>
           <AppButton type="button" variant="secondary" size="sm" :disabled="tmdbTesting" @click="testTmdb">
@@ -236,46 +223,6 @@ defineExpose(
             <AppInput v-model="settings.tmdb_request_interval_ms" type="number" min="200" max="5000" />
           </template>
         </SettingsRow>
-      </SettingsCard>
-
-      <SettingsCard title="代理设置" :accent="SCRAPE_SETTINGS_ACCENT">
-        <template #head-aside>
-          <TmdbHostsHelpTip />
-        </template>
-        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('proxy_enabled')">
-          <template #info>
-            <div class="settings-row__label">启用代理</div>
-          </template>
-          <template #control>
-            <SettingsBoolSegment v-model="settings.proxy_enabled" label="启用代理访问 TMDB" />
-          </template>
-        </SettingsRow>
-        <template v-if="settings.proxy_enabled">
-          <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('proxy_url')">
-            <template #info>
-              <div class="settings-row__label">代理地址</div>
-            </template>
-            <template #control>
-              <AppInput v-model="settings.proxy_url" placeholder="http://127.0.0.1:1080 或 socks5://127.0.0.1:1080" />
-            </template>
-          </SettingsRow>
-          <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('proxy_username')">
-            <template #info>
-              <div class="settings-row__label">用户名</div>
-            </template>
-            <template #control>
-              <AppInput v-model="settings.proxy_username" placeholder="可选" autocomplete="off" />
-            </template>
-          </SettingsRow>
-          <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('proxy_password')">
-            <template #info>
-              <div class="settings-row__label">密码</div>
-            </template>
-            <template #control>
-              <AppInput v-model="settings.proxy_password" type="password" placeholder="不修改请留空" autocomplete="off" />
-            </template>
-          </SettingsRow>
-        </template>
       </SettingsCard>
     </template>
   </div>

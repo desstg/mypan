@@ -14,8 +14,9 @@ const props = withDefaults(
     config?: string;
     deviceOptions?: FieldOption[];
     deviceField?: string;
+    longPoll?: boolean;
   }>(),
-  { config: "", deviceOptions: () => [], deviceField: "" },
+  { config: "", deviceOptions: () => [], deviceField: "", longPoll: false },
 );
 const emit = defineEmits<{ close: []; success: [credentials: Record<string, string>] }>();
 
@@ -75,12 +76,26 @@ function scheduleNextPoll(delay = 2000) {
   pollTimer = setTimeout(() => void poll(), delay);
 }
 
+/**
+ * 下一次轮询的等待时间。
+ *
+ * 长轮询型驱动（如 115）的一次 /qr/poll 请求**本身就会挂住 ~30 秒**才返回，
+ * 所以拿到响应后应当立刻再问，而不是再等 2 秒 —— 后者会让用户白等、
+ * 也会让请求在服务端排队。既有两个扫码驱动是「立即返回状态」型，仍按 2 秒轮。
+ */
+function nextPollDelay() {
+  return props.longPoll ? 0 : 2000;
+}
+
+/**
+ * 默认设备取**驱动声明的第一个**，而不是硬挑 "web"。
+ *
+ * 这条是有意的：驱动用选项顺序表达「推荐哪个」——115 把 web 放在最后一位，
+ * 因为以 web 登录会踢掉用户浏览器的 115 会话、也最容易触发风控。
+ * 早先这里固定优先选 web，等于把最差的选择当成默认值。
+ */
 function defaultDevice() {
-  return (
-    props.deviceOptions.find((o) => o.value === "web")?.value ??
-    props.deviceOptions[0]?.value ??
-    ""
-  );
+  return props.deviceOptions[0]?.value ?? "";
 }
 
 function buildStartConfig(): string {
@@ -125,7 +140,7 @@ async function start() {
     if (res.data.hint?.trim()) hintText.value = res.data.hint.trim();
     phase.value = "waiting";
     startCountdown(res.data.expires_in || 300);
-    scheduleNextPoll(2000);
+    scheduleNextPoll(nextPollDelay());
   } catch (e) {
     phase.value = "error";
     message.value = e instanceof Error ? e.message : "获取二维码失败";

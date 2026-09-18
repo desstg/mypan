@@ -10,9 +10,18 @@ import (
 	"unicode/utf16"
 )
 
-// 资源类型。本期只产出 magnet；其它类型是后续迭代的扩展口子。
+// 资源类型。
+//
+// 常量声明在这个子包而不是父包 tgsubscribe：抽取器都住在这里，子包无法 import 父包。
+// 父包 resource.go 用别名转发，字符串值是两边的契约，改名要同时改。
+//
+// 每新增一种，配一个 Extractor；若要能投递，再配一个 Supports(kind) 返回 true 的 Deliverer。
 const (
-	ResourceKindMagnet = "magnet"
+	ResourceKindMagnet     = "magnet"
+	ResourceKindED2K       = "ed2k"
+	ResourceKindShare115   = "share_115"
+	ResourceKindShareQuark = "share_quark"
+	ResourceKindHTTP       = "http"
 )
 
 // 资源来源，用于排查「为什么这条没抽到」。
@@ -27,20 +36,37 @@ const (
 
 // ResourceRef 是从一条频道消息里抽出的可下载资源。
 //
-// Kind 是本功能的核心扩展点：本期 Registry 只注册 magnet 抽取器，
-// 将来接 115/夸克分享转存时新增 Kind 与对应 Extractor 即可，下游不用改。
+// Kind 是扩展点：Registry 按注册顺序调用各抽取器，新增类型只需实现 Extractor。
 type ResourceRef struct {
-	Kind        string
-	Raw         string // 规范化后的磁力链接（参数重新编码，保证可被网盘接受）
-	InfoHash    string // 统一成 40 位小写 hex；v2 单独用 "btmh:" 前缀
-	DisplayName string // magnet 的 dn= 参数，可能为空
-	SizeBytes   int64  // magnet 的 xl= 参数，不可信，仅作参考
+	Kind string
+	Raw  string // 规范化后的链接（参数重新编码，保证可被网盘接受）
+	// InfoHash 是**资源指纹**，按 Kind 加前缀，用作跨类型的去重键
+	// （落在 DB 的 magnet_hash 列，见 store/migrations/0023 的两个唯一索引）。
+	//
+	//	magnet     40 位小写 hex（btih，v1 base32 也归一到这个形式）
+	//	magnet v2  "btmh:..."（无法与 v1 互转，单独命名空间）
+	//	ed2k       "ed2k:<32 位小写 hex>"（MD4）
+	//	http 直链  "http:<sha1(规范化 URL) 40 位 hex>"
+	//	115 分享    "115:<share code>"
+	//	夸克分享    "quark:<share code>"
+	//
+	// 各类型的值域两两不相交，所以能共用一个唯一索引而不会互相撞键。
+	//
+	// ⚠️ magnet 的指纹**必须保持裸 hex，不能加 "magnet:" 前缀** —— 加了之后
+	// 升级前的历史行与升级后新抽的值不再相等，去重索引直接失效，同一个磁力会被
+	// 重复推送/重复下载。
+	InfoHash    string
+	DisplayName string // 链接自带的名字：magnet 的 dn= / ed2k 的 |file| 名，可能为空
+	SizeBytes   int64  // magnet 的 xl= 不可信；ed2k 的 size 可信
 	Source      string
 }
 
-// Extractor 从一条消息里抽出某一类资源。
+// Extractor 从一条消息里抽出某几类资源。
+//
+// Kinds 是自描述（一个抽取器可以产出多种 Kind，例如分享链抽取器同时管 115 与夸克），
+// 仅供测试与排查「哪些类型有实现」用 —— Registry 的派发只看 Extract。
 type Extractor interface {
-	Kind() string
+	Kinds() []string
 	Extract(msg *Message) []ResourceRef
 }
 
@@ -91,40 +117,52 @@ func (r *Registry) Extract(msg *Message) []ResourceRef {
 //  4. 内联按钮的 copy_text（Bot API 7.11+，很多资源频道用它让用户「点击复制磁力」）
 type MagnetExtractor struct{}
 
-func (MagnetExtractor) Kind() string { return ResourceKindMagnet }
+func (MagnetExtractor) Kinds() []string { return []string{ResourceKindMagnet} }
 
-func (e MagnetExtractor) Extract(msg *Message) []ResourceRef {
+func (MagnetExtractor) Extract(msg *Message) []ResourceRef {
+	return forEachSource(msg, scanTextForMagnets)
+}
+
+// forEachSource 按固定顺序遍历一条消息里所有可能藏资源的来源，把每一段交给 pick。
+//
+// 顺序即优先级（见 Registry.Extract 的去重）：正文 → 配文 → 正文实体 → 配文实体 →
+// 内联按钮。所有抽取器共用它，使「同一资源出现在多处时保留来源更可信的那个」
+// 这条规则对所有资源类型都一致。
+func forEachSource(msg *Message, pick func(text, source string) []ResourceRef) []ResourceRef {
 	if msg == nil {
 		return nil
 	}
-	out := make([]ResourceRef, 0, 2)
-	out = append(out, scanTextForMagnets(msg.Text, SourceText)...)
-	out = append(out, scanTextForMagnets(msg.Caption, SourceCaption)...)
-	out = append(out, scanEntitiesForMagnets(msg.Text, msg.Entities)...)
-	out = append(out, scanEntitiesForMagnets(msg.Caption, msg.CaptionEntities)...)
-	out = append(out, scanButtonsForMagnets(msg.ReplyMarkup)...)
+	out := make([]ResourceRef, 0, 4)
+	out = append(out, pick(msg.Text, SourceText)...)
+	out = append(out, pick(msg.Caption, SourceCaption)...)
+	out = append(out, scanEntitySources(msg.Text, msg.Entities, pick)...)
+	out = append(out, scanEntitySources(msg.Caption, msg.CaptionEntities, pick)...)
+	out = append(out, scanButtonSources(msg.ReplyMarkup, pick)...)
 	return out
 }
 
-func scanEntitiesForMagnets(text string, entities []MessageEntity) []ResourceRef {
+// scanEntitySources 把实体区间与 text_link 的 url 交给 pick。
+func scanEntitySources(text string, entities []MessageEntity, pick func(text, source string) []ResourceRef) []ResourceRef {
 	if len(entities) == 0 {
 		return nil
 	}
 	out := make([]ResourceRef, 0, 2)
 	for _, ent := range entities {
-		// text_link 的磁链在 url 字段里，正文只显示一段自定义文案。
+		// text_link 的链在 url 字段里，正文只显示一段自定义文案
+		// —— 实测频道里「点击跳转」这类按钮式正文链接走的就是这条。
 		if ent.Type == "text_link" && strings.TrimSpace(ent.URL) != "" {
-			out = append(out, scanTextForMagnets(ent.URL, SourceEntity)...)
+			out = append(out, pick(ent.URL, SourceEntity)...)
 		}
-		// url / code / pre 这几种，磁链本身就在正文切片里。
+		// url / code / pre 这几种，链本身就在正文切片里。
 		if s := entityText(text, ent); s != "" {
-			out = append(out, scanTextForMagnets(s, SourceEntity)...)
+			out = append(out, pick(s, SourceEntity)...)
 		}
 	}
 	return out
 }
 
-func scanButtonsForMagnets(markup *InlineKeyboardMarkup) []ResourceRef {
+// scanButtonSources 把内联按钮的 url 与 copy_text 交给 pick。
+func scanButtonSources(markup *InlineKeyboardMarkup, pick func(text, source string) []ResourceRef) []ResourceRef {
 	if markup == nil {
 		return nil
 	}
@@ -132,10 +170,10 @@ func scanButtonsForMagnets(markup *InlineKeyboardMarkup) []ResourceRef {
 	for _, row := range markup.InlineKeyboard {
 		for _, btn := range row {
 			if strings.TrimSpace(btn.URL) != "" {
-				out = append(out, scanTextForMagnets(btn.URL, SourceButton)...)
+				out = append(out, pick(btn.URL, SourceButton)...)
 			}
 			if btn.CopyText != nil && strings.TrimSpace(btn.CopyText.Text) != "" {
-				out = append(out, scanTextForMagnets(btn.CopyText.Text, SourceCopyButton)...)
+				out = append(out, pick(btn.CopyText.Text, SourceCopyButton)...)
 			}
 		}
 	}

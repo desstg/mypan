@@ -98,10 +98,6 @@ const {
   snapshotBaseline,
   revert: revertToBaseline,
 } = useSettingsForm<MediaOrganizeSettings>({
-  proxy_enabled: false,
-  proxy_url: "",
-  proxy_username: "",
-  proxy_password: "",
   tmdb_api_key: "",
   tmdb_language: "zh-CN",
   tmdb_api_host: "https://api.themoviedb.org",
@@ -354,10 +350,6 @@ async function testTmdb() {
       tmdb_language: settings.tmdb_language,
       tmdb_api_host: settings.tmdb_api_host,
       tmdb_image_host: settings.tmdb_image_host,
-      proxy_enabled: settings.proxy_enabled,
-      proxy_url: settings.proxy_url,
-      proxy_username: settings.proxy_username,
-      proxy_password: settings.proxy_password,
     });
     const apiOK = result.api_ok ?? result.ok;
     const imageOK = result.image_ok ?? true;
@@ -429,53 +421,6 @@ defineExpose(
     <div v-if="loading" class="settings-card__loading">加载中…</div>
 
     <template v-else>
-      <SettingsCard title="代理设置" :accent="ORGANIZE_SETTINGS_ACCENT">
-        <template #head-aside>
-          <TmdbHostsHelpTip />
-        </template>
-        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('proxy_enabled')">
-          <template #info>
-            <div class="settings-row__label"><span>启用代理</span></div>
-          </template>
-          <template #control>
-            <SettingsBoolSegment v-model="settings.proxy_enabled" label="启用代理" />
-          </template>
-        </SettingsRow>
-
-        <template v-if="settings.proxy_enabled">
-          <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('proxy_url')">
-            <template #info>
-              <div class="settings-row__label"><span>代理地址</span></div>
-            </template>
-            <template #control>
-              <AppInput v-model="settings.proxy_url" placeholder="http://127.0.0.1:1080 或 socks5://127.0.0.1:1080" />
-            </template>
-          </SettingsRow>
-
-          <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('proxy_username')">
-            <template #info>
-              <div class="settings-row__label"><span>代理用户名</span></div>
-            </template>
-            <template #control>
-              <AppInput
-                v-model="settings.proxy_username"
-                autocomplete="off"
-                placeholder="可选"
-              />
-            </template>
-          </SettingsRow>
-
-          <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('proxy_password')">
-            <template #info>
-              <div class="settings-row__label"><span>代理密码</span></div>
-            </template>
-            <template #control>
-              <AppInput v-model="settings.proxy_password" type="password" autocomplete="new-password" placeholder="可选" />
-            </template>
-          </SettingsRow>
-        </template>
-      </SettingsCard>
-
       <SectionTabBar
         :model-value="activeTab"
         :tabs="tabsWithState"
@@ -499,6 +444,9 @@ defineExpose(
       </div>
 
       <SettingsCard v-if="activeTab === TMDB_TAB" :accent="ORGANIZE_SETTINGS_ACCENT">
+        <template #head-aside>
+          <TmdbHostsHelpTip />
+        </template>
         <template #head-actions>
           <AppButton type="button" variant="secondary" size="sm" :disabled="tmdbTesting" @click="testTmdb">
             {{ tmdbTesting ? "测试中…" : "测试连通性" }}

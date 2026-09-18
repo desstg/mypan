@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"litepan/internal/mediaorganize/rules"
-	"litepan/internal/mediaorganize/tmdb"
 	"litepan/internal/settings"
 )
 
@@ -58,10 +57,14 @@ func EnrichPlannerSettings(svc *settings.Service, api map[string]any) map[string
 	if svc == nil {
 		return out
 	}
-	out["mo_proxy_enabled"] = svc.Bool(settings.KeyMOProxyEnabled)
-	out["mo_proxy_url"] = svc.String(settings.KeyMOProxyURL)
-	out["mo_proxy_username"] = svc.String(settings.KeyMOProxyUsername)
-	out["mo_proxy_password"] = svc.String(settings.KeyMOProxyPassword)
+	// 代理已在「系统设置 → 其他设置」收敛成全局项，这里取一次解析好的地址塞进 map，
+	// 下游（worker / service_binding / 搜索 / STRM 刮削）统一读 proxy_url 这个键，
+	// 不用为了拿代理把 settings.Service 一路往下传。
+	//
+	// ⚠️ 这个 map 会被 getMediaOrganizeSettings 原样下发给前端（SettingsDict 那条路），
+	// 所以 proxy_url 里可能带 user:password。它和 tmdb_api_key 是同一类东西 ——
+	// 「填了就用、不回显」的凭据；前端已经不再渲染代理字段，也就不会把它写回去。
+	out["proxy_url"] = settings.ProxyURL(svc)
 	if key := strings.TrimSpace(svc.String(settings.KeyMOTmdbAPIKey)); key != "" {
 		out["mo_tmdb_api_key"] = key
 	}
@@ -133,13 +136,9 @@ func PlannerTMDBImageHost(plannerSettings map[string]any) string {
 	return strings.TrimSpace(stringFromAny(plannerSettings["mo_tmdb_image_host"]))
 }
 
-func TmdbProxyFromSettings(settings map[string]any) tmdb.ProxyConfig {
-	return tmdb.ProxyConfig{
-		Enabled:  rules.SettingBool(settings["mo_proxy_enabled"], false),
-		URL:      stringFromAny(settings["mo_proxy_url"]),
-		Username: stringFromAny(settings["mo_proxy_username"]),
-		Password: stringFromAny(settings["mo_proxy_password"]),
-	}
+// PlannerProxyURL 返回全局代理地址（未配置返回空串，由调用方直连）。
+func PlannerProxyURL(plannerSettings map[string]any) string {
+	return strings.TrimSpace(stringFromAny(plannerSettings["proxy_url"]))
 }
 
 func normalizeMediaTagOrder(raw any) string {

@@ -178,6 +178,216 @@
   color: var(--warning);
 }
 
+/* ——————————————— 已订阅 ———————————————
+   与「电影 / 剧集」共用同一张海报卡片，只多两样东西：
+   右上角的勾选圈与左下角的状态胶囊。
+   这样在两张海报墙之间来回切不会有「换了个应用」的割裂感。 */
+
+/* 筛选与批量操作同一行；窄屏换行而不是把批量按钮挤没。 */
+.tg-subscribed__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+}
+
+.tg-subscribed__bar .tg-filters__field {
+  min-width: 180px;
+}
+
+.tg-subscribed__bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+@media (max-width: 640px) {
+  .tg-subscribed__bar-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+}
+
+/* 批量动作的菜单项。自己画而不是用 AppMenuPanel：菜单只在这一个地方出现，
+   为它往公共组件里加按钮语义不划算。 */
+.tg-subscribed__batch-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tg-subscribed__batch-item:hover {
+  background: var(--border-soft);
+  color: var(--brand);
+}
+
+/* 卡片主体：海报本身是一个按钮（点开详情）。
+   角标、勾选圈、hover 操作都是它的兄弟节点，各自明确占据一个角 ——
+   点海报开详情、点圈改勾选，不会互相抢事件。 */
+.tg-card__open {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* 勾选圈：贴海报右上角。未选中是空心圈，选中后填充品牌色并打勾。
+   尺寸固定 24px —— 这是「点得中」的下限，再小在触屏上会误触到海报。
+
+   显隐规则：**没选中时 hover 才浮出，选中后常驻**。
+   常驻的理由是让「这一页里我勾过哪些」一直看得见 —— 批量按钮虽然带计数，
+   但那是数字，离得远的卡片上到底勾没勾还是得能一眼确认。
+   批量改完状态会清空勾选集合（见 TGSubscribedPanel.batchChangeStatus），
+   所以「常驻」到那一步就结束了，不会赖在屏幕上。 */
+.tg-card__check {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  color: var(--text-muted);
+  box-shadow: var(--shadow-soft);
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+/* 三种情况让它现身：鼠标悬停整张卡片、键盘焦点落在它自己身上（否则纯键盘
+   用户根本够不着）、以及已经选中（常驻）。 */
+.tg-card:hover .tg-card__check,
+.tg-card__check:focus-visible,
+.tg-card__check--on {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.tg-card__check:hover {
+  color: var(--brand);
+}
+
+.tg-card__check--on {
+  background: var(--brand);
+  color: #fff;
+}
+
+.tg-card__check--on:hover {
+  color: #fff;
+}
+
+/* 触屏设备没有 hover —— 上面那套「指过去才显示」会退化成「永远选不上」。
+   这类设备上直接常驻。 */
+@media (hover: none) {
+  .tg-card__check {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 选中态整张海报描边：勾选圈只有 24px，离得远看不出选了哪几张。 */
+.tg-card__poster--selected {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+
+/* 状态胶囊贴海报左下角 —— 它压在海报上面，但自己不是可点的东西，
+   所以放开事件：不放开的话这一小块区域点了没反应（点不到下面的详情按钮）。
+   尺寸按卡片缩一号：卡片本身只有 150px 宽，用默认字号会比标题还抢眼。 */
+.tg-card__status {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+/* 悬停时把胶囊让出去：卡片最窄只有 150px，「详情 / 取消」两个按钮从右下角
+   长出来之后，和左下角的胶囊在窄卡片上会蹭到一起。扫视时看状态、动手时看操作，
+   两者本来就不需要同时在场。 */
+.tg-card:hover .tg-card__status {
+  opacity: 0;
+}
+
+.tg-card__status .admin-status-pill {
+  min-width: 0;
+  height: 18px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+/* 详情 / 取消：hover 才浮出，与海报墙那张卡片的「+」同一套行为。
+   贴右下角 —— 左下角是状态胶囊的地盘。 */
+.tg-card__hover-actions {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.tg-card:hover .tg-card__hover-actions,
+.tg-card__hover-actions:focus-within {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.tg-subscribed__hover-btn {
+  padding: 3px 9px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+  box-shadow: var(--shadow-soft);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.tg-subscribed__hover-btn:hover {
+  background: var(--brand);
+  color: #fff;
+}
+
+.tg-subscribed__hover-btn--danger:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* 标题也是一个按钮（点进详情），但外观必须与旁边那些 <span> 标题一模一样 ——
+   否则整片列表里只有这一处看起来像链接。 */
+.tg-card__title--link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tg-card__title--link:hover {
+  color: var(--brand);
+}
+
 /* 分页 */
 .tg-wall__footer {
   display: flex;
@@ -302,6 +512,18 @@
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.6;
+}
+
+/* 抓到了帖子却一条都没产出 —— 这个频道大概率是用「点击复制」按钮发资源的，
+   而 Telegram 网页预览不渲染这类按钮。用警示色把它挑出来。 */
+.tg-form__hint--warn {
+  margin: 0 0 12px;
+  color: var(--warning, #b26a00);
+}
+
+.tg-channel__zero {
+  color: var(--warning, #b26a00);
+  font-weight: 600;
 }
 
 @media (max-width: 640px) {
@@ -555,4 +777,38 @@
 .tg-icon-btn:hover {
   color: var(--brand);
   border-color: var(--brand);
+}
+
+/* ——— 推荐频道（表格里的「未添加」候选行） ———
+   它们和已添加的频道同处一张表，所以要用视觉重量把自己区分开：
+   整行淡化 + 状态列写「未添加」，扫一眼就知道哪些还没加。
+   第一列同时塞了备注与那句「这个频道发什么」的说明 —— 说明正是用户
+   判断要不要加的依据，做成 tooltip 就等于没有。 */
+.tg-channel-row--reco > td {
+  opacity: 0.72;
+  background: var(--surface-sunken);
+}
+
+.tg-channel-row--reco:hover > td {
+  opacity: 1;
+}
+
+.tg-reco__tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: 1px;
+}
+
+.tg-reco__desc {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
 }

@@ -449,7 +449,7 @@ func NewRouter(d Deps) http.Handler {
 				// 配置
 				r.Get("/config", h.getTGSubscribeConfig)
 				r.Put("/config", h.updateTGSubscribeConfig)
-				r.Post("/config/test", h.testTGSubscribeBot)
+				r.Post("/config/test", h.testTGSubscribeConnection)
 
 				// 热门推荐（TMDB）
 				r.Get("/tmdb/discover", h.tgDiscover)
@@ -460,6 +460,9 @@ func NewRouter(d Deps) http.Handler {
 
 				// 频道
 				r.Get("/channels", h.listTGChannels)
+				// 推荐频道：内置的候选清单，点了才会变成普通频道。放在 /channels/{id}
+				// 之前注册，避免 "recommended" 被当成 id。
+				r.Get("/channels/recommended", h.listRecommendedTGChannels)
 				r.Post("/channels", h.createTGChannel)
 				r.Put("/channels/{id}", h.updateTGChannel)
 				r.Delete("/channels/{id}", h.deleteTGChannel)
@@ -468,12 +471,17 @@ func NewRouter(d Deps) http.Handler {
 				// 订阅
 				r.Get("/subscriptions", h.listTGSubscriptions)
 				r.Get("/subscriptions/by-tmdb", h.getTGSubscriptionByTMDB)
+				// 批量改状态：「已订阅」页的批量操作。必须注册在 /subscriptions/{id}
+				// 之前，否则 "status" 会被当成订阅 id。
+				r.Post("/subscriptions/status", h.setTGSubscriptionStatusBatch)
 				r.Get("/subscriptions/{id}", h.getTGSubscription)
 				r.Post("/subscriptions", h.createTGSubscription)
 				r.Put("/subscriptions/{id}", h.updateTGSubscription)
 				r.Delete("/subscriptions/{id}", h.deleteTGSubscription)
 				r.Post("/subscriptions/{id}/status", h.setTGSubscriptionStatus)
 				r.Post("/subscriptions/{id}/reset", h.resetTGSubscription)
+				// 搜这条订阅的历史帖（补增订前发过的内容）。手动触发、只落库不推送。
+				r.Post("/subscriptions/{id}/search", h.searchTGHistory)
 				r.Get("/subscriptions/{id}/episodes", h.listTGSubscriptionEpisodes)
 
 				// 画质方案

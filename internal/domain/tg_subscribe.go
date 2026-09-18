@@ -38,6 +38,24 @@ const (
 	TGRecordSuperseded = "superseded"
 	TGRecordFailed     = "failed"
 	TGRecordIgnored    = "ignored"
+	// TGRecordUnsupported 表示「识别到了，但当前投不出去」：
+	// 要么资源类型没有投递器，要么目标网盘与内置下载器都不支持这个协议
+	// （例如 ed2k 推给 123 账号），要么该账号没配转存需要的凭据。
+	//
+	// 与 failed 严格区分：failed 是「能投但这次失败了」，要退避重试；
+	// unsupported 是确定性结论，**不进重试队列**，只作为可见性留在历史里。
+	TGRecordUnsupported = "unsupported"
+	// TGRecordUnretryable 表示「这次投放失败了，而且重试也不会好」。
+	//
+	// 典型的确定性失败：115 提取码错误、分享已失效/被删、目标目录对不上。
+	// 与 failed 的区别只在**要不要重试**，与 unsupported 的区别在**原因性质**：
+	// unsupported 是「这套组合天生投不了」，unretryable 是「这次的数据有问题」。
+	//
+	// 为什么要单开一个状态而不是复用 failed + retry_count 打满：
+	// 后者会让界面显示「已重试 5 次」，而实际上一次都没重试过 —— 那是假的。
+	// 更要紧的是，反复调 115 的 share/receive 正是触发风控的典型姿势
+	// （官方 FAQ：「短时间内获取次数太多」）。
+	TGRecordUnretryable = "unretryable"
 )
 
 // 推送通道。auto 表示按网盘离线下载能力自动选择。
@@ -145,14 +163,22 @@ type TGSubscriptionEpisode struct {
 // Season / Episode / EpisodeEnd 用 -1 表示「未识别」—— 0 是合法季号（特别篇），
 // 所以不能用零值表达缺失。
 type TGMatchRecord struct {
-	ID             int64
-	ChannelID      int64
-	ChatTitle      string
-	MessageID      int64
-	MessageDate    time.Time
-	RawName        string
-	NameSource     string
-	Magnet         string
+	ID          int64
+	ChannelID   int64
+	ChatTitle   string
+	MessageID   int64
+	MessageDate time.Time
+	RawName     string
+	NameSource  string
+	// ResourceKind 是资源类型：magnet / ed2k / share_115 / share_quark / http。
+	// 空值按 magnet 处理（半迁移状态与内存库测试）。
+	ResourceKind string
+	// Magnet 是资源的原始链接。字段名是历史遗留 —— ed2k 与分享链也存这里，
+	// 见 telegram.ResourceRef.Raw。改名要动 DB 列，收益不抵风险。
+	Magnet string
+	// MagnetHash 是**资源指纹**，按 ResourceKind 加前缀，是跨类型去重键的一部分
+	// （唯一索引 idx_tg_rec_msg_magnet / idx_tg_rec_sub_magnet）。
+	// 各类型的格式见 telegram.ResourceRef.InfoHash 的注释。
 	MagnetHash     string
 	SizeBytes      int64
 	ParsedTitle    string
@@ -217,6 +243,12 @@ type TGSubscriptionRepository interface {
 	Get(ctx context.Context, id int64) (*TGSubscription, error)
 	GetByTMDB(ctx context.Context, tmdbID, mediaType string) (*TGSubscription, error)
 	List(ctx context.Context, status string) ([]*TGSubscription, error)
+	// SetStatusBatch 一次改多条订阅的状态，返回实际改动的条数。
+	//
+	// 存在的理由是「已订阅」页的批量操作：逐条走 Update 需要先把每条完整读出来、
+	// 再整行写回去 —— 那些请求里夹着别的字段，并发下会互相覆盖。
+	// 这里只写 status 一列，读-改-写被压成一个 UPDATE。
+	SetStatusBatch(ctx context.Context, ids []int64, status string) (int64, error)
 	// ListPending 返回 pending_deadline_at 已到期的订阅，供 dispatcher 消费。
 	ListPending(ctx context.Context, now time.Time) ([]*TGSubscription, error)
 	// TouchPending 只在 deadline 为空或更早时前移 —— 窗口内的新候选不会无限延长窗口。
@@ -245,5 +277,11 @@ type TGMatchRecordRepository interface {
 	// GetByOfflineTaskID 按离线任务 ID 反查记录（下载完成事件带回的就是这个 ID）。
 	GetByOfflineTaskID(ctx context.Context, taskID string) (*TGMatchRecord, error)
 	CountByStatus(ctx context.Context) (map[string]int, error)
+	// CountByChannel 按频道统计匹配记录数。
+	//
+	// 用途是把「这个频道到底产出过东西没有」变成界面上看得见的一个数字：
+	// 帖子数一直涨、产出一直是 0，用户自己就能判断这个频道抓不到内容
+	// （最常见的原因是用「点击复制」按钮发资源，而网页预览不渲染这类按钮）。
+	CountByChannel(ctx context.Context) (map[int64]int64, error)
 	ClearBefore(ctx context.Context, before time.Time) (int64, error)
 }

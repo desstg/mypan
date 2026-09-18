@@ -95,10 +95,6 @@ type Settings struct {
 	TmdbAPIHost           string `json:"tmdb_api_host"`
 	TmdbImageHost         string `json:"tmdb_image_host"`
 	TmdbRequestIntervalMS int    `json:"tmdb_request_interval_ms"`
-	ProxyEnabled          bool   `json:"proxy_enabled"`
-	ProxyURL              string `json:"proxy_url"`
-	ProxyUsername         string `json:"proxy_username"`
-	ProxyPassword         string `json:"proxy_password"`
 }
 
 type RunRequest struct {

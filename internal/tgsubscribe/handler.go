@@ -27,23 +27,24 @@ func (s *Service) processResource(
 	rel.NameSource = res.NameSource
 
 	record := &domain.TGMatchRecord{
-		ChannelID:   channel.ID,
-		ChatTitle:   channelName(channel),
-		MessageID:   msg.MessageID,
-		MessageDate: msToTime(msg.Date),
-		RawName:     res.DisplayName,
-		NameSource:  res.NameSource,
-		Magnet:      res.Raw,
-		MagnetHash:  res.InfoHash,
-		SizeBytes:   res.SizeBytes,
-		ParsedTitle: firstTitle(rel),
-		Season:      intOr(rel.Season, -1),
-		Episode:     intOr(rel.Episode, -1),
-		EpisodeEnd:  intOr(rel.EpisodeEnd, -1),
-		IsBatch:     rel.IsBatch,
-		Resolution:  rel.Resolution,
-		VideoCodec:  rel.VideoCodec,
-		SourceTag:   rel.Source,
+		ChannelID:    channel.ID,
+		ChatTitle:    channelName(channel),
+		MessageID:    msg.MessageID,
+		MessageDate:  msToTime(msg.Date),
+		RawName:      res.DisplayName,
+		NameSource:   res.NameSource,
+		ResourceKind: res.Kind,
+		Magnet:       res.Raw,
+		MagnetHash:   res.InfoHash,
+		SizeBytes:    res.SizeBytes,
+		ParsedTitle:  firstTitle(rel),
+		Season:       intOr(rel.Season, -1),
+		Episode:      intOr(rel.Episode, -1),
+		EpisodeEnd:   intOr(rel.EpisodeEnd, -1),
+		IsBatch:      rel.IsBatch,
+		Resolution:   rel.Resolution,
+		VideoCodec:   rel.VideoCodec,
+		SourceTag:    rel.Source,
 	}
 	if rel.Year != nil {
 		record.ParsedYear = *rel.Year
@@ -70,6 +71,19 @@ func (s *Service) processResource(
 		record.Reason = decision.Reason
 	default:
 		s.applyQualityAndDedupe(ctx, &rel, record, decision)
+		// 静态就投不出去的类型（本轮＝115/夸克分享链）在这里改判。
+		//
+		// 放在 default 分支内、而不是函数开头，是有意的：只有**匹配上订阅**的资源
+		// 才值得占一条历史记录。放开头的话，与用户毫不相干的分享链会刷满匹配历史，
+		// 那正是上面 LooksLikeRelease 那道门槛在防的事。
+		//
+		// 不进聚合窗口是自动的：下面的 `if record.Status == pending` 不会命中，
+		// 所以既不 TouchPending 也不 MarkMatched，订阅不会被拉进窗口。
+		if record.Status == domain.TGRecordPending && s.delivererFor(res.Kind) == nil {
+			record.Status = domain.TGRecordUnsupported
+			record.Reason = strings.TrimSpace(strings.Join(nonEmpty(record.Reason,
+				"已识别到"+labelKind(res.Kind)+"，当前版本只记录、不支持投递"), "；"))
+		}
 	}
 
 	id, err := s.records.Create(ctx, record)

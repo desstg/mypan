@@ -1,1 +1,0 @@
-import{K as e,S as t,U as n,y as r}from"./vue-vendor-DI9kKSTB.js";import{k as i}from"./index-l8dSPpH7.js";var a={},o={class:`input-action-field`},s={class:`input-action-field__main`};function c(i,a){return n(),t(`div`,o,[r(`div`,s,[e(i.$slots,`default`,{},void 0,!0)]),e(i.$slots,`action`,{},void 0,!0)])}var l=i(a,[[`render`,c],[`__scopeId`,`data-v-fb8bacac`]]);export{l as t};

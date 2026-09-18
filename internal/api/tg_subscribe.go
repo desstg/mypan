@@ -179,19 +179,20 @@ func (h *Handler) updateTGSubscribeConfig(w http.ResponseWriter, r *http.Request
 	})
 }
 
-func (h *Handler) testTGSubscribeBot(w http.ResponseWriter, r *http.Request) {
+// testTGSubscribeConnection 探活：抓一次 t.me 的公开预览，验证网络/代理/页面结构。
+func (h *Handler) testTGSubscribeConnection(w http.ResponseWriter, r *http.Request) {
 	if !h.tgSubscribeReady(w) {
 		return
 	}
-	botName, err := h.tgSubscribe.TestBot(r.Context())
+	report, err := h.tgSubscribe.TestConnection(r.Context())
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, Resp{
 		Success: true,
-		Message: "连接成功：" + botName,
-		Data:    map[string]string{"bot_name": botName},
+		Message: "连接正常：" + report,
+		Data:    map[string]string{"detail": report},
 	})
 }
 
@@ -202,6 +203,25 @@ func (h *Handler) listTGChannels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := h.tgSubscribe.ListChannels(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, rows)
+}
+
+// listRecommendedTGChannels 返回**还能补加**的内置推荐频道。
+//
+// 这些频道首次启动时就已经自动入库了（见 tgsubscribe.Service.SeedRecommendedChannels），
+// 所以正常情况下这个列表是空的 —— 它们就是频道列表里的普通行，能编辑能删除。
+//
+// 还有内容只剩一种情况：那次播种没成功（新装实例还没配代理），
+// 用户后来配好了进来手动补加。用户自己删掉的那几个不会出现在这里。
+func (h *Handler) listRecommendedTGChannels(w http.ResponseWriter, r *http.Request) {
+	if !h.tgSubscribeReady(w) {
+		return
+	}
+	rows, err := h.tgSubscribe.ListRecommendedChannels(r.Context())
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -291,6 +311,18 @@ func (h *Handler) listTGSubscriptions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	// 类型过滤在 API 层做，不下沉到 repo：订阅总数是「几十条」量级，
+	// 而 repo 那个 List 还被调度器按 status 调用，为它加一层 WHERE 组装
+	// 会把最简单的那个查询也变成动态 SQL。真到了需要分页的量级再下沉。
+	if want := strings.TrimSpace(r.URL.Query().Get("media_type")); want != "" {
+		filtered := rows[:0]
+		for _, row := range rows {
+			if row.MediaType == want {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
 	}
 	writeOK(w, rows)
 }
@@ -404,6 +436,37 @@ func (h *Handler) setTGSubscriptionStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, Resp{Success: true, Message: "订阅状态已更新"})
+}
+
+// tgSubscriptionStatusBatchReq 是批量改状态的入参（「已订阅」页的批量操作）。
+type tgSubscriptionStatusBatchReq struct {
+	IDs    []int64 `json:"ids"`
+	Status string  `json:"status"`
+}
+
+// setTGSubscriptionStatusBatch 一次改多条订阅的状态。
+//
+// 没有单条接口那样的失败明细：一条 UPDATE 要么全成要么全不成，
+// 报「已更新 N 条」比逐条报错更贴近实际发生的事。
+func (h *Handler) setTGSubscriptionStatusBatch(w http.ResponseWriter, r *http.Request) {
+	if !h.tgSubscribeReady(w) {
+		return
+	}
+	var req tgSubscriptionStatusBatchReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	n, err := h.tgSubscribe.SetSubscriptionStatusBatch(r.Context(), req.IDs, req.Status)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, Resp{
+		Success: true,
+		Message: "订阅状态已更新",
+		Data:    map[string]int64{"updated": n},
+	})
 }
 
 func (h *Handler) resetTGSubscription(w http.ResponseWriter, r *http.Request) {
@@ -619,6 +682,26 @@ func (h *Handler) pushTGRecord(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, Resp{Success: true, Message: "已提交推送", Data: view})
 }
 
+// searchTGHistory 搜索一条订阅在频道里的历史帖。
+//
+// 手动触发、只落库不推送 —— 详见 internal/tgsubscribe/search.go 里那三条硬约束。
+func (h *Handler) searchTGHistory(w http.ResponseWriter, r *http.Request) {
+	if !h.tgSubscribeReady(w) {
+		return
+	}
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := h.tgSubscribe.SearchHistory(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, Resp{Success: true, Message: res.Message, Data: res})
+}
+
 func (h *Handler) ignoreTGRecord(w http.ResponseWriter, r *http.Request) {
 	if !h.tgSubscribeReady(w) {
 		return
@@ -668,6 +751,9 @@ func (h *Handler) getTGSubscribeStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // providerSummary 让订阅详情弹窗能提示「这个网盘会不会降级」。
+//
+// 可选 ?kind= 指定资源类型（magnet / ed2k / http / share_115 / ...），
+// 缺省按磁力处理，老的调用点行为不变。
 func (h *Handler) getTGProviderSummary(w http.ResponseWriter, r *http.Request) {
 	if !h.tgSubscribeReady(w) {
 		return
@@ -678,7 +764,7 @@ func (h *Handler) getTGProviderSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, map[string]string{
-		"provider": h.tgSubscribe.ProviderSummary(r.Context(), accountID),
+		"provider": h.tgSubscribe.ProviderSummary(r.Context(), accountID, r.URL.Query().Get("kind")),
 	})
 }
 

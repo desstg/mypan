@@ -33,11 +33,8 @@ func (h *Handler) getStrmScrapeSettings(w http.ResponseWriter, r *http.Request) 
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	cfg := h.strmScrape.GetSettings()
-	if cfg.ProxyPassword != "" {
-		cfg.ProxyPassword = ""
-	}
-	writeOK(w, cfg)
+	// 代理已挪到「系统设置 → 其他设置」，不再随这页的设置一起下发。
+	writeOK(w, h.strmScrape.GetSettings())
 }
 
 func (h *Handler) updateStrmScrapeSettings(w http.ResponseWriter, r *http.Request) {

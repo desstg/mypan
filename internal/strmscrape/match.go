@@ -11,6 +11,7 @@ import (
 
 	"litepan/internal/mediaorganize/rules"
 	"litepan/internal/mediaorganize/tmdb"
+	"litepan/internal/settings"
 )
 
 type tmdbInfo struct {
@@ -419,12 +420,11 @@ func (s *Service) newTMDBClient() *tmdb.Client {
 	if apiKey == "" {
 		return nil
 	}
-	proxy := tmdb.BuildProxyURL(tmdb.ProxyConfig{
-		Enabled:  cfg.ProxyEnabled,
-		URL:      cfg.ProxyURL,
-		Username: cfg.ProxyUsername,
-		Password: cfg.ProxyPassword,
-	})
+	// 代理走全局设置（「系统设置 → 其他设置 → 网络代理」），与目录整理共用同一份。
+	proxy := ""
+	if s.settings != nil {
+		proxy = settings.ProxyURL(s.settings)
+	}
 	return tmdb.NewClient(tmdb.Options{
 		APIKey:         apiKey,
 		Language:       cfg.TmdbLanguage,
