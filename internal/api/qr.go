@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"litepan/internal/domain"
 	"litepan/internal/driver"
@@ -72,6 +73,7 @@ func (h *Handler) startQRLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	started := time.Now()
 	p, release, err := qrProvider(r.Context(), in.DriverType, in.Config, h.qrEphemeralConfig())
 	if err != nil {
 		writeErr(w, err)
@@ -81,9 +83,13 @@ func (h *Handler) startQRLogin(w http.ResponseWriter, r *http.Request) {
 
 	res, err := p.StartQRLogin(r.Context())
 	if err != nil {
+		requestLogger(r.Context()).Warn("扫码登录：取二维码失败",
+			"driver", in.DriverType, "elapsed_ms", time.Since(started).Milliseconds(), "err", err)
 		writeErr(w, err)
 		return
 	}
+	requestLogger(r.Context()).Info("扫码登录：已下发二维码",
+		"driver", in.DriverType, "elapsed_ms", time.Since(started).Milliseconds())
 	writeOK(w, qrStartResp{
 		Token:         res.Token,
 		QRImageBase64: res.QRImageBase64,
@@ -94,6 +100,11 @@ func (h *Handler) startQRLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// pollQRLogin 查一次扫码状态。
+//
+// **这个接口会挂住约 30 秒**（115 的状态查询是长轮询）。所以它单独记一条耗时日志：
+// 「扫了码但没反应」这类问题，判断依据只能是「这次请求到底花了多久、返回了什么状态」——
+// 光看前端表现区分不了「请求被谁掐断了」和「上游一直说没扫」。
 func (h *Handler) pollQRLogin(w http.ResponseWriter, r *http.Request) {
 	var in qrPollReq
 	if err := decodeJSON(r, &in); err != nil {
@@ -104,6 +115,7 @@ func (h *Handler) pollQRLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, domain.Errorf(domain.CodeValidation, "缺少扫码会话 token"))
 		return
 	}
+	started := time.Now()
 	p, release, err := qrProvider(r.Context(), in.DriverType, "", h.qrEphemeralConfig())
 	if err != nil {
 		writeErr(w, err)
@@ -112,10 +124,24 @@ func (h *Handler) pollQRLogin(w http.ResponseWriter, r *http.Request) {
 	defer release(r.Context())
 
 	res, err := p.PollQRLogin(r.Context(), in.Token)
+	elapsed := time.Since(started).Milliseconds()
 	if err != nil {
+		requestLogger(r.Context()).Warn("扫码登录：轮询失败",
+			"driver", in.DriverType, "elapsed_ms", elapsed, "err", err)
 		writeErr(w, err)
 		return
 	}
+	// 客户端已经走了（浏览器超时、代理掐断、用户关了弹窗）—— 这是关键信号：
+	// 它意味着「后端拿到了结果但送不回去」。用 Warn 让它显眼。
+	if ctxErr := r.Context().Err(); ctxErr != nil {
+		requestLogger(r.Context()).Warn("扫码登录：客户端已断开，结果无法送达",
+			"driver", in.DriverType, "elapsed_ms", elapsed,
+			"status", string(res.Status), "ctx_err", ctxErr)
+		return
+	}
+	requestLogger(r.Context()).Info("扫码登录：轮询结束",
+		"driver", in.DriverType, "elapsed_ms", elapsed,
+		"status", string(res.Status), "has_cookie", res.Credentials.Cookie != "")
 	writeOK(w, qrPollResp{
 		Status:       string(res.Status),
 		Cookie:       res.Credentials.Cookie,

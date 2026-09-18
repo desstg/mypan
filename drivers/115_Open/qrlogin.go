@@ -106,9 +106,14 @@ type qr115LoginResp struct {
 			SEID string `json:"SEID"`
 			KID  string `json:"KID"`
 		} `json:"cookie"`
-		UserID   string `json:"user_id"`
-		UserName string `json:"user_name"`
-		IsVIP    string `json:"is_vip"`
+		// ⚠️ 这几个字段 115 是有时给数字、有时给字符串的（实测 2026-09-18：
+		// user_id 是 `2247730` 这种数字，is_vip 是 `2029415298` 这种数字）。
+		// 用裸 string 收会在**登录成功的那一刻**解析失败 —— 表现是「扫了码、
+		// 确认了，然后报登录接口异常」，而 Cookie 其实就在同一个响应体里。
+		// 所以一律用 FlexibleString（同包内的 flexString 别名）。
+		UserID   flexString `json:"user_id"`
+		UserName flexString `json:"user_name"`
+		IsVIP    flexString `json:"is_vip"`
 	} `json:"data"`
 }
 
@@ -117,6 +122,23 @@ func (r qr115LoginResp) code() int64 {
 		return r.ErrNo
 	}
 	return r.Errno
+}
+
+// qrErrSnippet 把接口返回的原始报文截一小段，附在「返回异常」这类错误后面。
+//
+// 没有它，排查只能是猜：115 的业务失败**也回 200 + JSON 错误体**（见 doQRRequest
+// 的注释），所以「不是预期的成功结构」和「压根不是 JSON」在日志里长得一模一样。
+// 截断是因为这里要的只是形状，不是内容。
+func qrErrSnippet(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return "响应体为空"
+	}
+	const maxLen = 300
+	if len(s) > maxLen {
+		s = s[:maxLen] + "…（已截断）"
+	}
+	return s
 }
 
 // StartQRLogin 取二维码并渲染成图，返回不透明续询令牌。
@@ -129,8 +151,11 @@ func (d *Driver) StartQRLogin(ctx context.Context) (*driver.QRStartResult, error
 		return nil, err
 	}
 	var resp qr115TokenResp
-	if json.Unmarshal(body, &resp) != nil || resp.Data.UID == "" {
-		return nil, domain.Errorf(domain.CodeDriverError, "115 二维码接口返回异常，请稍后重试")
+	if err := json.Unmarshal(body, &resp); err != nil || resp.Data.UID == "" {
+		// 带上原始报文：115 业务失败也回 200 + JSON 错误体，
+		// 光看「返回异常」分不出是结构变了、被风控了、还是拿到了非 JSON 的页面。
+		return nil, domain.Errorf(domain.CodeDriverError,
+			"115 二维码接口返回异常（err=%v）；原始响应 %s", err, qrErrSnippet(body))
 	}
 
 	// 优先用服务端给的二维码内容；拿不到就按已知格式兜底拼一个。
@@ -188,8 +213,13 @@ func (d *Driver) PollQRLogin(ctx context.Context, opaque string) (*driver.QRPoll
 		return &driver.QRPollResult{Status: driver.QRWaiting}, nil
 	}
 	var st qr115StatusResp
-	if json.Unmarshal(body, &st) != nil {
-		return &driver.QRPollResult{Status: driver.QRWaiting}, nil
+	if err := json.Unmarshal(body, &st); err != nil {
+		// 同样是「说不清就带上原始报文」——这里返回 Waiting 继续轮询是对的
+		// （网络波动不该中断流程），但必须留下痕迹，否则异常会永远静默。
+		return &driver.QRPollResult{
+			Status:  driver.QRWaiting,
+			Message: "115 状态接口返回非预期内容：" + qrErrSnippet(body),
+		}, nil
 	}
 
 	// ⚠️ 未扫码时 data 是 `{}`，status 字段压根不存在 —— 这是等待，不是错误。
@@ -236,8 +266,9 @@ func (d *Driver) finishQR115Login(
 	}
 
 	var resp qr115LoginResp
-	if json.Unmarshal(body, &resp) != nil {
-		return nil, domain.Errorf(domain.CodeDriverError, "115 登录接口返回异常")
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, domain.Errorf(domain.CodeDriverError,
+			"115 登录接口返回异常：%v；原始响应 %s", err, qrErrSnippet(body))
 	}
 	// 未确认时返回的就是这个码 —— 按等待处理，前端会继续问。
 	if resp.State != 1 && resp.code() == qrErrNotConfirmed {
@@ -270,9 +301,9 @@ func (d *Driver) finishQR115Login(
 		cookie = mergeCookieStrings(cookie, extra)
 	}
 
-	name := strings.TrimSpace(resp.Data.UserName)
+	name := resp.Data.UserName.String()
 	if name == "" {
-		name = strings.TrimSpace(resp.Data.UserID)
+		name = resp.Data.UserID.String()
 	}
 	return &driver.QRPollResult{
 		Status:      driver.QRSuccess,

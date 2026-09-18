@@ -32,6 +32,12 @@ export default defineConfig({
         // 校验失败 → 所有 POST/PUT 报「请求来源不受信任」。上面 host: true 的局域网访问
         // 就被这一行废掉了。保持原始 Host 后两者自然一致，任何地址都能用。
         changeOrigin: false,
+        // 超过 vite 默认超时的接口要显式放宽：115 扫码的状态查询是**长轮询**，
+        // 一次请求会挂满约 30 秒（见 drivers/115_Open/qrlogin.go 顶部）。
+        // 默认值下代理会提前掐断连接，前端拿到一个空响应 —— 表现是「扫了码
+        // 但弹窗一直停在等待」，而后端其实好好地拿到了结果。
+        timeout: 120_000,
+        proxyTimeout: 120_000,
       },
     },
   },

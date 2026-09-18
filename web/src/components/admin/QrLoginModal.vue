@@ -33,6 +33,8 @@ const device = ref("");
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
+/** 已经问了第几次。只为了在失败文案里说清「哪一次出的事」。 */
+let pollRound = 1;
 
 const showDevicePicker = computed(() => props.deviceOptions.length > 0);
 
@@ -127,6 +129,7 @@ async function start() {
   message.value = "";
   token.value = "";
   expiresIn.value = 0;
+  pollRound = 1;
   panelTitle.value = "扫码登录";
   hintText.value = "请使用对应网盘 App扫码，成功后授权信息将填入表单";
   try {
@@ -156,9 +159,13 @@ const phaseByStatus: Record<QrStatus, Phase> = {
 
 async function poll() {
   if (!token.value) return;
+  // 记下是谁发起的这次轮询：开始时间 + 会话 token。失败时要把它们说出来，
+  // 否则「扫了码没反应」只能靠猜。
+  const startedAt = Date.now();
+  const sessionToken = token.value;
   try {
-    const res = await qrPoll(props.driverType, token.value);
-    if (!props.open || !token.value) return;
+    const res = await qrPoll(props.driverType, sessionToken);
+    if (!props.open || token.value !== sessionToken) return;
     if (!res.success || !res.data?.status) {
       throw new Error(res.message || "轮询失败");
     }
@@ -197,12 +204,17 @@ async function poll() {
       clearCountdown();
       return;
     }
-    scheduleNextPoll(2000);
-  } catch {
-    if (!props.open || !token.value) return;
+    scheduleNextPoll(nextPollDelay());
+  } catch (e) {
+    if (!props.open || token.value !== sessionToken) return;
+    // 说清楚「哪一次、等了多久、错在哪」——不然这里吞掉的异常会让弹窗
+    // 一直停在「等待扫码」，用户只能看到「没反应」。
+    const waited = Math.round((Date.now() - startedAt) / 1000);
+    const detail = e instanceof Error ? e.message : String(e);
+    message.value = `第 ${pollRound} 次查询失败（等了 ${waited} 秒）：${detail}`;
+    pollRound += 1;
     if (expiresIn.value <= 0) {
       phase.value = "expired";
-      message.value = "二维码已过期，请重新获取";
       clearPoll();
       clearCountdown();
       return;
@@ -261,6 +273,9 @@ onUnmounted(() => {
           <div class="qr-hint">{{ hintText }}</div>
           <div v-if="phase === 'waiting' && expireText" class="qr-countdown">{{ expireText }}</div>
           <div v-else class="qr-success">已获取授权信息</div>
+          <!-- 轮询出错时把话说出来，而不是让弹窗继续停在「等待扫码」——
+               用户看到「没反应」时，唯一能自己判断的就是这行字。 -->
+          <div v-if="phase === 'waiting' && message" class="qr-poll-error">{{ message }}</div>
         </div>
 
         <div v-else class="qr-state qr-state--failed">
@@ -347,6 +362,16 @@ onUnmounted(() => {
   color: var(--text-muted);
   font-size: 12px;
   text-align: center;
+}
+
+/* 轮询出错时的提示：用告警色，它是这屏唯一的「出事了」信号。 */
+.qr-poll-error {
+  margin-top: 0;
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  word-break: break-all;
 }
 
 .qr-success {
