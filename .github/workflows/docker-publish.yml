@@ -4,8 +4,16 @@
 #   1. 发 tag：`git tag v2.0.1 && git push origin v2.0.1`
 #   2. 网页手动：Actions → 本 workflow → Run workflow，填版本号
 #
-# 为什么不在云端构建而不用群晖：群晖没有 buildx 插件，且构建一次要几十分钟。
-# 云端还能一次出 amd64 + arm64 两个架构，x86 与 ARM 设备都能用。
+# ⚠️ **默认只编 amd64**。这不是偷懒，是踩过一次：
+#
+# 最初默认编 amd64 + arm64，结果跑了近 4 小时没完。原因是 arm64 那一半在
+# amd64 的 runner 上走 **QEMU 软件模拟**，而 Dockerfile 里最重的活全在前端阶段：
+# `npm ci` 装近九千个依赖包、`vue-tsc` 全项目类型检查、`vite build` + gzip，
+# 再叠上 `go build` 静态编译。模拟环境里这些比原生慢十几倍。
+#
+# 而群晖 / 绝大多数自建场景都是 x86，amd64 是**原生**执行，几分钟到十几分钟就完。
+# 真要发 ARM 版时，手动触发时把 platforms 填成 `linux/amd64,linux/arm64` 即可
+# —— 那种情况请预留一小时以上。
 #
 # Dockerfile 不用改 —— 它刻意避开了 BuildKit 专属语法（见其顶部注释），
 # 在 Actions 的 buildx 上照样能跑。
@@ -20,6 +28,11 @@ on:
       version:
         description: "版本号（如 v2.0.1）"
         required: true
+        type: string
+      platforms:
+        description: "目标架构。默认只编 amd64（快）。要发 ARM 版填 linux/amd64,linux/arm64 —— 那一趟要一小时以上"
+        required: false
+        default: "linux/amd64"
         type: string
 
 env:
@@ -66,11 +79,21 @@ jobs:
           username: desstg
           password: ${{ secrets.DOCKER_TOKEN }}
 
+      # 平台：手动触发填了就用填的，否则 amd64（tag 触发走这里）。
+      # tag 触发时不编 arm64 是**刻意的** —— 见文件顶部那段说明。
+      - name: Resolve platforms
+        id: plat
+        run: |
+          P="${{ inputs.platforms }}"
+          [ -z "$P" ] && P="linux/amd64"
+          echo "platforms=$P" >> "$GITHUB_OUTPUT"
+          echo "目标架构：$P"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.plat.outputs.platforms }}
           # VERSION 会经 -ldflags 写进「关于」页的 buildinfo.Version，
           # 与本地 `docker build --build-arg VERSION=...` 是同一个入口。
           build-args: |
@@ -93,7 +116,7 @@ jobs:
             echo "| \`${{ env.IMAGE }}:${{ steps.ver.outputs.version }}\` | 本次版本 |"
             echo "| \`${{ env.IMAGE }}:latest\` | 同时更新 |"
             echo ""
-            echo "平台：linux/amd64, linux/arm64"
+            echo "平台：\`${{ steps.plat.outputs.platforms }}\`"
             echo ""
             echo "群晖上拉取：\`docker compose pull && docker compose up -d\`"
           } >> "$GITHUB_STEP_SUMMARY"
