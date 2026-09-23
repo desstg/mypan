@@ -1,0 +1,99 @@
+# 构建并推送 Docker 镜像到 Docker Hub。
+#
+# 触发方式**刻意只有两种**，都不碰 push 事件 —— 平时提交代码不会触发构建：
+#   1. 发 tag：`git tag v2.0.1 && git push origin v2.0.1`
+#   2. 网页手动：Actions → 本 workflow → Run workflow，填版本号
+#
+# 为什么不在云端构建而不用群晖：群晖没有 buildx 插件，且构建一次要几十分钟。
+# 云端还能一次出 amd64 + arm64 两个架构，x86 与 ARM 设备都能用。
+#
+# Dockerfile 不用改 —— 它刻意避开了 BuildKit 专属语法（见其顶部注释），
+# 在 Actions 的 buildx 上照样能跑。
+name: Build and push image
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（如 v2.0.1）"
+        required: true
+        type: string
+
+env:
+  IMAGE: desstg/mypan
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 版本号的三个来源，优先级从高到低：
+      #   1. 手动触发时填的那个
+      #   2. tag 名（refs/tags/v2.0.1 → v2.0.1）
+      #   3. 兜底用提交短 sha —— 只该在异常情况下走到
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            V="${{ inputs.version }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            V="${GITHUB_REF_NAME}"
+          else
+            V="sha-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "构建版本：$V"
+
+      # buildx 是 build-push-action 的前置；QEMU 用来在 amd64 的 runner 上
+      # 模拟 arm64（没有它只能出单架构）。
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: desstg
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          # VERSION 会经 -ldflags 写进「关于」页的 buildinfo.Version，
+          # 与本地 `docker build --build-arg VERSION=...` 是同一个入口。
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE }}:latest
+          # 云端缓存：不配的话每次都要从头 npm ci + go mod download。
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          push: true
+
+      - name: Summary
+        run: |
+          {
+            echo "## 镜像已推送"
+            echo ""
+            echo "| tag | 说明 |"
+            echo "|---|---|"
+            echo "| \`${{ env.IMAGE }}:${{ steps.ver.outputs.version }}\` | 本次版本 |"
+            echo "| \`${{ env.IMAGE }}:latest\` | 同时更新 |"
+            echo ""
+            echo "平台：linux/amd64, linux/arm64"
+            echo ""
+            echo "群晖上拉取：\`docker compose pull && docker compose up -d\`"
+          } >> "$GITHUB_STEP_SUMMARY"
