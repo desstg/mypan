@@ -39,9 +39,12 @@ const loaded = ref(false);
 /** 服务端基线，用于脏判断与「还原」。 */
 const baseline = ref("");
 
+// 初值只是「后端还没回话时的占位」—— load() 一回来就被 applyConfig 覆盖。
+// 这里跟后端 registry 的默认值保持一致（四个开关都开），免得加载那一瞬间
+// 界面显示的是「全关」，用户以为默认关着。
 const draft = reactive<TGConfigInput>({
-  enabled: false,
-  auto_push: false,
+  enabled: true,
+  auto_push: true,
   default_account_id: 0,
   default_parent_id: "",
   default_display_path: "",
@@ -50,12 +53,12 @@ const draft = reactive<TGConfigInput>({
   max_push_per_hour: 20,
   poll_interval_sec: 600,
   backfill_pages: 1,
-  web_search_enabled: false,
+  web_search_enabled: true,
   web_search_base_url: "",
   web_search_cloud_types: "magnet,115",
   web_search_token: "",
   web_search_use_proxy: false,
-  web_search_auto: false,
+  web_search_auto: true,
   web_search_interval_sec: 21600,
 });
 

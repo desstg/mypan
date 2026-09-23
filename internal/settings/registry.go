@@ -381,7 +381,7 @@ func defaultSpecs() []Spec {
 
 		// 全局代理。顺序即卡片上的行序（Snapshot 复用声明顺序）。
 		boolSpec(KeyProxyEnabled, "proxy", "启用代理",
-			"开启后，TMDB（目录整理 / STRM 刮削 / 分类整理）与 TG 频道抓取都经此代理出站。其它功能（网盘 API、播放串流）不走代理。", "false"),
+			"**默认关闭**：代理地址因环境而异，请按自己网络的实际情况填写。\n开启后，TMDB（目录整理 / STRM 刮削 / 分类整理）与 TG 频道抓取都经此代理出站。其它功能（网盘 API、播放串流）不走代理。\n填好地址后，可以先用卡片下方的「测试连通」验证一遍再保存。", "false"),
 		stringSpec(KeyProxyURL, "proxy", "代理地址",
 			"HTTP/HTTPS 代理地址，例如 http://127.0.0.1:7890。暂不支持 socks5 —— 请填代理软件提供的 HTTP 端口。", ""),
 		stringSpec(KeyProxyUsername, "proxy", "代理用户名", "代理认证用户名，无认证可留空。", ""),

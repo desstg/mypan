@@ -275,6 +275,9 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/accounts/{id}/refresh-profile", h.refreshAccountProfile)
 				r.Get("/settings", h.getSettings)
 				r.Put("/settings", h.updateSettings)
+				// 代理连通性探测。**不写入任何设置**，纯探测 ——
+				// 用户可以拿表单里还没保存的草稿来测，测通了再保存。
+				r.Post("/settings/test-proxy", h.testProxySettings)
 				r.Route("/api-keys", func(r chi.Router) {
 					r.Get("/", h.listApiKeys)
 					r.Post("/", h.createApiKey)

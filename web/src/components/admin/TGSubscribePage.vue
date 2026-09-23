@@ -53,7 +53,9 @@ async function loadJavEnabled() {
   }
 }
 
-const { activeTab, setActiveTab } = useSectionTabRoute(TAB_SUBSCRIBED, [
+// 默认落在「电影」：这一页的主要用途是逛片（发现墙），
+// 「已订阅」是回头查订阅状态才去的。先进发现墙更符合打开的意图。
+const { activeTab, setActiveTab } = useSectionTabRoute(TAB_MOVIE, [
   TAB_SUBSCRIBED,
   TAB_MOVIE,
   TAB_TV,

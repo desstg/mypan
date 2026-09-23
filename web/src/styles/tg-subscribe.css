@@ -846,3 +846,22 @@
   font-size: 12px;
   line-height: 1.6;
 }
+
+/* 海报墙缺配置时的自查清单（见 TGSubscribePage 的 configReady）。
+   两项分别对应「目录整理」与「系统设置」里的配置 —— 列出逐项状态，
+   比一句「请先配置」更容易让人看出到底缺哪一个。 */
+.tg-wall__checklist {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.tg-wall__checklist li.is-ok {
+  color: color-mix(in srgb, var(--success, #16a34a) 70%, var(--text));
+}

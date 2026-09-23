@@ -14,15 +14,23 @@ import (
 // 以前这套逻辑有三份重复实现（mediaorganize/tmdb 的 BuildProxyURL、
 // mediaorganize 的薄包装、tgsubscribe 的 buildTGProxyURL），现在收敛到这里。
 func ProxyURL(svc *Service) string {
-	if svc == nil || !svc.Bool(KeyProxyEnabled) {
+	if svc == nil {
 		return ""
 	}
-	raw := strings.TrimSpace(svc.StringAllowEmpty(KeyProxyURL))
-	if raw == "" {
+	return buildProxyURL(
+		svc.Bool(KeyProxyEnabled),
+		strings.TrimSpace(svc.StringAllowEmpty(KeyProxyURL)),
+		strings.TrimSpace(svc.StringAllowEmpty(KeyProxyUsername)),
+		strings.TrimSpace(svc.StringAllowEmpty(KeyProxyPassword)),
+	)
+}
+
+// buildProxyURL 是组装逻辑的本体：ProxyURL（读库）与 ResolveProxyURL（可覆盖）
+// 都走它，免得两处各写一份、改一处漏一处。
+func buildProxyURL(enabled bool, raw, user, pwd string) string {
+	if !enabled || raw == "" {
 		return ""
 	}
-	user := strings.TrimSpace(svc.StringAllowEmpty(KeyProxyUsername))
-	pwd := strings.TrimSpace(svc.StringAllowEmpty(KeyProxyPassword))
 	if user == "" || pwd == "" {
 		return raw
 	}

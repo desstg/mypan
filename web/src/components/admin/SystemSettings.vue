@@ -8,6 +8,8 @@ import {
 import {
   fetchSettings,
   saveSettings,
+  testProxySettings,
+  type ProxyProbeResult,
   type SettingCategory,
   type SettingItem,
 } from "@/api/settings";
@@ -150,12 +152,45 @@ const announcementItems = computed(() => items.value.filter((it) => it.category 
 // 通用脏判断会把掩码当成「用户改过了」，一保存就把字面量 ****** 写进库。
 // 所以它不进 form，改用一个 draft + 「留空表示不修改」的约定。
 const PROXY_PASSWORD_KEY = "proxy_password";
+// 探测时要按这三个键取表单里的草稿值。
+const PROXY_ENABLED_KEY = "proxy_enabled";
+const PROXY_URL_KEY = "proxy_url";
+const PROXY_USERNAME_KEY = "proxy_username";
 const proxyItems = computed(() => items.value.filter((it) => it.category === "proxy"));
 const proxyItemsForForm = computed(() => proxyItems.value.filter((it) => it.key !== PROXY_PASSWORD_KEY));
 const proxyPasswordDraft = ref("");
 const proxyPasswordSet = computed(() =>
   proxyItems.value.some((it) => it.key === PROXY_PASSWORD_KEY && it.value !== ""),
 );
+
+// —— 代理「测试连通」 ——
+//
+// 用**表单里的草稿**去测，不是用已保存的值 —— 这就是「测通了再保存」的关键。
+// 探测**不写入任何设置**（后端只读 + 覆盖，见 /admin/settings/test-proxy）。
+const proxyTesting = ref(false);
+const proxyTestResult = ref<ProxyProbeResult | null>(null);
+
+async function testProxy() {
+  proxyTesting.value = true;
+  proxyTestResult.value = null;
+  try {
+    // 密码留空 = 不修改（前端拿不到明文），所以省略这个字段让后端回落到库里那份。
+    const pwd = proxyPasswordDraft.value.trim();
+    const res = await testProxySettings({
+      enabled: form[PROXY_ENABLED_KEY] === "true",
+      proxy_url: form[PROXY_URL_KEY] || "",
+      proxy_username: form[PROXY_USERNAME_KEY] || "",
+      ...(pwd ? { proxy_password: pwd } : {}),
+    });
+    proxyTestResult.value = res;
+    if (res.ok) toast.success(res.notice || "代理可用");
+    else toast.error(res.notice || "代理测试未通过");
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "代理测试失败"));
+  } finally {
+    proxyTesting.value = false;
+  }
+}
 
 const otherSettingsItems = computed(() => [
   ...systemItems.value,
@@ -869,6 +904,40 @@ async function submit() {
               </div>
             </template>
           </SettingsRow>
+
+          <!-- 代理卡片底部的「测试连通」。
+               用**表单里的草稿**测，不是用已保存的值 —— 测通了再保存。
+               探测不写入任何设置。 -->
+          <div v-if="group.key === 'proxy'" class="proxy-test">
+            <div class="proxy-test__row">
+              <AppButton
+                type="button"
+                variant="secondary"
+                :disabled="proxyTesting"
+                @click="testProxy"
+              >
+                {{ proxyTesting ? "测试中…" : "测试连通" }}
+              </AppButton>
+              <span class="proxy-test__hint">
+                用上面填写的内容测，不需要先保存
+              </span>
+            </div>
+            <div
+              v-if="proxyTestResult"
+              class="proxy-test__result"
+              :class="proxyTestResult.ok ? 'proxy-test__result--ok' : 'proxy-test__result--bad'"
+            >
+              <strong>{{ proxyTestResult.ok ? "✓" : "✕" }} {{ proxyTestResult.notice }}</strong>
+              <span class="proxy-test__detail">
+                API {{ proxyTestResult.api.status || "—" }} ·
+                图片 {{ proxyTestResult.image.status || "—" }} ·
+                耗时 {{ Math.max(proxyTestResult.api.elapsed_ms, proxyTestResult.image.elapsed_ms) }} ms
+                <template v-if="proxyTestResult.proxy_url">
+                  · {{ proxyTestResult.proxy_url }}
+                </template>
+              </span>
+            </div>
+          </div>
         </SettingsCard>
       </template>
 
@@ -960,5 +1029,60 @@ async function submit() {
   border: var(--brutal-border-width, 2px) solid var(--text);
   border-radius: 0;
   box-shadow: var(--brutal-shadow, 3px 3px 0 var(--text));
+}
+
+/* —— 代理「测试连通」 ——
+   放在卡片里的 SettingsRow 列表之后，与上面那些行拉开一点距离，
+   免得被读成「又一条设置项」。 */
+.proxy-test {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-soft);
+}
+
+.proxy-test__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.proxy-test__hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.proxy-test__result {
+  display: grid;
+  gap: 3px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.proxy-test__result strong {
+  font-weight: 600;
+}
+
+.proxy-test__result--ok {
+  border-color: color-mix(in srgb, var(--success, #16a34a) 32%, var(--border-soft));
+  background: color-mix(in srgb, var(--success, #16a34a) 8%, var(--surface));
+  color: color-mix(in srgb, var(--success, #16a34a) 70%, var(--text));
+}
+
+.proxy-test__result--bad {
+  border-color: color-mix(in srgb, var(--danger, #ef4444) 32%, var(--border-soft));
+  background: color-mix(in srgb, var(--danger, #ef4444) 8%, var(--surface));
+  color: color-mix(in srgb, var(--danger, #ef4444) 70%, var(--text));
+}
+
+.proxy-test__detail {
+  color: var(--text-muted);
+  font-size: 11.5px;
 }
 </style>

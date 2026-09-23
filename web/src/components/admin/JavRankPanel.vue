@@ -35,7 +35,9 @@ const TABS: Array<{ key: JavRankingKind; label: string; icon: string }> = [
   { key: "actor", label: "演员榜", icon: "👤" },
 ];
 
-const kind = ref<JavRankingKind>("top250");
+// 默认「日榜」：榜单页最常看的是当天新片。Top250 变动慢，
+// 排在日榜前面会让人每次进来都先看到一份没变化的列表。
+const kind = ref<JavRankingKind>("daily");
 const page = ref(1);
 const loading = ref(false);
 const movies = ref<JavCard[]>([]);

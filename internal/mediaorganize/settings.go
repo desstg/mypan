@@ -47,6 +47,20 @@ func SettingsDict(svc *settings.Service) map[string]any {
 		}
 	}
 	out["media_tag_order"] = mediaTagOrderJSON(svc.String(settings.KeyMOMediaTagOrder))
+	// 全局代理。
+	//
+	// **不能漏**：下游有两条路（TMDB 连通性测试 service.go、目录整理的搜片
+	// tmdb_search.go）是拿这个 map 去喂 PlannerProxyURL 的，而它读的就是
+	// `proxy_url` 这个键 —— 少了它，用户在「系统设置 → 网络代理」里配的代理
+	// 对这两条路**完全不生效**，一律直连。
+	//
+	// 另两条路（实际跑整理任务的 service_binding.go、启动时构造的客户端
+	// wire_mediaorganize.go）走的是 EnrichPlannerSettings，那里本来就塞了这个键 ——
+	// 两边必须一致，否则「测试说通、任务跑不通」这种自相矛盾的事还会再来一次。
+	//
+	// settings.ProxyURL 已经处理了「没启用/没填 → 空串」与「有账号密码 → 拼进
+	// URL」，这里直接复用，不重复解析。
+	out["proxy_url"] = settings.ProxyURL(svc)
 	return out
 }
 

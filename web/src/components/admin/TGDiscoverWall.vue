@@ -216,7 +216,11 @@ defineExpose({ load });
       v-else-if="!loading"
       icon="🍿"
       :title="searching ? '没有搜到匹配的影片' : '没有拿到影片列表'"
-      :description="searching ? '换个关键词试试。' : '确认已在「媒体整理 → TMDB 设置」里填好 API Key。'"
+      :description="
+        searching
+          ? '换个关键词试试。'
+          : '「任务管理 → 目录整理 → 整理设置 → TMDB 设置」里填好 API Key 并且已在「系统设置 → 其他设置 → 网络代理」开启代理'
+      "
     />
 
     <div v-else class="tg-wall__footer">加载中…</div>
