@@ -43,11 +43,52 @@ type filesResponse struct {
 	Data  []shareEntry   `json:"data"`
 }
 
+// shareID 是 115 返回的条目 ID 字段。
+//
+// ⚠️ 同一个字段名在**不同条目上类型不同**：文件夹的 cid 是字符串
+// （`"cid":"3169479781959860045"`），文件的 cid 却是数字 0（`"cid":0`）。
+// 用 string 收会在文件分享上整包解析失败，用数字收则拿不到文件夹 ID。
+// 实测于 2026-09-18，对照「浴血黑帮 第六季」（文件夹）与「刀 1995」（单文件）。
+type shareID string
+
+func (s *shareID) UnmarshalJSON(b []byte) error {
+	raw := strings.TrimSpace(string(b))
+	if raw == "" || raw == "null" || raw == `""` {
+		*s = ""
+		return nil
+	}
+	*s = shareID(strings.Trim(raw, `"`))
+	return nil
+}
+
 // shareEntry 是分享里的一项（/share/snap 的 data.list）。
+//
+// ⚠️ **文件夹条目没有 fid。** 分享的根是一个文件夹时，115 回的是
+//
+//	{"cid":"3169479781959860045","pid":"0","n":"浴血黑帮 第六季 杜比视界 NF版","s":52721994057}
+//
+// —— 只有 cid，没有 fid；只有根是**单个文件**时才给 fid。只认 fid 会让
+// 「根是文件夹」的分享（115 频道里的大多数）全部转存失败，还会被报成
+// 「没有可转存的文件」，与「空目录」混为一谈，查半天查不到点子上。
 type shareEntry struct {
-	Fid  string `json:"fid"`
-	Name string `json:"n"`
-	Size int64  `json:"s"`
+	Fid  shareID `json:"fid"`
+	Cid  shareID `json:"cid"`
+	Name string  `json:"n"`
+	Size int64   `json:"s"`
+}
+
+// entryID 返回这条条目交给 share/receive 的 file_id。
+//
+// receive 收的本来就是「文件(夹)ID」：文件用 fid、文件夹用 cid，两者同一套
+// ID 空间。0 是文件条目的 cid 占位值，不能当 ID 交上去。
+func (e shareEntry) entryID() string {
+	if id := strings.TrimSpace(string(e.Fid)); id != "" && id != "0" {
+		return id
+	}
+	if id := strings.TrimSpace(string(e.Cid)); id != "" && id != "0" {
+		return id
+	}
+	return ""
 }
 
 // snapResponse 是 `/share/snap` 的 data 形状。
@@ -192,14 +233,23 @@ func (d *Driver) ReceiveShare(ctx context.Context, req driver.ShareReceiveReques
 	fileIDs := req.FileIDs
 	if len(fileIDs) == 0 {
 		for _, entry := range snap.List {
-			if id := strings.TrimSpace(entry.Fid); id != "" {
+			if id := entry.entryID(); id != "" {
 				fileIDs = append(fileIDs, id)
 			}
 		}
 	}
 	if len(fileIDs) == 0 {
+		// 两种失败要分开报：一种是分享真的是空的，另一种是条目拿不到 ID
+		// （接口形状变了）。混成一句「没有可转存的文件」会把人引去查分享，
+		// 而问题在代码这边。两处都用 NOT_FOUND 是因为它被
+		// isPermanentDeliveryError 判为确定性失败 —— 这类失败重试只是白打
+		// 115 的接口，正是触发风控的姿势。
+		if len(snap.List) == 0 {
+			return driver.ShareReceiveResult{}, domain.Errorf(domain.CodeNotFound,
+				"这份分享里没有可转存的文件（可能是空目录，或分享已被清空）")
+		}
 		return driver.ShareReceiveResult{}, domain.Errorf(domain.CodeNotFound,
-			"这份分享里没有可转存的文件（可能是空目录，或分享已被清空）")
+			"分享里有 %d 个条目却都没取到可转存的 ID，115 接口结构可能已变", len(snap.List))
 	}
 
 	// ③ receive：整份转存到目标目录。

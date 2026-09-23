@@ -325,6 +325,67 @@ func TestTGMatchRecordDedupe(t *testing.T) {
 	_ = base
 }
 
+// 没有对应 TG 消息的资源（网盘搜索来的）落库时 channel_id 与 message_id 都是 0。
+//
+// 消息级唯一索引原本会把它当成「同一条消息里的同一资源」，于是**同一个磁力全局
+// 只能落一条记录**：订阅 A 搜到之后，订阅 B 再搜到同一个磁力就会被静默丢弃，
+// B 的匹配历史里什么都看不到、也就无从推送。0027 把它改成了只约束真正有消息的行
+// （WHERE message_id > 0），这条测试就是那个改动的凭据。
+func TestTGMatchRecordWebSourceIsPerSubscription(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	webRec := func(subID int64) *domain.TGMatchRecord {
+		return &domain.TGMatchRecord{
+			ChannelID: 0, MessageID: 0, ChatTitle: "网盘搜索（plugin:test）",
+			MagnetHash: "1155e6db0d2d2f5ee7d1f0b0b1d0f9a1c2b3d4e5", SubscriptionID: subID,
+			Magnet:  "magnet:?xt=urn:btih:1155e6db0d2d2f5ee7d1f0b0b1d0f9a1c2b3d4e5",
+			RawName: "生逢其时 (2026) S01E05 2160p", Status: domain.TGRecordAmbiguous,
+			Season: 1, Episode: 5, EpisodeEnd: -1,
+		}
+	}
+
+	first, err := s.TGMatchRecords.Create(ctx, webRec(11))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if first == 0 {
+		t.Fatal("第一条应当落库")
+	}
+
+	// 同一条订阅再收一次同一个磁力：仍然要被 idx_tg_rec_sub_magnet 挡住。
+	if dup, err := s.TGMatchRecords.Create(ctx, webRec(11)); err != nil || dup != 0 {
+		t.Fatalf("同一订阅的同一磁力必须去重，id=%d err=%v", dup, err)
+	}
+
+	// 另一条订阅收同一个磁力：必须能各留一条 —— 否则它无从推送。
+	second, err := s.TGMatchRecords.Create(ctx, webRec(12))
+	if err != nil {
+		t.Fatalf("另一条订阅应当能落库: %v", err)
+	}
+	if second == 0 {
+		t.Fatal("另一条订阅的同一磁力被消息级索引误挡了")
+	}
+}
+
+// 真正的消息级去重不能被这次改动削弱：同频道同消息同磁链仍然只留一条。
+func TestTGMatchRecordMessageDedupeStillApplies(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	rec := &domain.TGMatchRecord{
+		ChannelID: 7, MessageID: 100, MagnetHash: "hash-partial",
+		Magnet: "magnet:?xt=urn:btih:hash-partial", RawName: "Dune.2021.2160p",
+		Status: domain.TGRecordUnmatched, Season: -1, Episode: -1, EpisodeEnd: -1,
+	}
+	if id, err := s.TGMatchRecords.Create(ctx, rec); err != nil || id == 0 {
+		t.Fatalf("create: id=%d err=%v", id, err)
+	}
+	if dup, err := s.TGMatchRecords.Create(ctx, rec); err != nil || dup != 0 {
+		t.Fatalf("同频道同消息同磁链必须去重，id=%d err=%v", dup, err)
+	}
+}
+
 // 资源指纹带类型前缀，值域两两不相交 —— 所以两种类型可以共用同一对唯一索引，
 // 不需要重建索引。这条测试就是「不用重建索引」这个判断的凭据。
 func TestTGMatchRecordDedupeAcrossKinds(t *testing.T) {

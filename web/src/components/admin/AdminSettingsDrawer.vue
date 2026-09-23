@@ -9,8 +9,14 @@ withDefaults(
     canSave?: boolean;
     /** 内容自带保存入口（或根本不需要保存）时隐藏底部操作区。 */
     hideFoot?: boolean;
+    /**
+     * 抬到页面内所有弹窗之上。默认档（120）压在页面级，够用于「从列表点进详情」；
+     * 但从弹窗里点开的详情（如番号影片子弹窗 → 影片详情）必须传这个 ——
+     * 那些弹窗是 2000~3000 一段，默认档会被它们整个盖住。
+     */
+    elevated?: boolean;
   }>(),
-  { saving: false, canSave: false, hideFoot: false },
+  { saving: false, canSave: false, hideFoot: false, elevated: false },
 );
 
 const emit = defineEmits<{
@@ -22,7 +28,13 @@ const emit = defineEmits<{
 
 <template>
   <Teleport to="body">
-    <div class="admin-settings-drawer" :class="{ 'admin-settings-drawer--open': open }">
+    <div
+      class="admin-settings-drawer"
+      :class="{
+        'admin-settings-drawer--open': open,
+        'admin-settings-drawer--elevated': elevated,
+      }"
+    >
       <div
         class="admin-settings-drawer__backdrop"
         aria-hidden="true"
@@ -46,10 +58,14 @@ const emit = defineEmits<{
             <slot />
           </div>
           <div v-if="!hideFoot" class="admin-settings-drawer__foot">
-            <AppButton type="button" variant="secondary" @click="emit('cancel')">取消</AppButton>
-            <AppButton type="button" variant="primary" :disabled="!canSave || saving" @click="emit('save')">
-              {{ saving ? "保存中…" : "保存设置" }}
-            </AppButton>
+            <!-- 默认是「取消 / 保存设置」。操作比这一对多的抽屉（如订阅详情）自带
+                 一套按钮走 #foot，不走 cancel/save 事件。 -->
+            <slot name="foot">
+              <AppButton type="button" variant="secondary" @click="emit('cancel')">取消</AppButton>
+              <AppButton type="button" variant="primary" :disabled="!canSave || saving" @click="emit('save')">
+                {{ saving ? "保存中…" : "保存设置" }}
+              </AppButton>
+            </slot>
           </div>
         </div>
       </aside>
@@ -70,6 +86,16 @@ const emit = defineEmits<{
 
 .admin-settings-drawer--open {
   pointer-events: auto;
+}
+
+/* 抬到页面内所有弹窗之上（它们散落在 2000~3000），但仍留在全局叠层之下 ——
+   --z-dropdown 是那套 10050 起的比例尺的底，确认框 / toast 照样盖得住它。
+
+   注意：抽屉里 Teleport 到 body 的东西**不**在这个层叠上下文里，跟本抽屉是兄弟，
+   会按裸数值直接比大小。JavMovieDrawer 的灯箱就属于这种，它取 --z-modal（10100）
+   才压得住这里的 10040 —— 抬本抽屉时记得一并看一眼那类浮层。 */
+.admin-settings-drawer--elevated {
+  z-index: calc(var(--z-dropdown) - 10);
 }
 
 .admin-settings-drawer__backdrop {
@@ -200,6 +226,7 @@ const emit = defineEmits<{
 
 .admin-settings-drawer__foot {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
   gap: 8px;
   padding: 8px 16px 20px;

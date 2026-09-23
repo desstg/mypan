@@ -2,9 +2,9 @@
 import { computed, reactive, ref, watch } from "vue";
 import AppButton from "@/components/base/AppButton.vue";
 import AppInput from "@/components/base/AppInput.vue";
-import AppModal from "@/components/base/AppModal.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import AccountFolderField from "@/components/admin/AccountFolderField.vue";
+import AdminSettingsDrawer from "@/components/admin/AdminSettingsDrawer.vue";
 import AdminStatusPill from "@/components/admin/AdminStatusPill.vue";
 import FolderPickerModal from "@/components/file/FolderPickerModal.vue";
 import SettingsBoolSegment from "@/components/admin/SettingsBoolSegment.vue";
@@ -20,6 +20,7 @@ import {
   fetchTGQualityProfiles,
   resetTGSubscription,
   searchTGHistory,
+  searchTGWeb,
   setTGSubscriptionStatus,
   tgPosterURL,
   updateTGSubscription,
@@ -67,6 +68,7 @@ const accountsStore = useAccountsStore();
 const loading = ref(false);
 const saving = ref(false);
 const searching = ref(false);
+const searchingWeb = ref(false);
 const profiles = ref<TGQualityProfile[]>([]);
 const subscription = ref<TGSubscription | null>(null);
 const episodes = ref<TGSubscriptionEpisode[]>([]);
@@ -86,7 +88,10 @@ const form = reactive<TGSubscriptionInput>({
   target_display_path: "",
   push_provider: "auto",
   collect_window_min: 5,
-  upgrade_enabled: true,
+  // 洗版默认关闭：开着洗版的订阅**永远不会自动收尾**（见后端 maybeComplete），
+  // 它会一直停在「订阅中」等更好的版本。那是想追画质的人才要的行为，
+  // 不该当成所有人的默认。
+  upgrade_enabled: false,
 });
 
 const title = computed(() => form.title || form.original_title || "（无标题）");
@@ -222,7 +227,7 @@ watch(
     form.target_display_path = "";
     form.push_provider = "auto";
     form.collect_window_min = 5;
-    form.upgrade_enabled = true;
+    form.upgrade_enabled = false;
     subscription.value = null;
 
     loading.value = true;
@@ -379,6 +384,33 @@ async function searchHistory() {
   }
 }
 
+/**
+ * 搜网盘。
+ *
+ * 与「搜历史帖」的分工：那条只在**你已订阅的频道**里翻旧账，频道少的时候
+ * 根本搜不到；这条拿片名去外部聚合搜索引擎搜，不依赖频道数。
+ *
+ * 同样是「只落库、不推送」，命中以「待确认」进匹配历史，所以没有二次确认弹窗。
+ * 需要先在设置里打开「网盘搜索」，否则后端会直接报错出来。
+ */
+async function searchWeb() {
+  if (!subscription.value) return;
+  searchingWeb.value = true;
+  try {
+    const res = await searchTGWeb(subscription.value.id);
+    if (res.hit_records > 0) {
+      toast.success(res.message);
+      emit("changed");
+    } else {
+      toast.info(res.message);
+    }
+  } catch (error) {
+    toast.error(getApiErrorMessage(error, "网盘搜索失败"));
+  } finally {
+    searchingWeb.value = false;
+  }
+}
+
 async function unsubscribe() {
   if (!subscription.value) return;
   try {
@@ -405,14 +437,12 @@ async function unsubscribe() {
 </script>
 
 <template>
-  <AppModal
+  <AdminSettingsDrawer
     :open="open"
     :title="subscribed ? '订阅详情' : '订阅影片'"
-    size="lg"
-    body-flush
     @close="emit('close')"
   >
-    <div class="tg-detail" style="padding: 0 24px 8px">
+    <div class="tg-detail">
       <div class="tg-detail__head">
         <div class="tg-detail__poster">
           <img v-if="form.poster_path" :src="tgPosterURL(form.poster_path, 'w300')" :alt="title" />
@@ -542,7 +572,7 @@ async function unsubscribe() {
       <TGMatchHistoryPanel v-if="subscribed && subscription" compact :subscription-id="subscription.id" />
     </div>
 
-    <template #footer>
+    <template #foot>
       <template v-if="subscribed">
         <AppButton type="button" variant="ghost" @click="unsubscribe">取消订阅</AppButton>
         <AppButton type="button" variant="ghost" @click="resetProgress">重置进度</AppButton>
@@ -554,6 +584,15 @@ async function unsubscribe() {
           @click="searchHistory"
         >
           {{ searching ? "搜索中…" : "搜历史帖" }}
+        </AppButton>
+        <AppButton
+          type="button"
+          variant="ghost"
+          :disabled="searchingWeb"
+          title="拿片名去网盘搜索引擎搜磁力。不受你订阅了几个频道限制，但需要先在设置里打开「网盘搜索」"
+          @click="searchWeb"
+        >
+          {{ searchingWeb ? "搜索中…" : "搜网盘" }}
         </AppButton>
         <AppButton
           v-if="subscription?.status !== 'paused'"
@@ -603,5 +642,5 @@ async function unsubscribe() {
       @close="pickerOpen = false"
       @resolve="onTargetPicked"
     />
-  </AppModal>
+  </AdminSettingsDrawer>
 </template>

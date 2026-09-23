@@ -6,6 +6,8 @@ import TGChannelPanel from "@/components/admin/TGChannelPanel.vue";
 import TGQualityRulesPanel from "@/components/admin/TGQualityRulesPanel.vue";
 import TGMatchHistoryPanel from "@/components/admin/TGMatchHistoryPanel.vue";
 import TGSettingsPanel from "@/components/admin/TGSettingsPanel.vue";
+import JavSettingsPanel from "@/components/admin/JavSettingsPanel.vue";
+import JavRecordPanel from "@/components/admin/JavRecordPanel.vue";
 import { useSettingsPageDirty } from "@/composables/useSettingsPageDirty";
 import { readPanelSaving, type SettingsPanelExpose } from "@/composables/useSettingsForm";
 
@@ -21,27 +23,35 @@ const TAB_CHANNELS = "channels";
 const TAB_QUALITY = "quality";
 const TAB_RECORDS = "records";
 const TAB_SETTINGS = "settings";
+const TAB_JAV = "jav";
+const TAB_DOWNLOADS = "downloads";
 
 const TABS = [
   { key: TAB_CHANNELS, label: "TG 频道" },
   { key: TAB_QUALITY, label: "画质规则" },
   { key: TAB_RECORDS, label: "匹配历史" },
   { key: TAB_SETTINGS, label: "推送设置" },
+  { key: TAB_JAV, label: "番号相关设置" },
+  { key: TAB_DOWNLOADS, label: "下载记录" },
 ];
 
 /** 需要草稿 + 保存的 tab。频道是即时增删改，匹配历史只读，都不参与保存。 */
-const SAVEABLE_TABS = new Set<string>([TAB_QUALITY, TAB_SETTINGS]);
+// 番号设置也要草稿 + 保存；下载记录是只读表格，不参与。
+// 两者都不在这里：它们各自有自己的加载与保存入口（JavSettingsPanel 自己管理草稿）。
+const SAVEABLE_TABS = new Set<string>([TAB_QUALITY, TAB_SETTINGS, TAB_JAV]);
 
 const tab = ref(TAB_CHANNELS);
 const visited = ref<Record<string, boolean>>({ [TAB_CHANNELS]: true });
 
 const qualityRef = ref<SettingsPanelExpose | null>(null);
 const settingsRef = ref<SettingsPanelExpose | null>(null);
+const javRef = ref<SettingsPanelExpose | null>(null);
 
 /** 当前 tab 对应的面板实例（只有可保存的 tab 才有）。 */
 const activePanel = computed<SettingsPanelExpose | null>(() => {
   if (tab.value === TAB_QUALITY) return qualityRef.value;
   if (tab.value === TAB_SETTINGS) return settingsRef.value;
+  if (tab.value === TAB_JAV) return javRef.value;
   return null;
 });
 
@@ -53,12 +63,15 @@ const canSave = computed(() => SAVEABLE_TABS.has(tab.value) && activeDirty.value
 // 之后切到匹配历史看热闹，这时关掉面板同样会丢改动。
 const anyDirty = computed(
   () =>
-    (qualityRef.value?.isDirty?.() ?? false) || (settingsRef.value?.isDirty?.() ?? false),
+    (qualityRef.value?.isDirty?.() ?? false) ||
+    (settingsRef.value?.isDirty?.() ?? false) ||
+    (javRef.value?.isDirty?.() ?? false),
 );
 
 function revertAll() {
   qualityRef.value?.revert?.();
   settingsRef.value?.revert?.();
+  javRef.value?.revert?.();
 }
 
 const { confirmDiscardChanges } = useSettingsPageDirty(anyDirty, revertAll);
@@ -115,6 +128,12 @@ watch(
       </div>
       <div v-if="visited[TAB_SETTINGS]" v-show="tab === TAB_SETTINGS">
         <TGSettingsPanel ref="settingsRef" @changed="emit('changed')" />
+      </div>
+      <div v-if="visited[TAB_JAV]" v-show="tab === TAB_JAV">
+        <JavSettingsPanel ref="javRef" @changed="emit('changed')" />
+      </div>
+      <div v-if="visited[TAB_DOWNLOADS]" v-show="tab === TAB_DOWNLOADS">
+        <JavRecordPanel />
       </div>
     </div>
   </AdminSettingsDrawer>

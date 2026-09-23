@@ -466,6 +466,26 @@ func parseBTIH(xt string) (string, bool) {
 			}
 			return hex.EncodeToString(decoded), true
 		}
+
+		// 比 40 / 32 长：多半是发布者**漏了 `&` 分隔符**，把说明文字直接粘在 hash 后面
+		// （实测 `urn:btih:0A7BC56F48ADE6F9A489204D8F758E3B2B9C2C73.无码`）。
+		// hash 本身是好的，掐掉尾巴就是一条能用的链。
+		//
+		// 以前这里直接判非法、**整条链丢掉** —— 那等于白白漏掉一个资源，
+		// 而漏掉的恰恰是「资源本身没问题、只是写法脏」的那一类。
+		//
+		// 第 41 / 33 位必须是**非字母数字**才算数：base32 与十六进制都在那个字母表里，
+		// 不设这道闸的话，一条「32 位 base32 + 长尾巴」会被前面 40 位误判成十六进制，
+		// 算出一个看着合法、其实错的 hash —— 那比丢掉更糟（会去下一颗不存在的种子）。
+		if len(raw) > 40 && !isAlnum(raw[40]) && isHexString(raw[:40]) {
+			return strings.ToLower(raw[:40]), true
+		}
+		if len(raw) > 32 && !isAlnum(raw[32]) {
+			decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(raw[:32]))
+			if err == nil && len(decoded) == 20 {
+				return hex.EncodeToString(decoded), true
+			}
+		}
 		return "", false
 	case strings.HasPrefix(lower, "urn:btmh:"):
 		raw := strings.ToLower(strings.TrimSpace(xt[len("urn:btmh:"):]))
@@ -485,6 +505,14 @@ func isHexString(s string) bool {
 		return false
 	}
 	return len(s) > 0
+}
+
+// isAlnum 判断一个字节是不是字母或数字（ASCII）。
+//
+// 用来认「hash 到此为止、后面是杂字」：紧跟着 hash 的那一位若是字母数字，
+// 那就还是 hash（或另一种编码）的延续，不能当杂字掐掉。
+func isAlnum(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // parseSizeParam 解析 xl= 参数。频道里乱填的很多，所以只做尽力而为的解析，

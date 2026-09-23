@@ -3,13 +3,13 @@
   background: var(--surface);
   box-shadow: var(--shadow-card);
   border: 1px solid var(--border-soft);
-  overflow: hidden;
-}
-
-@media (max-width: 720px) {
-  .admin-panel-table-wrap {
-    overflow-x: auto;
-  }
+  /* 列多的表（TG 频道、匹配历史）宽度会超过容器。这里必须是 auto 而不是 hidden ——
+     hidden 会把右边溢出的列**裁掉**，看着就像「操作按钮少了几个」，
+     而且没有任何提示用户内容被藏了。overflow-y 保持 hidden 只是为了切圆角。
+     注意：表里的浮层得自己 Teleport 到 body（见 AdminTableActionBtn），
+     否则会被这个滚动容器裁切。 */
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .admin-table {

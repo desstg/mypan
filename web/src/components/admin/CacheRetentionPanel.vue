@@ -61,7 +61,6 @@ import { useStartupCountdown } from "@/composables/useStartupCountdown";
 import { toast } from "@/composables/useToast";
 import { useAccountsStore } from "@/stores/accounts";
 import { formatCompactDuration, formatElapsedMs, formatRelativeTimeAgo } from "@/utils/format";
-import "@/styles/admin-table.css";
 
 const MAX_CONFIGS = 6;
 

@@ -702,6 +702,27 @@ func (h *Handler) searchTGHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, Resp{Success: true, Message: res.Message, Data: res})
 }
 
+// searchTGWeb 拿订阅片名去外部网盘搜索引擎搜磁力。
+//
+// 与 searchTGHistory 并列的第二个发现入口，同样手动触发、只落库不推送 ——
+// 详见 internal/tgsubscribe/websearch.go 里那三条硬约束。
+func (h *Handler) searchTGWeb(w http.ResponseWriter, r *http.Request) {
+	if !h.tgSubscribeReady(w) {
+		return
+	}
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := h.tgSubscribe.SearchWeb(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, Resp{Success: true, Message: res.Message, Data: res})
+}
+
 func (h *Handler) ignoreTGRecord(w http.ResponseWriter, r *http.Request) {
 	if !h.tgSubscribeReady(w) {
 		return

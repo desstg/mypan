@@ -229,6 +229,12 @@ func (s *Service) Start(ctx context.Context) {
 		defer s.runWG.Done()
 		s.runTempCleanup(runCtx)
 	}()
+	// 网盘原生任务的完成检测：没有它，订阅侧永远等不到「下完了」那个事件。
+	s.runWG.Add(1)
+	go func() {
+		defer s.runWG.Done()
+		s.nativeRefreshLoop(runCtx)
+	}()
 	for _, id := range ids {
 		s.startBuiltinTask(id)
 	}

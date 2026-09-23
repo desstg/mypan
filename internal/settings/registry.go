@@ -131,6 +131,26 @@ const (
 	KeyTGPreviewRequestGapMs    = "tg_preview_request_gap_ms"
 	KeyTGPreviewTimeoutSec      = "tg_preview_timeout_sec"
 
+	// 网盘搜索（拿片名去外部聚合搜索站点搜磁力）。
+	//
+	// 与频道抓取是互补的两条路：抓取是「推」（资源得恰好出现在用户订阅的频道里），
+	// 搜索是「拉」（不依赖用户加了哪些频道）。默认关闭 —— 它依赖第三方站点，
+	// 且结果质量参差，得用户自己确认过才该开。
+	KeyTGWebSearchEnabled    = "tg_websearch_enabled"
+	KeyTGWebSearchBaseURL    = "tg_websearch_base_url"
+	KeyTGWebSearchCloudTypes = "tg_websearch_cloud_types"
+	KeyTGWebSearchToken      = "tg_websearch_token"
+	KeyTGWebSearchUseProxy   = "tg_websearch_use_proxy"
+	KeyTGWebSearchTimeoutSec = "tg_websearch_timeout_sec"
+	// 自动搜索：按固定间隔替还没收齐的订阅主动搜。
+	//
+	// 间隔**刻意与频道抓取间隔分开**，不做成一个设置。两者成本差着量级：抓取是
+	// 「一个频道一页」，一个订阅搜一轮要打 3 个关键词、每个关键词一次最长 30 秒超时。
+	// 共用 600 秒的抓取间隔意味着 3 条订阅每 10 分钟往外站发 9 个请求 —— 外部搜索站
+	// 没有程序配额，合成一个数字会把这个事实藏起来，用户调完频道间隔就顺带打爆外站。
+	KeyTGWebSearchAuto        = "tg_websearch_auto"
+	KeyTGWebSearchIntervalSec = "tg_websearch_interval_sec"
+
 	// KeyTGRecommendedSeeded 记录「内置推荐频道已经入库过一次」。
 	//
 	// 一次性播种的**唯一**凭据：靠它才能做到「首次启动自动添加」，同时保证
@@ -143,6 +163,95 @@ const (
 	// **用户自己删掉的**（不该再冒出来）。没有这个区分的话，用户删掉一个默认频道，
 	// 界面上就会立刻多出一行「未添加 · 补加」，看起来像是删除没生效。
 	KeyTGRecommendedPending = "tg_recommended_pending"
+
+	// —————————————— 番号（JAV）模块 ——————————————
+	//
+	// 与 TG 影片订阅同一形态：这些项全部 Hidden，只在该功能自己的配置弹窗里
+	// 通过 /api/jav/config 读写。理由同上面 TG 那一段 —— 不希望「系统设置」里
+	// 出现第二个入口，两边各改一半会让人分不清哪个生效。
+	//
+	// 代理**不在这里**：已经收敛成全局 proxy_*，这一页只留一个 jav_use_proxy 开关。
+	// 以前 mo_proxy_* / tg_bot_proxy_* 各自一套，同一个代理要在两个页面各填一遍。
+
+	// KeyJavEnabled 控制「番号」分组要不要出现在订阅页的 Tab 栏里。
+	//
+	// 它是唯一一个**不在**番号设置弹窗里读、而由主页面直接读的开关 ——
+	// 关掉之后连弹窗入口本身都要消失，所以不能指望用户先进弹窗去关。
+	KeyJavEnabled = "jav_enabled"
+
+	// 认证与凭据。
+	KeyJavUsername     = "jav_username"
+	KeyJavPassword     = "jav_password"
+	KeyJavToken        = "jav_token"
+	KeyJavLoginStatus  = "jav_login_status"
+	KeyJavLoginMessage = "jav_login_message"
+	KeyJavLastLoginAt  = "jav_last_login_at"
+
+	// 网络。
+	KeyJavAPIBase = "jav_api_base"
+	// KeyJavSiteBase 是 JAVDB **官网**的地址，与 api_base 是两个域名。
+	//
+	// 只在「清单里的影片」用得上：上游 API 没有「按清单 id 取影片」的接口
+	// （`/v1/lists/{id}` 只给元数据、`/v1/lists/{id}/movies` 是 404），
+	// 而按清单名去搜是**模糊匹配影片标题**、搜出来的根本不是清单成员 ——
+	// 只能去官网的清单页抓 HTML，与源码同一条路。
+	KeyJavSiteBase      = "jav_site_base"
+	KeyJavAPINodes      = "jav_api_nodes"
+	KeyJavJavbusBase    = "jav_javbus_base"
+	KeyJavUseProxy      = "jav_use_proxy"
+	KeyJavMinIntervalMS = "jav_min_interval_ms"
+	KeyJavRequestGapMS  = "jav_request_gap_ms"
+	KeyJavTimeoutSec    = "jav_timeout_sec"
+	KeyJavRetry         = "jav_retry"
+
+	// 订阅调度。分成**两组互不相干的调度**，与源码设置页的两个区块一一对应：
+	//
+	//   「订阅配置」   sub_check_enabled + daily_times / check_interval
+	//                  → 到点**检查全部订阅**（刷新命中数据），**不推送**。
+	//   「自动同步在线订阅」 sub_sync_enabled + sync_times
+	//                  → 到点**推送**（等价于订阅页的「执行订阅」）。
+	//
+	// 分成两组不是历史包袱而是刻意的：检查是只读的、便宜的、可以频繁跑；
+	// 推送会真往网盘塞任务、占配额、可能触发风控。把两者绑在一个开关上，
+	// 用户就没法「先让它每小时检查一遍看看匹配得对不对，但先别推」。
+	KeyJavSubCheckEnabled = "jav_sub_check_enabled"
+	KeyJavSubDailyTimes   = "jav_sub_daily_times"
+	// 单位是**分钟**（源码界面上写的就是「检查间隔（分钟）」），下限 120。
+	// 只在「每日检查时间」为空时生效 —— 设了每日时间点就以它为准。
+	KeyJavSubCheckIntervalMin = "jav_sub_check_interval_min"
+
+	KeyJavSubSyncEnabled = "jav_sub_sync_enabled"
+	KeyJavSubSyncTimes   = "jav_sub_sync_times"
+	// 每轮每订阅最多推几部。
+	//
+	// 源码每轮每订阅**只推 1 部**（`_run_subscription_full_push` 里逐订阅调一次
+	// auto_push），于是一个 43 部的演员订阅按一天两次要 21 天才推得完。这里有意
+	// 偏离：一轮内连着推几部，之间仍按「间隔范围」随机停顿 —— 风控看的是提交
+	// 速率，不是「这是第几轮」。想回到源码行为就把它设成 1。
+	KeyJavSubPushBatch = "jav_sub_push_batch"
+
+	KeyJavSubConcurrency    = "jav_sub_concurrency"
+	KeyJavSubRetryEnabled   = "jav_sub_retry_enabled"
+	KeyJavSubIntervalMinSec = "jav_sub_interval_min_sec"
+	KeyJavSubIntervalMaxSec = "jav_sub_interval_max_sec"
+	KeyJavSubTimeoutSec     = "jav_sub_timeout_sec"
+	KeyJavSubLastRunAt      = "jav_sub_last_run_at"
+	KeyJavSubLastPushAt     = "jav_sub_last_push_at"
+
+	// 推送默认目标。订阅自身留空时回落到这里。
+	KeyJavDefaultAccountID    = "jav_default_account_id"
+	KeyJavDefaultParentID     = "jav_default_parent_id"
+	KeyJavDefaultPath         = "jav_default_display_path"
+	KeyJavDefaultPushProvider = "jav_default_push_provider"
+
+	// 媒体库同步。
+	KeyJavLibrarySyncEnabled = "jav_library_sync_enabled"
+	KeyJavLibraryCron        = "jav_library_cron"
+	KeyJavLibraryBackfillN   = "jav_library_backfill_batch"
+	KeyJavLibraryBackfillMS  = "jav_library_backfill_pause_ms"
+	KeyJavLibraryLastRunAt   = "jav_library_last_run_at"
+	KeyJavLibrarySyncStatus  = "jav_library_sync_status"
+	KeyJavLibrarySyncMessage = "jav_library_sync_message"
 )
 
 // Type 决定后台表单控件与校验方式。
@@ -443,9 +552,99 @@ func defaultSpecs() []Spec {
 		{Key: KeyTGPreviewBackfillPages, Type: TypeInt, Default: "1", Min: intp(0), Max: intp(20), Hidden: true},
 		{Key: KeyTGPreviewRequestGapMs, Type: TypeInt, Default: "2000", Min: intp(0), Max: intp(30000), Hidden: true},
 		{Key: KeyTGPreviewTimeoutSec, Type: TypeInt, Default: "20", Min: intp(5), Max: intp(120), Hidden: true},
+		// 网盘搜索。超时默认 30 秒 —— 实测该接口带 cloud_types 过滤约 5 秒，
+		// 不限类型时要 15~30 秒；给宽一点，否则会把它当成失败。
+		{Key: KeyTGWebSearchEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyTGWebSearchBaseURL, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyTGWebSearchCloudTypes, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyTGWebSearchToken, Type: TypeString, Default: "", Hidden: true},
+		// 默认不走代理：搜索站是国内的，直连就通，而全局代理是为 t.me/TMDB 配的。
+		{Key: KeyTGWebSearchUseProxy, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyTGWebSearchTimeoutSec, Type: TypeInt, Default: "30", Min: intp(5), Max: intp(180), Hidden: true},
+		// 自动搜索默认关闭；打开后默认 6 小时一轮。下限 15 分钟是给外部站点的护栏
+		// ——它没有程序配额，而这轮询是无人值守的，填太小会一直打。
+		{Key: KeyTGWebSearchAuto, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyTGWebSearchIntervalSec, Type: TypeInt, Default: "21600", Min: intp(900), Max: intp(604800), Hidden: true},
 		// 一次性播种的标记与「没加成功的清单」，纯内部状态。
 		{Key: KeyTGRecommendedSeeded, Type: TypeBool, Default: "false", Hidden: true},
 		{Key: KeyTGRecommendedPending, Type: TypeString, Default: "", Hidden: true},
+
+		// 番号（JAV）模块。全部 Hidden，见上面常量块里的说明。
+		//
+		// jav_enabled 默认 true：番号是这一版的主功能，装完就该看得见。
+		// 不想要的人自己去「番号相关设置」里关掉，而不是让所有人先去找开关。
+		{Key: KeyJavEnabled, Type: TypeBool, Default: "true", Hidden: true},
+
+		{Key: KeyJavUsername, Type: TypeString, Default: "", Hidden: true},
+		// password/token 从不出现在任何响应里，API 侧只回「有没有配过」。
+		{Key: KeyJavPassword, Type: TypeString, Default: "", Sensitive: true, Hidden: true},
+		{Key: KeyJavToken, Type: TypeString, Default: "", Sensitive: true, Hidden: true},
+		{Key: KeyJavLoginStatus, Type: TypeString, Default: "unknown", Hidden: true},
+		{Key: KeyJavLoginMessage, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyJavLastLoginAt, Type: TypeString, Default: "", Hidden: true},
+
+		{Key: KeyJavAPIBase, Type: TypeString, Default: "https://jdforrepam.com/api", Hidden: true},
+		// 三个官方镜像。域名被墙时换一个，或在这里改 Base。
+		{Key: KeyJavAPINodes, Type: TypeString, Default: `[{"name":"jdforrepam.com","base":"https://jdforrepam.com/api"},{"name":"apidd.spthgb.com","base":"https://apidd.spthgb.com/api"},{"name":"apidd.czssdgz.com","base":"https://apidd.czssdgz.com/api"}]`, Hidden: true},
+		{Key: KeyJavJavbusBase, Type: TypeString, Default: "https://www.javbus.com", Hidden: true},
+		// 官网地址。上游给的清单分享链接里指向的是 javdb580.com 这类镜像，但镜像
+		// 不稳（实测同一条链接一会儿 200 一会儿 EOF），所以做成可改的配置。
+		{Key: KeyJavSiteBase, Type: TypeString, Default: "https://javdb.com", Hidden: true},
+		// 默认开代理：JAVDB 与 JAVBUS 都是境外站，国内直连基本不通。
+		// 这是与网盘搜索相反的一侧 —— 那个站是国内的，默认 false。
+		{Key: KeyJavUseProxy, Type: TypeBool, Default: "true", Hidden: true},
+		// min_interval 是 JAVDB 侧的限流（对方有签名鉴权，抓猛了会被封），
+		// request_gap 是 JAVBUS 侧的 —— 另一个域名、另一份预算，不要合并成一个数。
+		{Key: KeyJavMinIntervalMS, Type: TypeInt, Default: "500", Min: intp(0), Max: intp(10000), Hidden: true},
+		{Key: KeyJavRequestGapMS, Type: TypeInt, Default: "1000", Min: intp(0), Max: intp(30000), Hidden: true},
+		{Key: KeyJavTimeoutSec, Type: TypeInt, Default: "20", Min: intp(5), Max: intp(120), Hidden: true},
+		{Key: KeyJavRetry, Type: TypeInt, Default: "3", Min: intp(0), Max: intp(10), Hidden: true},
+
+		// 两组调度都默认关闭。检查虽是只读的，但它会真的去抓 JAVDB/JAVBUS，
+		// 装完就默默地每隔几分钟打一次外站不是好默认；推送更是（同
+		// tg_bot_auto_push 的安全设计：先跑一段观察模式，确认候选挑得对再开）。
+		{Key: KeyJavSubCheckEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyJavSubDailyTimes, Type: TypeString, Default: "[]", Hidden: true},
+		// 下限 120 分钟照搬源码（界面上写着「最小120分钟」）。上限给到 7 天。
+		{Key: KeyJavSubCheckIntervalMin, Type: TypeInt, Default: "120", Min: intp(120), Max: intp(10080), Hidden: true},
+		{Key: KeyJavSubSyncEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		// 同步时间表的默认值照搬源码：一天两次。
+		{Key: KeyJavSubSyncTimes, Type: TypeString, Default: `["08:00","20:00"]`, Hidden: true},
+		// 并发默认 2 是照搬源码的 PUSH_CONCURRENCY = Semaphore(2)：
+		// 同时往同一个网盘提交超过两个离线任务正是触发风控的典型姿势。
+		{Key: KeyJavSubConcurrency, Type: TypeInt, Default: "2", Min: intp(1), Max: intp(5), Hidden: true},
+		// 默认 5：一轮 5 部、之间隔 3~10 秒，约半分钟推完，提交速率仍在
+		// 既有的「间隔范围」护栏之内。想更密就往上调，代价见上面那条注释。
+		{Key: KeyJavSubPushBatch, Type: TypeInt, Default: "5", Min: intp(1), Max: intp(50), Hidden: true},
+		// 默认开，与源码一致。关了之后推送失败不再换下一颗磁链重试。
+		{Key: KeyJavSubRetryEnabled, Type: TypeBool, Default: "true", Hidden: true},
+		// 推送之间的随机间隔，用来把并发提交在时间上摊开。
+		{Key: KeyJavSubIntervalMinSec, Type: TypeInt, Default: "3", Min: intp(0), Max: intp(600), Hidden: true},
+		{Key: KeyJavSubIntervalMaxSec, Type: TypeInt, Default: "10", Min: intp(0), Max: intp(600), Hidden: true},
+		{Key: KeyJavSubTimeoutSec, Type: TypeInt, Default: "30", Min: intp(5), Max: intp(300), Hidden: true},
+		{Key: KeyJavSubLastRunAt, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyJavSubLastPushAt, Type: TypeString, Default: "", Hidden: true},
+
+		{Key: KeyJavDefaultAccountID, Type: TypeString, Default: "0", Hidden: true},
+		{Key: KeyJavDefaultParentID, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyJavDefaultPath, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyJavDefaultPushProvider, Type: TypeSelect, Default: "auto", Hidden: true, Options: []Option{
+			{Value: "auto", Label: "自动"},
+			{Value: "native", Label: "网盘离线"},
+			{Value: "builtin", Label: "内置下载器"},
+		}},
+
+		{Key: KeyJavLibrarySyncEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		// 与源码 config.py 的 sync_cron 默认值一致：每 6 小时一轮全库同步。
+		{Key: KeyJavLibraryCron, Type: TypeString, Default: "0 */6 * * *", Hidden: true},
+		// 每批 20 部、条目间停顿 0.3 秒，与源码 start_library_quality_backfill 一致。
+		// 质检要逐条查 /Items/{id}，一个几千部的库全量跑会持续压着服务器，
+		// 所以是「空闲时慢慢补」而不是一次拉完。
+		{Key: KeyJavLibraryBackfillN, Type: TypeInt, Default: "20", Min: intp(0), Max: intp(500), Hidden: true},
+		{Key: KeyJavLibraryBackfillMS, Type: TypeInt, Default: "300", Min: intp(0), Max: intp(10000), Hidden: true},
+		{Key: KeyJavLibraryLastRunAt, Type: TypeString, Default: "", Hidden: true},
+		{Key: KeyJavLibrarySyncStatus, Type: TypeString, Default: "unknown", Hidden: true},
+		{Key: KeyJavLibrarySyncMessage, Type: TypeString, Default: "", Hidden: true},
 	}
 }
 

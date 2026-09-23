@@ -102,7 +102,7 @@ onBeforeUnmount(() => {
     >
       <svg
         v-if="icon === 'play'"
-        viewBox="0 0 16 16"
+        viewBox="0 0 16 16" width="16" height="16"
         fill="currentColor"
         aria-hidden="true"
       >
@@ -110,7 +110,7 @@ onBeforeUnmount(() => {
       </svg>
       <svg
         v-else-if="icon === 'stop'"
-        viewBox="0 0 16 16"
+        viewBox="0 0 16 16" width="16" height="16"
         fill="currentColor"
         aria-hidden="true"
       >
@@ -118,7 +118,7 @@ onBeforeUnmount(() => {
       </svg>
       <svg
         v-else-if="icon === 'edit'"
-        viewBox="0 0 16 16"
+        viewBox="0 0 16 16" width="16" height="16"
         fill="none"
         stroke="currentColor"
         stroke-width="1.6"
@@ -129,7 +129,7 @@ onBeforeUnmount(() => {
       </svg>
       <svg
         v-else-if="icon === 'log'"
-        viewBox="0 0 16 16"
+        viewBox="0 0 16 16" width="16" height="16"
         fill="none"
         stroke="currentColor"
         stroke-width="1.4"
@@ -140,7 +140,7 @@ onBeforeUnmount(() => {
       </svg>
       <svg
         v-else-if="icon === 'copy'"
-        viewBox="0 0 16 16"
+        viewBox="0 0 16 16" width="16" height="16"
         fill="none"
         stroke="currentColor"
         stroke-width="1.6"
@@ -153,7 +153,7 @@ onBeforeUnmount(() => {
       </svg>
       <svg
         v-else-if="icon === 'rotate'"
-        viewBox="0 0 16 16"
+        viewBox="0 0 16 16" width="16" height="16"
         fill="none"
         stroke="currentColor"
         stroke-width="1.6"
@@ -168,7 +168,7 @@ onBeforeUnmount(() => {
       </svg>
       <svg
         v-else
-        viewBox="0 0 16 16"
+        viewBox="0 0 16 16" width="16" height="16"
         fill="none"
         stroke="currentColor"
         stroke-width="1.6"

@@ -158,6 +158,9 @@ type fakeShareAPI struct {
 	shareState     int
 	userID         string
 	entryFIDs      []string
+	// snapList 直接指定 /share/snap 的 list；为空时按 entryFIDs 生成文件条目。
+	// 需要**文件夹条目**（有 cid、没有 fid）时必须用它。
+	snapList []map[string]any
 	// entries 是 /files 的 data 数组（真实响应里 data 就是文件条目列表）。
 	entries      []map[string]any
 	receiveCalls []url.Values
@@ -180,9 +183,12 @@ func (f *fakeShareAPI) server(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/share/snap", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		list := make([]map[string]any, 0, len(f.entryFIDs))
-		for _, fid := range f.entryFIDs {
-			list = append(list, map[string]any{"fid": fid, "n": "e.mkv", "s": 100})
+		list := f.snapList
+		if list == nil {
+			list = make([]map[string]any, 0, len(f.entryFIDs))
+			for _, fid := range f.entryFIDs {
+				list = append(list, map[string]any{"fid": fid, "n": "e.mkv", "s": 100})
+			}
 		}
 		writeJSON(t, w, map[string]any{
 			"state": true, "errno": 0,
@@ -276,6 +282,80 @@ func TestReceiveShareHappyPath(t *testing.T) {
 	// 整份接收 = 分享根下的全部条目一起交上去。
 	if api.receiveForm.Get("file_id") != "111,222" {
 		t.Errorf("file_id = %q, want \"111,222\"", api.receiveForm.Get("file_id"))
+	}
+}
+
+// 分享的根是**文件夹**时也要能转存。
+//
+// 实测（2026-09-18，浴血黑帮 第六季）：这种分享的 snap 条目只有 cid、没有 fid，
+// 只认 fid 会让它 100% 失败，还报成「没有可转存的文件」—— 而 115 频道里
+// 绝大多数分享的根都是文件夹，只有原盘 ISO 那种才是单文件。
+func TestReceiveShareAcceptsFolderEntry(t *testing.T) {
+	api := &fakeShareAPI{
+		pathBreadcrumb: []webPathEntry{{Name: "根目录", Cid: "0"}, {Name: "电视剧", Cid: "349"}},
+		shareState:     1,
+		userID:         "344385180",
+		// 真实响应形状：有 cid、没有 fid。
+		snapList: []map[string]any{
+			{"cid": "3169479781959860045", "pid": "0", "n": "浴血黑帮 第六季 杜比视界 NF版", "s": 52721994057},
+		},
+	}
+	d := newShareTestDriver(t, api)
+
+	if _, err := d.ReceiveShare(context.Background(), driver.ShareReceiveRequest{
+		ShareCode: "swwwjyn3no3", ReceiveCode: "l822", TargetCID: "349",
+	}); err != nil {
+		t.Fatalf("根是文件夹的分享应当能转存: %v", err)
+	}
+	// receive 的 file_id 收的就是「文件(夹)ID」，文件夹交它的 cid。
+	if got := api.receiveForm.Get("file_id"); got != "3169479781959860045" {
+		t.Errorf("file_id = %q, want 文件夹的 cid", got)
+	}
+}
+
+// 文件条目的 cid 是数字 0、文件夹的是字符串。收错类型会让**本来能用的单文件
+// 分享**整包解析失败 —— 那是比原 bug 更糟的回归，所以单独钉一次。
+func TestReceiveShareParsesMixedIDTypes(t *testing.T) {
+	api := &fakeShareAPI{
+		pathBreadcrumb: []webPathEntry{{Name: "根目录", Cid: "0"}, {Name: "电影", Cid: "777"}},
+		shareState:     1,
+		userID:         "1",
+		snapList: []map[string]any{
+			{"fid": "3407154935790578358", "cid": 0, "n": "刀.iso", "s": 94074241024},
+		},
+	}
+	d := newShareTestDriver(t, api)
+
+	if _, err := d.ReceiveShare(context.Background(), driver.ShareReceiveRequest{
+		ShareCode: "swfj1o236ty", TargetCID: "777",
+	}); err != nil {
+		t.Fatalf("单文件分享应当能转存: %v", err)
+	}
+	// fid 优先：数字 0 的 cid 不能顶上来。
+	if got := api.receiveForm.Get("file_id"); got != "3407154935790578358" {
+		t.Errorf("file_id = %q, want 文件的 fid", got)
+	}
+}
+
+// 条目拿不到 ID 时，报错要指向接口形状，而不是让人去查「分享是不是空的」。
+func TestReceiveShareReportsStructuralFailureDistinctly(t *testing.T) {
+	api := &fakeShareAPI{
+		pathBreadcrumb: []webPathEntry{{Name: "根目录", Cid: "0"}},
+		shareState:     1,
+		userID:         "1",
+		snapList:       []map[string]any{{"n": "??", "s": 1}},
+	}
+	d := newShareTestDriver(t, api)
+
+	_, err := d.ReceiveShare(context.Background(), driver.ShareReceiveRequest{ShareCode: "abc", TargetCID: "0"})
+	if err == nil {
+		t.Fatal("取不到可转存的 ID 时应当报错")
+	}
+	if !strings.Contains(err.Error(), "接口结构") {
+		t.Errorf("报错应指向接口结构而不是分享本身: %v", err)
+	}
+	if len(api.receiveCalls) != 0 {
+		t.Fatal("取不到 ID 时不该发起 receive")
 	}
 }
 

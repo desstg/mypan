@@ -80,10 +80,32 @@ const statusToneMap: Record<TGRecordStatus, "success" | "warning" | "brand" | "d
   unretryable: "danger",
 };
 
-/** 记录不能手动推送的原因：类型本身没有投递器时，点了必然失败。 */
-const pushBlockedReason = computed(() =>
+/**
+ * 未匹配的记录里 subscription_id 只是「得分最高的候选」，不是匹配结果
+ * （后端对未匹配的记录也会写这个字段）。所以这类记录**不能**预选订阅 ——
+ * 预选之后点「立即推送」就会把 A 片转存进 B 订阅的目录，而且成功了也看不出来。
+ * 待确认记录相反：那个候选正是系统给出的猜测，预选是对的。
+ */
+const isUnmatched = computed(() => active.value?.status === "unmatched");
+
+/**
+ * 订阅下拉本身不能用的原因：类型根本没有投递器时，选了也没意义。
+ *
+ * ⚠️ 别把「未匹配但还没选订阅」并进来 —— 那正是需要用户去选的情况，
+ * 下拉一禁用就再也选不了，按钮永远点不动。
+ */
+const selectBlockedReason = computed(() =>
   active.value?.status === "unsupported" ? active.value.reason : "",
 );
+
+/** 记录不能手动推送的原因：类型没有投递器、或未匹配却没指定订阅时，点了必然出错。 */
+const pushBlockedReason = computed(() => {
+  if (selectBlockedReason.value) return selectBlockedReason.value;
+  if (isUnmatched.value && manualSubId.value <= 0) {
+    return "这条记录没匹配上任何订阅，请先选择要推送到哪一条";
+  }
+  return "";
+});
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
 
@@ -142,7 +164,8 @@ function goPage(delta: number) {
 
 function openDetail(record: TGMatchRecord) {
   active.value = record;
-  manualSubId.value = record.subscription_id || 0;
+  // 未匹配的记录不带出候选订阅，避免默认值把人引到一条不相干的订阅上。
+  manualSubId.value = record.status === "unmatched" ? 0 : record.subscription_id || 0;
   detailOpen.value = true;
 }
 
@@ -202,9 +225,17 @@ async function clearAll() {
   }
 }
 
-function channelName(id: number) {
-  const found = channels.value.find((c) => c.id === id);
-  return found ? found.remark || found.title || found.chat_id : `#${id}`;
+/**
+ * 「来源」列。
+ *
+ * 先按 id 查现成的频道（备注改过就显示最新的），查不到再退回落库时的快照 ——
+ * 网盘搜索来的记录 channel_id 恒为 0，压根没有对应频道，它的来源（哪个搜索源
+ * 给出的这条结果）就在 chat_title 里，显示成 `#0` 等于把唯一有用的信息丢了。
+ */
+function recordSource(record: TGMatchRecord) {
+  const found = channels.value.find((c) => c.id === record.channel_id);
+  if (found) return found.remark || found.title || found.chat_id;
+  return record.chat_title || "—";
 }
 
 function episodeText(record: TGMatchRecord) {
@@ -245,7 +276,7 @@ defineExpose({ load });
   <div class="tg-panel">
     <SettingsCard :title="compact ? '最近匹配记录' : '匹配历史'" accent="var(--brand)">
       <template #head-aside>
-        <span v-if="compact">这个订阅最近的匹配情况。</span>
+        <span v-if="compact">这个订阅最近的匹配情况，点任意一行看判定原因。</span>
         <span v-else>每条命中与未命中都记在这里，包括为什么没推。</span>
       </template>
       <template v-if="!compact" #head-actions>
@@ -277,7 +308,7 @@ defineExpose({ load });
       </div>
 
       <div v-if="records.length" class="admin-panel-table-wrap">
-        <table class="admin-table">
+        <table class="admin-table tg-record-table">
           <thead>
             <tr>
               <th style="width: 150px">时间</th>
@@ -287,13 +318,20 @@ defineExpose({ load });
               <th style="width: 130px">订阅</th>
               <th style="width: 110px">画质</th>
               <th style="width: 90px">状态</th>
-              <th style="width: 90px">原因</th>
+              <!-- 原因：详情页那个「最近匹配记录」不显示 —— 那里列本来就挤，
+                   而且多半只写一句「未匹配上任何订阅」，占一整列不划算。
+                   要看原因点开这一行，弹窗里有完整的「判定原因」。 -->
+              <th v-if="!compact" style="width: 90px">原因</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="record in records" :key="record.id" @click="openDetail(record)">
               <td>{{ timeText(record.created_at) }}</td>
-              <td>{{ channelName(record.channel_id) }}</td>
+              <td>
+                <div class="tg-record__name tg-record__name--narrow" :title="recordSource(record)">
+                  {{ recordSource(record) }}
+                </div>
+              </td>
               <td>
                 <div class="tg-record__name" :title="record.raw_name">{{ record.raw_name || "—" }}</div>
                 <div class="tg-record__hash">
@@ -302,14 +340,21 @@ defineExpose({ load });
                 </div>
               </td>
               <td>{{ record.kind_label || "—" }}</td>
-              <td>{{ record.subscription_title || "—" }}</td>
+              <td>
+                <div
+                  class="tg-record__name tg-record__name--narrow"
+                  :title="record.subscription_title || ''"
+                >
+                  {{ record.subscription_title || "—" }}
+                </div>
+              </td>
               <td>{{ qualityText(record) }}</td>
               <td>
                 <AdminStatusPill :tone="statusToneMap[record.status] ?? 'muted'">
                   {{ record.status_label }}
                 </AdminStatusPill>
               </td>
-              <td>
+              <td v-if="!compact">
                 <div class="tg-record__name" :title="record.reason">
                   {{ record.reason || "—" }}
                 </div>
@@ -398,10 +443,13 @@ defineExpose({ load });
         <div class="tg-form__field">
           <label class="tg-form__label">推送到</label>
           <div class="tg-form__value">
-            <AppSelect v-model="manualSubId" :options="subscriptionOptions" :disabled="!!pushBlockedReason" />
-            <p v-if="pushBlockedReason" class="tg-form__hint">{{ pushBlockedReason }}</p>
+            <AppSelect v-model="manualSubId" :options="subscriptionOptions" :disabled="!!selectBlockedReason" />
+            <p v-if="selectBlockedReason" class="tg-form__hint">{{ selectBlockedReason }}</p>
+            <p v-else-if="isUnmatched" class="tg-form__hint">
+              这条记录没匹配上任何订阅，系统给不出候选 —— 请指定要推送到哪一条。
+            </p>
             <p v-else class="tg-form__hint">
-              待确认或未匹配的记录需要在这里手动指定订阅 —— 系统不敢替你赌是哪一部片。
+              这里预选的是系统判定的订阅（待确认的记录给的是它的猜测），确认无误直接推送即可。
             </p>
           </div>
         </div>

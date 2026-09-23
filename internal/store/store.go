@@ -27,6 +27,21 @@ type Store struct {
 	TGSubscriptions        domain.TGSubscriptionRepository
 	TGSubscriptionEpisodes domain.TGSubscriptionEpisodeRepository
 	TGMatchRecords         domain.TGMatchRecordRepository
+
+	JavMovies        domain.JavMovieRepository
+	JavMagnets       domain.JavMagnetRepository
+	JavReviews       domain.JavReviewRepository
+	JavSubscriptions domain.JavSubscriptionRepository
+	JavRuns          domain.JavRunRepository
+	JavCandidates    domain.JavCandidateRepository
+	JavAttempts      domain.JavPushAttemptRepository
+	JavBlacklist     domain.JavBlacklistRepository
+	JavFollows       domain.JavFollowRepository
+	JavSkips         domain.JavSkipRepository
+	JavListMovies    domain.JavListMovieRepository
+	JavMediaServers  domain.JavMediaServerRepository
+	JavLibrary       domain.JavLibraryRepository
+	JavPushRecords   domain.JavPushRecordRepository
 }
 
 // New 基于已打开的 DB 构造仓储集合。
@@ -55,5 +70,20 @@ func New(db *DB) *Store {
 		TGSubscriptions:        &tgSubscriptionRepo{db: db},
 		TGSubscriptionEpisodes: &tgSubscriptionEpisodeRepo{db: db},
 		TGMatchRecords:         &tgMatchRecordRepo{db: db},
+
+		JavMovies:        &javMovieRepo{db: db},
+		JavMagnets:       &javMagnetRepo{db: db},
+		JavReviews:       &javReviewRepo{db: db},
+		JavSubscriptions: &javSubscriptionRepo{db: db},
+		JavRuns:          &javRunRepo{db: db},
+		JavCandidates:    &javCandidateRepo{db: db},
+		JavAttempts:      &javAttemptRepo{db: db},
+		JavBlacklist:     &javBlacklistRepo{db: db},
+		JavFollows:       &javFollowRepo{db: db},
+		JavSkips:         &javSkipRepo{db: db},
+		JavListMovies:    &javListMovieRepo{db: db},
+		JavMediaServers:  &javMediaServerRepo{db: db},
+		JavLibrary:       &javLibraryRepo{db: db},
+		JavPushRecords:   &javPushRecordRepo{db: db},
 	}
 }

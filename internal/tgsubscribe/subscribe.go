@@ -147,6 +147,17 @@ type ConfigView struct {
 	// PollIntervalSec / BackfillPages 是网页预览抓取的两个可调项。
 	PollIntervalSec int `json:"poll_interval_sec"`
 	BackfillPages   int `json:"backfill_pages"`
+	// 网盘搜索（拿片名去外部搜索站点搜磁力）。地址留空即用内置默认值 ——
+	// 前端展示的是**生效值**，用户清空它就该看到回落到默认，而不是一个空框。
+	WebSearchEnabled    bool   `json:"web_search_enabled"`
+	WebSearchBaseURL    string `json:"web_search_base_url"`
+	WebSearchCloudTypes string `json:"web_search_cloud_types"`
+	WebSearchToken      string `json:"web_search_token"`
+	WebSearchUseProxy   bool   `json:"web_search_use_proxy"`
+	// 自动搜索：按固定间隔替「还没收齐」的订阅主动搜。间隔与频道抓取间隔分开，
+	// 理由见 settings.KeyTGWebSearchAuto 的注释（两者成本差着量级）。
+	WebSearchAuto        bool `json:"web_search_auto"`
+	WebSearchIntervalSec int  `json:"web_search_interval_sec"`
 	// EffectiveIntervalSec 是实际生效的每频道间隔 —— 频道一多，基准会被
 	// 「频道数 × 请求间隔」抬高，这个值让用户看得见真实节奏。
 	EffectiveIntervalSec int    `json:"effective_interval_sec"`
@@ -171,24 +182,45 @@ type ConfigInput struct {
 	MaxPushPerHour   int    `json:"max_push_per_hour"`
 	PollIntervalSec  int    `json:"poll_interval_sec"`
 	BackfillPages    int    `json:"backfill_pages"`
+	// 网盘搜索。地址/类型/令牌留空表示「用默认值」—— 空串会被写成空串，
+	// 读取端（webSearcher）自己回落，这样用户随时能清空恢复默认。
+	WebSearchEnabled    bool   `json:"web_search_enabled"`
+	WebSearchBaseURL    string `json:"web_search_base_url"`
+	WebSearchCloudTypes string `json:"web_search_cloud_types"`
+	WebSearchToken      string `json:"web_search_token"`
+	WebSearchUseProxy   bool   `json:"web_search_use_proxy"`
+	// 自动搜索。间隔为 0 表示「没填」，由 UpdateConfig 拦掉、不覆盖已存的值。
+	WebSearchAuto        bool `json:"web_search_auto"`
+	WebSearchIntervalSec int  `json:"web_search_interval_sec"`
 }
 
 // ————————————————————— 配置 —————————————————————
 
 func (s *Service) ConfigView(ctx context.Context) ConfigView {
 	view := ConfigView{
-		Enabled:          s.settings.Bool(settings.KeyTGBotEnabled),
-		AutoPush:         s.settings.Bool(settings.KeyTGBotAutoPush),
-		DefaultParentID:  strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotDefaultParentID)),
-		DefaultPath:      strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotDefaultPath)),
-		CollectWindowMin: s.settings.Int(settings.KeyTGBotCollectWindowMin),
-		MaxPushPerHour:   s.maxPushPerHour(),
-		PollIntervalSec:  int(s.pollInterval() / time.Second),
-		BackfillPages:    s.backfillPages(),
-		Status:           strings.TrimSpace(s.settings.String(settings.KeyTGBotStatus)),
-		StatusMessage:    strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotStatusMessage)),
-		LastPollAt:       s.lastPollAt(),
+		Enabled:           s.settings.Bool(settings.KeyTGBotEnabled),
+		AutoPush:          s.settings.Bool(settings.KeyTGBotAutoPush),
+		DefaultParentID:   strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotDefaultParentID)),
+		DefaultPath:       strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotDefaultPath)),
+		CollectWindowMin:  s.settings.Int(settings.KeyTGBotCollectWindowMin),
+		MaxPushPerHour:    s.maxPushPerHour(),
+		PollIntervalSec:   int(s.pollInterval() / time.Second),
+		BackfillPages:     s.backfillPages(),
+		Status:            strings.TrimSpace(s.settings.String(settings.KeyTGBotStatus)),
+		StatusMessage:     strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGBotStatusMessage)),
+		LastPollAt:        s.lastPollAt(),
+		WebSearchEnabled:  s.webSearchEnabled(),
+		WebSearchUseProxy: s.webSearchUseProxy(),
+		// 自动搜索两项报的都是**存的值**，不是 and 上总开关之后的生效值。
+		// 这里如果顺手 and 一下 webSearchEnabled，会变成一个数据丢失陷阱：用户临时
+		// 关掉「网盘搜索」再打开，这个字段在往返里已经被写成 false 了，自动搜索
+		// 就静悄悄地没了。总开关与它的与运算放在调度循环里做（见 webSearchLoop）。
+		WebSearchAuto:        s.webSearchAuto(),
+		WebSearchIntervalSec: int(s.webSearchInterval() / time.Second),
 	}
+	// 地址与类型走同一个读取点拿**生效值**：留空回落内置默认。展示的和实际发请求
+	// 用的必须是同一个值，两边各写一份必然漂移（见 webSearchSettings 的注释）。
+	view.WebSearchBaseURL, view.WebSearchCloudTypes, view.WebSearchToken = s.webSearchSettings()
 	if raw := strings.TrimSpace(s.settings.String(settings.KeyTGBotDefaultAccountID)); raw != "" {
 		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			view.DefaultAccountID = v
@@ -213,6 +245,12 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 		settings.KeyTGBotProfileID:        strconv.FormatInt(in.QualityProfileID, 10),
 		settings.KeyTGBotCollectWindowMin: strconv.Itoa(maxInt(in.CollectWindowMin, 0)),
 		settings.KeyTGBotMaxPushPerHour:   strconv.Itoa(maxInt(in.MaxPushPerHour, 1)),
+		settings.KeyTGWebSearchEnabled:    boolString(in.WebSearchEnabled),
+		settings.KeyTGWebSearchBaseURL:    strings.TrimSpace(in.WebSearchBaseURL),
+		settings.KeyTGWebSearchCloudTypes: strings.TrimSpace(in.WebSearchCloudTypes),
+		settings.KeyTGWebSearchToken:      strings.TrimSpace(in.WebSearchToken),
+		settings.KeyTGWebSearchUseProxy:   boolString(in.WebSearchUseProxy),
+		settings.KeyTGWebSearchAuto:       boolString(in.WebSearchAuto),
 	}
 	// 抓取间隔与回填页数只在用户真的传了值时才写 —— 0 是合法的「不回填」，
 	// 但把它当成「没填」会让关闭回填这个操作失效。所以用 >0 判断间隔，
@@ -227,12 +265,18 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 		}
 		patch[settings.KeyTGPreviewBackfillPages] = strconv.Itoa(pages)
 	}
+	// 自动搜索间隔同理：只在传了正值时才写，0 不当「没填」处理会让用户清空输入框
+	// 就得到一个非法间隔。真正的范围校验在 settings 注册表的 Min/Max 里。
+	if in.WebSearchIntervalSec > 0 {
+		patch[settings.KeyTGWebSearchIntervalSec] = strconv.Itoa(in.WebSearchIntervalSec)
+	}
 	if err := s.settings.Update(ctx, patch); err != nil {
 		return err
 	}
 	// 配置变了必须重建抓取客户端与匹配快照（超时与间隔都可能改；
 	// 代理改了也会走到这里 —— 全局设置一变，这个缓存就该失效）。
 	s.resetPreviewClient()
+	s.resetWebSearcher()
 	s.InvalidateSnapshot()
 	return nil
 }
@@ -795,7 +839,10 @@ func (s *Service) CreateSubscription(ctx context.Context, in SubscriptionInput) 
 		QualityProfileID:  in.QualityProfileID,
 		PushProvider:      normalizePushProvider(in.PushProvider),
 		CollectWindowMin:  normalizeWindow(in.CollectWindowMin, s.settings.Int(settings.KeyTGBotCollectWindowMin)),
-		UpgradeEnabled:    boolOrDefault(in.UpgradeEnabled, true),
+		// 洗版默认关闭。开着洗版的订阅永远不会自动收尾（见 maybeComplete），
+		// 会一直停在「订阅中」等更好的版本 —— 那是想追画质的人才要的行为，
+		// 不该是省略这个字段时的默认语义。
+		UpgradeEnabled: boolOrDefault(in.UpgradeEnabled, false),
 	}
 	if sub.Title == "" {
 		sub.Title = sub.OriginalTitle
@@ -830,6 +877,15 @@ func (s *Service) UpdateSubscription(ctx context.Context, id int64, in Subscript
 		return nil, err
 	}
 	s.InvalidateSnapshot()
+	// 存完重判一次完成。
+	//
+	// 主要为了「把洗版关掉」这个操作：完成判定平时只在投递发生的那一刻跑，而用户
+	// 想关洗版的往往正是那条**早就投递完**的片 —— 不在这里补一次，关掉开关后什么
+	// 都不会发生，看起来仍然像坏的，只能等下一次投递（而对电影来说没有下一次）。
+	//
+	// 不会误伤：maybeComplete 自己会挡掉非 active 的订阅，电影要 PushedCount > 0，
+	// 剧集要真的收齐已播出集数。
+	s.maybeComplete(ctx, sub)
 	view := s.subscriptionView(ctx, sub, true)
 	return &view, nil
 }
@@ -1154,6 +1210,14 @@ func (s *Service) ManualPush(ctx context.Context, recordID, subscriptionID int64
 	if err != nil {
 		return nil, err
 	}
+	// 未匹配的记录里 SubscriptionID 只是「得分最高的候选」（handler.go 对未匹配的
+	// 记录也会写这个字段），不是匹配结果。拿它当兜底等于让用户手一滑就把 A 片
+	// 推进 B 订阅的目录 —— 而且转存成功时**没有任何迹象**，没人会立刻发现。
+	if subscriptionID <= 0 && rec.Status == domain.TGRecordUnmatched {
+		return nil, domain.Errorf(domain.CodeValidation,
+			"这条记录没有匹配上任何订阅（当前显示的是得分最高的候选），请指明要推送到哪条订阅")
+	}
+
 	targetSubID := subscriptionID
 	if targetSubID <= 0 {
 		targetSubID = rec.SubscriptionID

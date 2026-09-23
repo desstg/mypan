@@ -10,11 +10,12 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-// 底部三个操作入口。GitHub 指向本项目仓库，新窗口打开。
-// 「打赏支持」和「更新日志」暂时还没有对应页面，先占位不挂链接 ——
-// 对应的 <div> 带 --placeholder 修饰类，用来去掉 hover 高亮，
+// 底部三个操作入口。GitHub 指向本项目仓库，后两个暂时还没有对应页面，
+// 先占位不挂链接 —— 对应的 <div> 带 --placeholder 修饰类，用来去掉 hover 高亮，
 // 免得做成能点却没反应的假象。将来有了地址再换回 <a>。
 const GITHUB_URL = "https://github.com/desstg/mypan";
+// 「联系我」指向 Telegram 机器人，新窗口打开。
+const CONTACT_URL = "https://t.me/mypandesstg_bot";
 
 function closeAll() {
   emit("close");
@@ -55,7 +56,8 @@ function closeAll() {
         </section>
       </div>
 
-      <!-- 操作区：三个小卡片。GitHub 是新窗口打开的链接，后两个暂为占位（无链接） -->
+      <!-- 操作区：三个小卡片。GitHub 仓库 / 联系我 都是新窗口打开的链接，
+           最后一个「更新日志」还没对应页面，暂为占位（无链接）。 -->
       <div class="announcement-modal__links">
         <a
           class="announcement-modal__link"
@@ -69,13 +71,19 @@ function closeAll() {
             <small>源码与问题反馈</small>
           </span>
         </a>
-        <div class="announcement-modal__link announcement-modal__link--placeholder">
-          <i class="fas fa-heart announcement-modal__link-icon announcement-modal__link-icon--sponsor" aria-hidden="true" />
+        <!-- 中间那张是「联系我」：指向主人家的 Telegram 机器人（纸飞机图标）。 -->
+        <a
+          class="announcement-modal__link"
+          :href="CONTACT_URL"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <i class="fab fa-telegram-plane announcement-modal__link-icon announcement-modal__link-icon--contact" aria-hidden="true" />
           <span class="announcement-modal__link-copy">
-            <strong>打赏支持</strong>
-            <small>赞助 MyPan 开发</small>
+            <strong>联系我</strong>
+            <small>Telegram 私信</small>
           </span>
-        </div>
+        </a>
         <div class="announcement-modal__link announcement-modal__link--placeholder">
           <i class="fas fa-list-ul announcement-modal__link-icon announcement-modal__link-icon--log" aria-hidden="true" />
           <span class="announcement-modal__link-copy">
@@ -259,9 +267,9 @@ function closeAll() {
   font-size: 16px;
 }
 
-.announcement-modal__link-icon--sponsor {
-  background: color-mix(in srgb, #ef4444 12%, var(--surface));
-  color: #ef4444;
+.announcement-modal__link-icon--contact {
+  background: color-mix(in srgb, #229ed9 12%, var(--surface));
+  color: #229ed9;
 }
 
 .announcement-modal__link-icon--log {

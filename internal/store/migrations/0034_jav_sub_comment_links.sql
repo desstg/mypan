@@ -1,0 +1,12 @@
+-- 订阅级开关：把「影片评论区里分享的链接」也纳入候选池。默认**关**。
+--
+-- 为什么默认关：这条链路放宽了质量判定 —— 评论链接没有上游分辨率角标、没有文件数、
+-- 大多没有体积，这些缺失项**跳过不判**（见 quality.PromptOKCommentLink 与 qualityUnknown）。
+-- 放宽是有代价的，所以只有用户明确勾了才走。
+--
+-- 为什么不复用 pre_download / download_mode：那两列回答的是「推什么、什么时候推」，
+-- 这一列回答的是「从哪儿找资源」，三个正交的维度，合成一个枚举会在 API 往返里丢信息
+-- （与 download_mode / pre_download 分成两列同一条理由，见 0028 里那段注释）。
+--
+-- 老数据一律 0 = 关，行为与升级前完全一致。
+ALTER TABLE jav_subscriptions ADD COLUMN include_comment_links INTEGER NOT NULL DEFAULT 0;

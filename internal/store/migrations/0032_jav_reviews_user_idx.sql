@@ -1,0 +1,13 @@
+-- 「订阅页 → 用户档」每次打开都要数一遍「每个分享者贴过几条链接」，而那句 SQL 是
+-- 对 jav_reviews 整表做两个 `%…%` 的 LIKE 再分组：
+--
+--   SELECT user_id, COUNT(*) FROM jav_reviews
+--    WHERE user_id > 0 AND (content LIKE '%magnet:%' OR content LIKE '%ed2k:%')
+--    GROUP BY user_id
+--
+-- 实测（74750 行）：全表扫 576ms。而这一档真正要的只是**已关注的那几个人**的条数，
+-- 拿 user_id 走索引只扫那几个人的行：7ms，80 倍。
+--
+-- 索引是给下面那句「限定 user_id IN (…)」用的 —— 光改 SQL 不加索引没用
+-- （没有索引时仍是全表扫，202ms）。
+CREATE INDEX IF NOT EXISTS idx_jav_reviews_user ON jav_reviews(user_id);

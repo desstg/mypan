@@ -22,6 +22,7 @@ import (
 	"litepan/internal/file"
 	"litepan/internal/fnosproxy"
 	"litepan/internal/fusemount"
+	"litepan/internal/jav"
 	"litepan/internal/logx"
 	"litepan/internal/mediaorganize"
 	"litepan/internal/offlinedownload"
@@ -57,6 +58,7 @@ type App struct {
 	mediaOrganize    *mediaorganize.Service
 	automation       *automation.Service
 	tgSubscribe      *tgsubscribe.Service
+	jav              *jav.Service
 	fuse             *fusemount.Service
 	cacheRetention   *cacheretention.Service
 	embyProxy        *embyproxy.Service
@@ -141,6 +143,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		mediaOrganize:    svc.mediaOrganize,
 		automation:       svc.automation,
 		tgSubscribe:      svc.tgSubscribe,
+		jav:              svc.jav,
 		fuse:             svc.fuse,
 		cacheRetention:   svc.cacheRetention,
 		embyProxy:        svc.embyProxy,
@@ -170,6 +173,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.tgSubscribe != nil {
 		a.tgSubscribe.Start(ctx)
+	}
+	if a.jav != nil {
+		a.jav.Start(ctx)
 	}
 	if a.fuse != nil {
 		a.fuse.Start(ctx)
@@ -244,6 +250,10 @@ func (a *App) Shutdown(ctx context.Context) error {
 	// 总机关掉之后再 publish 会 panic。
 	if a.tgSubscribe != nil {
 		a.tgSubscribe.Stop()
+	}
+	// 番号同理：订阅调度循环会往总线上发事件。
+	if a.jav != nil {
+		a.jav.Stop()
 	}
 	if a.offlineDownloads != nil {
 		offlineCtx, cancelOffline := context.WithTimeout(ctx, shutdownOfflineBudget)

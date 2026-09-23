@@ -26,7 +26,44 @@ import (
 const (
 	refreshMinInterval = 3 * time.Second
 	preparationTTL     = 30 * time.Minute
+	// nativeRefreshTick 是「网盘原生」离线任务的后台轮询间隔。
+	//
+	// 每个账号另有 refreshMinInterval 兜底，所以这个 tick 只决定「多久看一次有
+	// 没有活干」，不决定打网盘的频率。
+	//
+	// 取 60 秒是为了对网盘客气（有任务在下时每账号 1 次/分钟）。慢吗？不会 ——
+	// 这个间隔只决定「下载完成」到「界面翻成已完成」之间的延迟上限，而下载本身
+	// 通常要几分钟起，那点延迟藏在里面看不出来；何况在没有在途任务时它一次
+	// 请求都不发。
+	nativeRefreshTick = 60 * time.Second
 )
+
+// nativeRefreshLoop 定期刷新**网盘原生**离线任务的状态。
+//
+// 为什么非有它不可：任务的完成事件（eventbus.OfflineDownloadCompleted）是番号
+// 订阅判断「这次推送成功了」的**唯一**依据。而在它之前，原生任务的状态**只在界面
+// 打开「离线任务」页时才刷新**（api/offline_download.go 的 List(refresh=true)），
+// 后台没有任何轮询者（Start 里的推进只管内置下载器）。
+//
+// 于是整条链路的最后一环是断的：提交成功 → 网盘秒传、文件当场落进盘里 →
+// 应用再也没去问过 → 完成事件不发 → 推送记录永远停在 pending → 卡片上一直显示
+// 「推：0」，直到用户碰巧点开那个页面。2026-09-21 用户报「明明推了却显示 0」
+// 就是这个。
+func (s *Service) nativeRefreshLoop(ctx context.Context) {
+	ticker := time.NewTicker(nativeRefreshTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		// accountID=0 表示「全部账号」；没有在途任务的账号在 Refresh 内部直接跳过。
+		if err := s.Refresh(ctx, 0, false); err != nil {
+			s.log.Warn("后台刷新离线下载任务失败", "err", err)
+		}
+	}
+}
 
 type Options struct {
 	Exec     *driverexec.Executor

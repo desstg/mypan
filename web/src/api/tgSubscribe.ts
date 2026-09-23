@@ -6,6 +6,7 @@ import type {
   TGConfigInput,
   TGDiscoverPayload,
   TGHistorySearchResult,
+  TGWebSearchResult,
   TGQualityConfig,
   TGRecommendedChannel,
   TGQualityPreview,
@@ -278,4 +279,16 @@ export function fetchTGProviderSummary(accountId: number) {
  */
 export function searchTGHistory(subscriptionId: number) {
   return http.post<TGHistorySearchResult>(`${BASE}/subscriptions/${subscriptionId}/search`, {});
+}
+
+/**
+ * 拿订阅片名去外部网盘搜索引擎搜（默认只搜磁力）。
+ *
+ * 「搜历史帖」的补充：那条只在**你已经订阅的频道**里翻，频道少的时候覆盖不到；
+ * 这条不依赖频道数。同样只落库、不推送，命中以「待确认」进匹配历史。
+ *
+ * 需要在设置里先打开「网盘搜索」，否则后端直接报错。
+ */
+export function searchTGWeb(subscriptionId: number) {
+  return http.post<TGWebSearchResult>(`${BASE}/subscriptions/${subscriptionId}/search-web`, {});
 }

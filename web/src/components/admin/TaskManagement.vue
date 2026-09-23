@@ -91,7 +91,6 @@ import { toast } from "@/composables/useToast";
 import { useAccountsStore } from "@/stores/accounts";
 import { formatElapsedMs, formatTime } from "@/utils/format";
 import "@/styles/admin-shared.css";
-import "@/styles/admin-table.css";
 
 const CACHE_TAB = "cache";
 const STRM_TAB = "strm";

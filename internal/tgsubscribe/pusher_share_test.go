@@ -452,6 +452,54 @@ func TestManualPushKeepsRetryableFailureOnFailed(t *testing.T) {
 	}
 }
 
+// 未匹配的记录里 subscription_id 只是「得分最高的候选」，不是匹配结果。
+// 拿它当兜底会把 A 片静悄悄转存进 B 订阅的目录 —— 而且转存成功时毫无迹象。
+func TestManualPushRefusesUnmatchedWithoutExplicitSubscription(t *testing.T) {
+	drv := &stubShareDriver{
+		caps: driver.ShareReceiveCapabilities{Ready: true},
+		err:  domain.Errorf(domain.CodeDriverError, "115 网页接口 HTTP 502"),
+	}
+	s := newShareServiceForTest(t, drv, nil)
+	_, recID := seedShareSubscription(t, s)
+	ctx := context.Background()
+
+	// 造一条未匹配的记录：状态是 unmatched，但 subscription_id 留着候选订阅。
+	rec, err := s.records.Get(ctx, recID)
+	if err != nil {
+		t.Fatalf("get record: %v", err)
+	}
+	rec.Status = domain.TGRecordUnmatched
+	if err := s.records.Update(ctx, rec); err != nil {
+		t.Fatalf("update record: %v", err)
+	}
+
+	_, err = s.ManualPush(ctx, recID, 0)
+	if err == nil {
+		t.Fatal("未匹配的记录不指定订阅时应当报错，而不是推给候选订阅")
+	}
+	if !strings.Contains(err.Error(), "没有匹配上任何订阅") {
+		t.Errorf("报错要说清该显式指定订阅: %v", err)
+	}
+	if drv.calls != 0 {
+		t.Fatal("拦下之前就发起了转存 —— 那正是这道闸要防的事故")
+	}
+
+	// 匹配上的记录不受影响：仍按原样回落到记录自己的订阅。
+	rec.Status = domain.TGRecordPending
+	if err := s.records.Update(ctx, rec); err != nil {
+		t.Fatalf("update record: %v", err)
+	}
+	if _, err := s.ManualPush(ctx, recID, 0); err == nil || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("匹配上的记录该照常投递并透出驱动错误，实际: %v", err)
+	}
+	if drv.calls != 1 {
+		t.Errorf("receive 被调用了 %d 次，应当恰好 1 次", drv.calls)
+	}
+	if drv.got.TargetCID != "349" {
+		t.Errorf("TargetCID = %q，应当落到记录所属订阅的目录", drv.got.TargetCID)
+	}
+}
+
 // seedShareSubscription 建一条订阅 + 一条 115 分享记录，返回两者 id。
 func seedShareSubscription(t *testing.T, s *Service) (subID, recID int64) {
 	t.Helper()

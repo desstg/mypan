@@ -78,7 +78,6 @@ import { confirm } from "@/composables/useConfirm";
 import { toast } from "@/composables/useToast";
 import { useAccountsStore } from "@/stores/accounts";
 import "@/styles/admin-shared.css";
-import "@/styles/admin-table.css";
 
 const accountsStore = useAccountsStore();
 const { accounts } = storeToRefs(accountsStore);

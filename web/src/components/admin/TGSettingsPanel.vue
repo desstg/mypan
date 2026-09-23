@@ -50,6 +50,13 @@ const draft = reactive<TGConfigInput>({
   max_push_per_hour: 20,
   poll_interval_sec: 600,
   backfill_pages: 1,
+  web_search_enabled: false,
+  web_search_base_url: "",
+  web_search_cloud_types: "magnet,115",
+  web_search_token: "",
+  web_search_use_proxy: false,
+  web_search_auto: false,
+  web_search_interval_sec: 21600,
 });
 
 const pickerOpen = ref(false);
@@ -67,6 +74,13 @@ function snapshot() {
     max_push_per_hour: draft.max_push_per_hour,
     poll_interval_sec: draft.poll_interval_sec,
     backfill_pages: draft.backfill_pages,
+    web_search_enabled: draft.web_search_enabled,
+    web_search_base_url: draft.web_search_base_url,
+    web_search_cloud_types: draft.web_search_cloud_types,
+    web_search_token: draft.web_search_token,
+    web_search_use_proxy: draft.web_search_use_proxy,
+    web_search_auto: draft.web_search_auto,
+    web_search_interval_sec: draft.web_search_interval_sec,
   });
 }
 
@@ -99,6 +113,15 @@ function applyConfig(cfg: TGConfig) {
   draft.max_push_per_hour = cfg.max_push_per_hour;
   draft.poll_interval_sec = cfg.poll_interval_sec || 600;
   draft.backfill_pages = cfg.backfill_pages;
+  draft.web_search_enabled = cfg.web_search_enabled;
+  // 读回来的是**生效值**（后端把留空回落成了默认），所以这里直接赋值 ——
+  // 不用 `|| 默认` 兜底，否则用户清空地址后就再也看不出回落到了哪里。
+  draft.web_search_base_url = cfg.web_search_base_url;
+  draft.web_search_cloud_types = cfg.web_search_cloud_types;
+  draft.web_search_token = cfg.web_search_token;
+  draft.web_search_use_proxy = cfg.web_search_use_proxy;
+  draft.web_search_auto = cfg.web_search_auto;
+  draft.web_search_interval_sec = cfg.web_search_interval_sec;
   baseline.value = snapshot();
   loaded.value = true;
 }
@@ -274,6 +297,146 @@ defineExpose(
         <p class="tg-form__hint">
           抓取走「系统设置 → 其他设置 → 网络代理」里的全局代理；国内直连 t.me 通常不通，建议先去那里配好。
         </p>
+      </SettingsCard>
+
+      <SettingsCard title="网盘搜索" :accent="ACCENT">
+        <SettingsRow>
+          <template #info>
+            <SettingsRowLabel label="启用" help-title="网盘搜索">
+              <p>
+                拿订阅的片名去外部聚合搜索引擎搜资源。抓取是「等频道推过来」，
+                这条是「主动去搜」—— 不受你订阅了几个频道限制。
+              </p>
+              <p>
+                搜到的结果只会进「匹配历史」标成待确认，不会自动推送；
+                你在影片详情里点「搜网盘」才会发起一次搜索。
+              </p>
+              <p>依赖第三方站点，默认关闭。</p>
+            </SettingsRowLabel>
+          </template>
+          <template #control>
+            <SettingsBoolSegment v-model="draft.web_search_enabled" label="启用网盘搜索" />
+          </template>
+        </SettingsRow>
+
+        <!-- 自动搜索这两行跟着总开关置灰。**但值不会被清掉**：总开关关着时后端
+             照原样存着这两个字段，用户临时关掉再打开，自动搜索还在。 -->
+        <SettingsRow>
+          <template #info>
+            <SettingsRowLabel label="自动搜索" help-title="自动搜索">
+              <p>打开后系统会按下面的间隔，自动替<b>还没收齐</b>的订阅发起搜索，不用一条条手点。</p>
+              <p>只挑没收齐的下手：电影推过一次、剧集收齐已播出集数之后就不再搜它。</p>
+              <p>
+                搜到的结果和频道抓来的一视同仁 —— 同一套画质方案、同一个聚合窗口、
+                同一套失败重试。唯一的分岔是「自动推送」关着时（观察模式）只记进匹配历史
+                并标成待确认，等你点。
+              </p>
+              <p>它依赖上面的「网盘搜索」总开关，那个关着时这里什么都不做。</p>
+            </SettingsRowLabel>
+          </template>
+          <template #control>
+            <SettingsBoolSegment
+              v-model="draft.web_search_auto"
+              label="自动搜索"
+              :disabled="!draft.web_search_enabled"
+            />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow>
+          <template #info>
+            <SettingsRowLabel label="自动搜索间隔（秒）" help-title="自动搜索间隔">
+              <p>多久替一条订阅搜一轮，默认 21600（6 小时）。</p>
+              <p>
+                下限 900（15 分钟）：外部搜索站没有给程序用的配额，而这是无人值守的轮询，
+                填太小会一直打它。
+              </p>
+              <p>
+                订阅多时实际间隔会按订阅数量自动放大（照抓取间隔那套做法），
+                免得一轮还没跑完下一轮又开始了。
+              </p>
+              <p>
+                与「抓取间隔」是<b>两个独立的值</b>，别指望改一个另一个跟着动：抓取一个频道
+                只发一个请求，而一条订阅要搜最多 3 个关键词、每个还各自有一次超时，成本差着量级。
+              </p>
+            </SettingsRowLabel>
+          </template>
+          <template #control>
+            <AppInput
+              v-model.number="draft.web_search_interval_sec"
+              type="number"
+              placeholder="21600"
+              :disabled="!draft.web_search_enabled"
+            />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow>
+          <template #info>
+            <SettingsRowLabel label="搜索服务地址" help-title="搜索服务地址">
+              <p>留空即用内置默认（公开的盘搜站点）。</p>
+              <p>
+                每次搜索会把这个地址下的 /api/search 打一遍，一个关键词一次请求，
+                单次约 5–30 秒。
+              </p>
+            </SettingsRowLabel>
+          </template>
+          <template #control>
+            <AppInput
+              v-model="draft.web_search_base_url"
+              placeholder="https://so.252035.xyz"
+            />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow>
+          <template #info>
+            <SettingsRowLabel label="搜索的资源类型" help-title="资源类型">
+              <p>
+                逗号分隔。<strong>建议保留默认的 <code>magnet,115</code></strong> ——
+                这个搜索站的国产内容里磁力占比只有 0%~4%，只填 <code>magnet</code>
+                等于把绝大多数结果扔掉。
+              </p>
+              <p>
+                这两类的区别：磁力走离线下载通道；115 分享走转存，
+                需要目标账号配好「网页 Cookie」。
+              </p>
+              <p>
+                夸克/百度/阿里等也可以填进来，但当前版本只会把它们收进匹配历史
+                供你复制链接，**推不进网盘**（没有对应驱动与账号）。
+              </p>
+            </SettingsRowLabel>
+          </template>
+          <template #control>
+            <AppInput v-model="draft.web_search_cloud_types" placeholder="magnet,115" />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow>
+          <template #info>
+            <SettingsRowLabel label="走全局代理" help-title="走全局代理">
+              <p>默认关闭。搜索站是国内的，直连通常就通。</p>
+              <p>
+                「系统设置 → 其他设置 → 网络代理」里那个代理是给 t.me / TMDB 配的，
+                套在搜索站上反而多一个失败点。只有直连不通时才需要打开。
+              </p>
+            </SettingsRowLabel>
+          </template>
+          <template #control>
+            <SettingsBoolSegment v-model="draft.web_search_use_proxy" label="走全局代理" />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow>
+          <template #info>
+            <SettingsRowLabel label="访问令牌" help-title="访问令牌">
+              <p>只有自建的搜索服务开了认证才需要填，公开站点留空即可。</p>
+            </SettingsRowLabel>
+          </template>
+          <template #control>
+            <AppInput v-model="draft.web_search_token" placeholder="留空即可" />
+          </template>
+        </SettingsRow>
       </SettingsCard>
 
       <SettingsCard title="推送" :accent="ACCENT">

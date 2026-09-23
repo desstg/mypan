@@ -257,6 +257,51 @@ export interface TGConfig {
   status: string;
   status_message: string;
   last_poll_at: string;
+  /**
+   * 网盘搜索（拿片名去外部聚合搜索站点搜磁力）。
+   *
+   * 与频道抓取互补：抓取是「推」（资源得恰好出现在你订阅的频道里），
+   * 搜索是「拉」（不依赖你加了哪些频道）。默认关闭 —— 它依赖第三方站点。
+   */
+  web_search_enabled: boolean;
+  /** 生效值：留空时后端会回落到内置默认，所以这里拿到的一定是能用的地址。 */
+  web_search_base_url: string;
+  /**
+   * 生效值：逗号分隔的网盘类型。
+   *
+   * 默认 `magnet,115` —— **不能退回只搜磁力**：实测这个站的国产内容里磁力占比
+   * 只有 0%~4%（搜「生逢其时」204 条结果里磁力 0 条），只搜磁力等于把绝大多数
+   * 结果扔掉。115 是除磁力外唯一能真推的类型。
+   */
+  web_search_cloud_types: string;
+  /** 自建 pansou 开了认证时才需要填，线上站点不需要。 */
+  web_search_token: string;
+  /**
+   * 搜索是否走「系统设置 → 网络代理」里的全局代理。
+   *
+   * 默认关闭：那个代理是为 t.me / TMDB 这些被墙的站点配的，而搜索站是国内的，
+   * 直连就通 —— 套上代理只会平白多一个失败点（实测直连 6 次无超时，
+   * 走代理 6 次里 2 次卡到 35 秒超时、1 次 502）。直连不通时才打开它。
+   */
+  web_search_use_proxy: boolean;
+  /**
+   * 自动搜索：按固定间隔替「还没收齐」的订阅主动搜，不用一条条手点。
+   *
+   * 只对还没收齐的下手 —— 电影推过一次、剧集收齐已播出集数之后就不再搜。
+   * 命中的结果走和频道抓取同一套闸门：关着「自动推送」时只记进匹配历史。
+   *
+   * 报的是**存的值**，没有与总开关做与运算；真正的生效条件是
+   * 「网盘搜索已启用 且 自动搜索已打开」。
+   */
+  web_search_auto: boolean;
+  /**
+   * 自动搜索的基准间隔（秒）。
+   *
+   * 与「抓取间隔」刻意分开：抓取是「一个频道一页」，一轮搜索要打 3 个关键词、
+   * 每个关键词一次最长 30 秒超时，两者成本差着量级。共用一个数字会让用户调完
+   * 频道间隔就把外部搜索站打爆。订阅多时后端还会按订阅数自动放大这个值。
+   */
+  web_search_interval_sec: number;
 }
 
 export interface TGConfigInput {
@@ -270,6 +315,15 @@ export interface TGConfigInput {
   max_push_per_hour: number;
   poll_interval_sec: number;
   backfill_pages: number;
+  /** 地址留空表示用默认值（读回来时会被填成生效值）。 */
+  web_search_enabled: boolean;
+  web_search_base_url: string;
+  web_search_cloud_types: string;
+  web_search_token: string;
+  web_search_use_proxy: boolean;
+  web_search_auto: boolean;
+  /** 传 0 表示「没填」，后端会保留已存的值不动。 */
+  web_search_interval_sec: number;
 }
 
 /** 体检报告里的一行：某种资源类型在最近一页帖子里命中了多少。 */
@@ -350,6 +404,28 @@ export interface TGHistorySearchResult {
   channels?: TGChannelSearchHit[];
   /** 没有公开用户名、无法搜索的频道。 */
   skipped_channels?: string[];
+  message: string;
+}
+
+/**
+ * 一次网盘搜索的结果。
+ *
+ * 与 TGHistorySearchResult 的区别：没有频道维度（外部搜索引擎不按频道组织），
+ * 换成 keywords 条数即请求数。
+ */
+export interface TGWebSearchResult {
+  subscription_id: number;
+  title: string;
+  /** 实际用来搜的关键词（主标题 + 原名 + 别名，最多 3 个）。 */
+  keywords: string[];
+  /** 计划发出的请求数（= 关键词数）—— 每个关键词一次真实搜索，所以耗时是它们的和。 */
+  request_count: number;
+  /** 实际失败的请求数（限流、超时、站点回空）。 */
+  failed_requests: number;
+  /** 搜到的条数（含重复出现的）。 */
+  hits_scanned: number;
+  /** 这次新落库的记录数。 */
+  hit_records: number;
   message: string;
 }
 

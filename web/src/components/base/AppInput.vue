@@ -2,7 +2,7 @@
 const props = withDefaults(
   defineProps<{
     modelValue: string | number | null;
-    type?: "text" | "password" | "number";
+    type?: "text" | "password" | "number" | "date" | "time";
     placeholder?: string;
     disabled?: boolean;
     autocomplete?: string;

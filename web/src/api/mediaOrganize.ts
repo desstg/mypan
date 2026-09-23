@@ -214,16 +214,39 @@ export interface MediaOrganizePlanResult {
   summary?: { actions?: number; skipped?: number };
 }
 
+/**
+ * 整理任务的预览与执行要跑很久：扫一遍目录树（每个目录之间还有限速间隔）再规划/执行，
+ * 目录一多就轻松超过**前端默认的 90 秒**（`client.ts` 的 `defaultRequestTimeoutMs`）。
+ *
+ * 超时的表现极具迷惑性：是**浏览器自己** abort 掉请求，后端拿到 `context canceled`、
+ * 扫描中途夭折（日志里就一句「列目录失败 …context canceled，跳过该目录」），
+ * 而界面上只是「转了会儿就停了」——
+ * 计划因此从没保存下来（`GET /plan` 返回 null，看着像「执行后就丢弃了」），
+ * 执行也会在扫描到一半时断掉，成了「明明扫描出来了、后半截却不处理」。
+ *
+ * 与 115 扫码那条长轮询同一个道理，都走 `postWithTimeout`。
+ */
+const ORGANIZE_LONG_TIMEOUT_MS = 10 * 60_000;
+
 export function planMediaOrganizeTask(id: string) {
-  return http.post<MediaOrganizePlanResult>(`/admin/media-organize/tasks/${id}/plan`);
+  return http.postWithTimeout<MediaOrganizePlanResult>(
+    `/admin/media-organize/tasks/${id}/plan`,
+    {},
+    ORGANIZE_LONG_TIMEOUT_MS,
+  );
 }
 
 export function fetchMediaOrganizePlan(id: string) {
   return http.get<MediaOrganizePlan>(`/admin/media-organize/tasks/${id}/plan`);
 }
 
+// 执行同样会长跑（逐个动作提交网盘），用同一份放宽后的超时。
 export function applyMediaOrganizeTask(id: string) {
-  return http.post<Record<string, unknown>>(`/admin/media-organize/tasks/${id}/apply`);
+  return http.postWithTimeout<Record<string, unknown>>(
+    `/admin/media-organize/tasks/${id}/apply`,
+    {},
+    ORGANIZE_LONG_TIMEOUT_MS,
+  );
 }
 
 export function stopMediaOrganizeTask(id: string) {

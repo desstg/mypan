@@ -51,7 +51,6 @@ import { toast } from "@/composables/useToast";
 import { useAccountsStore } from "@/stores/accounts";
 import { formatSize } from "@/utils/format";
 import "@/styles/admin-shared.css";
-import "@/styles/admin-table.css";
 
 const accountsStore = useAccountsStore();
 const { accounts } = storeToRefs(accountsStore);

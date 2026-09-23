@@ -7,7 +7,7 @@ const props = withDefaults(
   defineProps<{
     open: boolean;
     title?: string;
-    size?: "sm" | "md" | "lg" | "account" | "branch";
+    size?: "sm" | "md" | "lg" | "wide" | "account" | "branch";
     // bare：仅渲染弹窗外壳与默认插槽，去掉默认头部/内边距，由内容自带头部时使用。
     bare?: boolean;
     // nested：叠在另一层弹窗之上（目录选择等）。
@@ -18,8 +18,23 @@ const props = withDefaults(
     bodyFlush?: boolean;
     // headPlain：极简头部（白底、无分割线、与内容一体），用于极简风弹窗。
     headPlain?: boolean;
+    // steady：**定高**弹窗（88vh），内容区自己滚。
+    //
+    // 内容是长列表时用它。不定高的话面板会随内容「一下大一下小」——
+    // 切页、翻页、筛选之后条数一变，鼠标还没移开窗口就缩了。
+    // 与订阅页那张影片弹窗的 .jav-modal__panel--steady 是同一套观感。
+    steady?: boolean;
   }>(),
-  { title: "", size: "md", bare: false, nested: false, footerDivider: false, bodyFlush: false, headPlain: false },
+  {
+    title: "",
+    size: "md",
+    bare: false,
+    nested: false,
+    footerDivider: false,
+    bodyFlush: false,
+    headPlain: false,
+    steady: false,
+  },
 );
 const emit = defineEmits<{ close: [] }>();
 
@@ -63,7 +78,7 @@ onUnmounted(() => {
         <div class="overlay__center">
           <div
             class="modal"
-            :class="bare ? 'modal--bare' : `modal--${size}`"
+            :class="[bare ? 'modal--bare' : `modal--${size}`, { 'modal--steady': steady }]"
             role="dialog"
           >
             <template v-if="bare">
@@ -134,6 +149,11 @@ onUnmounted(() => {
 .modal--lg {
   max-width: 860px;
 }
+/* wide：给「一屏卡片网格」用（如分享者分享过的影片）。
+   网格本身按视口分列，窄了会把卡片挤成一溜小方块。 */
+.modal--wide {
+  max-width: 1000px;
+}
 .modal--account {
   max-width: 700px;
   width: 90%;
@@ -153,6 +173,24 @@ onUnmounted(() => {
   max-height: min(86vh, 620px);
   display: flex;
   flex-direction: column;
+}
+
+/* 定高弹窗：面板高度写死，内容区自己滚（见 steady prop）。
+ *
+ * 两条都必要：
+ *   - `min-height: 0`：flex 子项默认 min-height:auto，不写它内容再长也撑不出滚动条；
+ *   - `overflow-y: auto` 要盖过 .modal__body--flush 的 `overflow: hidden`
+ *     （那条是为了把内容裁进圆角）。这里靠**特异性**赢：`.modal--steady .modal__body`
+ *     是两个类，`.modal__body--flush` 是一个。 */
+.modal--steady {
+  height: 88vh;
+}
+.modal--steady .modal__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
 }
 .modal--bare {
   width: auto;

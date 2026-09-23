@@ -18,6 +18,7 @@ import (
 	"litepan/internal/fnosproxy"
 	"litepan/internal/fusemount"
 	"litepan/internal/fusereadcache"
+	"litepan/internal/jav"
 	"litepan/internal/logx"
 	"litepan/internal/mediaorganize"
 	"litepan/internal/offlinedownload"
@@ -52,6 +53,7 @@ type servicesBundle struct {
 	favorites        *favorites.Service
 	quarktv          *quarktv.Service
 	tgSubscribe      *tgsubscribe.Service
+	jav              *jav.Service
 }
 
 func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *coreBundle) *servicesBundle {
@@ -209,6 +211,32 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		Exec: core.exec,
 	})
 	tgSubscribeSvc.SetStartupGate(startupGate)
+	// 番号（JAV）：JAVDB/JAVBUS 抓取 + 媒体库入库联动 + 磁力订阅推送。
+	// 推送直接复用离线下载服务，它天然是多网盘 —— 不需要为番号另写下载器。
+	javSvc := jav.New(jav.Options{
+		Movies:     st.store.JavMovies,
+		Magnets:    st.store.JavMagnets,
+		Reviews:    st.store.JavReviews,
+		Subs:       st.store.JavSubscriptions,
+		Runs:       st.store.JavRuns,
+		Candidates: st.store.JavCandidates,
+		Attempts:   st.store.JavAttempts,
+		Blacklist:  st.store.JavBlacklist,
+		Follows:    st.store.JavFollows,
+		Skips:      st.store.JavSkips,
+		Lists:      st.store.JavListMovies,
+		Servers:    st.store.JavMediaServers,
+		Library:    st.store.JavLibrary,
+		Records:    st.store.JavPushRecords,
+		Offline:    offlineDownloadSvc,
+		Folders:    fileSvc,
+		Settings:   st.settings,
+		Bus:        core.bus,
+		Log:        logs.For(logx.ModuleSystem),
+	})
+	javSvc.SetStartupGate(startupGate)
+	javSvc.Register(core.bus)
+
 	// 必须在 offlineDownloadSvc 之后构造，才能订阅它的下载完成事件。
 	tgSubscribeSvc.Register(core.bus)
 	return &servicesBundle{
@@ -233,5 +261,6 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		favorites:        favoritesSvc,
 		quarktv:          quarktvSvc,
 		tgSubscribe:      tgSubscribeSvc,
+		jav:              javSvc,
 	}
 }

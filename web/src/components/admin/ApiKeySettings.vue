@@ -26,7 +26,6 @@ import "@/styles/admin-shared.css"; /* 使用 modal-form / modal-form__footer �
 import { useConfirm } from "@/composables/useConfirm";
 import { findDustTarget, useDustRemoval } from "@/composables/useDustRemoval";
 import { toast, copyTextToClipboard } from "@/composables/useToast";
-import "@/styles/admin-table.css";
 
 const props = withDefaults(
   defineProps<{

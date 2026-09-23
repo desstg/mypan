@@ -37,6 +37,7 @@ import (
 	"litepan/internal/file"
 	"litepan/internal/fnosproxy"
 	"litepan/internal/fusemount"
+	"litepan/internal/jav"
 	"litepan/internal/logx"
 	"litepan/internal/mediaorganize"
 	"litepan/internal/notification"
@@ -92,6 +93,7 @@ type Deps struct {
 	SpaceCleanup      *spacecleanup.Service
 	CoverExtract      *coverextract.Service
 	TGSubscribe       *tgsubscribe.Service
+	JAV               *jav.Service
 	DataDir           string
 	StrmDir           string
 	OnSettingsUpdated func(map[string]string)
@@ -134,6 +136,7 @@ type Handler struct {
 	spaceCleanup      *spacecleanup.Service
 	coverExtract      *coverextract.Service
 	tgSubscribe       *tgsubscribe.Service
+	jav               *jav.Service
 	dataDir           string
 	strmDir           string
 	onSettingsUpdated func(map[string]string)
@@ -184,6 +187,7 @@ func NewRouter(d Deps) http.Handler {
 		spaceCleanup:      d.SpaceCleanup,
 		coverExtract:      d.CoverExtract,
 		tgSubscribe:       d.TGSubscribe,
+		jav:               d.JAV,
 		dataDir:           d.DataDir,
 		strmDir:           d.StrmDir,
 		onSettingsUpdated: d.OnSettingsUpdated,
@@ -445,6 +449,113 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/mounts/{id}/unmount", h.unmountFuse)
 				})
 			})
+			// 番号（JAV）。目前只有配置与探活两组 —— 榜单/影库/订阅/推送
+			// 是后续阶段接上的，路由分组先立起来。
+			//
+			// 注册顺序纪律：静态段必须排在同位置的 {id} 之前，
+			// 否则 "nodes" 会被当成一个 id。这里目前还没有 {id}，
+			// 但 /config/nodes 与 /config 是同一层的兄弟，顺序一样要守住。
+			r.Route("/jav", func(r chi.Router) {
+				r.Get("/config", h.getJavConfig)
+				r.Put("/config", h.updateJavConfig)
+				r.Post("/config/login", h.loginJav)
+				r.Post("/config/test-connection", h.testJavConnection)
+				r.Post("/config/nodes/test", h.testJavNodes)
+
+				// 图片代理。上游封面是 XOR 混淆的、Content-Type 也是 octet-stream，
+				// 直连显示不出来 —— 见 internal/jav/image.go。
+				r.Get("/image", h.javImage)
+
+				// 榜单
+				r.Get("/rankings/hot", h.javHotRanking)
+				r.Get("/rankings/top", h.javRanking(jav.RankingTop250))
+				r.Get("/rankings/actors", h.javRanking(jav.RankingActor))
+
+				// 搜索
+				r.Get("/search", h.javSearch)
+
+				// 本地影库列表（影库页）
+				r.Get("/movies", h.javLocalMovies)
+				// ⚠️ by-number 必须排在同层的 {id} 之前：
+				// 反过来的话 "by-number" 会被当成一个影片 id。
+				r.Get("/movies/by-number", h.javMovieByNumber)
+				r.Get("/movies/{id}", h.javMovieDetail)
+				r.Post("/movies/{id}/ingest", h.javIngestMovie)
+				r.Get("/movies/{id}/magnets", h.javMovieMagnets)
+				// 预览片地址现取：上游那份带限时签名，存的会过期。
+				r.Get("/movies/{id}/preview-url", h.javMoviePreviewURL)
+				// 手动推送：详情页推某一颗磁链，不依赖订阅。
+				r.Post("/movies/{id}/push-magnet", h.javPushMagnet)
+				r.Get("/movies/{id}/reviews", h.javMovieReviews)
+				// 关联清单：点开那一档才拉，不在详情里（所以它是独立端点）。
+				r.Get("/movies/{id}/related-lists", h.javMovieRelatedLists)
+				// 清单里的影片：抓官网清单页 HTML（上游 API 没这个能力）。
+				r.Get("/lists/{id}/movies", h.javListMovies)
+
+				// 分享者（评论区里贴链接的人）。
+				// ⚠️ followed 必须排在同层的 {id} 之前，否则 "followed" 会被当成一个用户 id
+				// （/movies/by-number 那儿有一条同样的注释）。
+				r.Get("/users/followed", h.javFollowedUsers)
+				r.Get("/users/{id}/shares", h.javUserShares)
+				r.Post("/users/{id}/follow", h.javFollowUser)
+				r.Post("/users/{id}/unfollow", h.javFollowUser)
+
+				// 演员
+				r.Get("/actors/{id}/movies", h.javActorMovies)
+
+				// 订阅
+				// ⚠️ completed-movies 必须排在 /subscriptions/{id} 之前，
+				// 否则 "completed-movies" 会被当成一个订阅 id。
+				r.Get("/subscriptions/completed-movies", h.javCompletedMovies)
+				r.Get("/subscriptions", h.javListSubscriptions)
+				r.Post("/subscriptions", h.javCreateSubscription)
+				r.Get("/subscriptions/{id}", h.javGetSubscription)
+				r.Put("/subscriptions/{id}", h.javUpdateSubscription)
+				r.Delete("/subscriptions/{id}", h.javDeleteSubscription)
+				r.Post("/subscriptions/{id}/status", h.javSetSubscriptionStatus)
+				r.Post("/subscriptions/{id}/check", h.javCheckSubscription)
+				r.Get("/subscriptions/{id}/candidates", h.javSubscriptionCandidates)
+				r.Get("/subscriptions/{id}/runs", h.javSubscriptionRuns)
+				r.Get("/subscriptions/{id}/movies", h.javSubscriptionMovies)
+				r.Post("/subscriptions/{id}/movies/{movie_id}/skip", h.javSkipMovie)
+				r.Post("/subscriptions/{id}/movies/{movie_id}/unskip", h.javUnskipMovie)
+
+				// 推送
+				r.Post("/subscriptions/{id}/auto-push", h.javAutoPush)
+				r.Post("/subscriptions/{id}/movies/{movie_id}/subscribe", h.javSubscribeMovie)
+				r.Post("/subscriptions/{id}/candidates/{candidate_id}/push", h.javPushCandidate)
+
+				// 黑名单
+				r.Get("/blacklist", h.javListBlacklist)
+				r.Post("/blacklist", h.javAddBlacklist)
+				// 加入黑名单那一刻记下来的影片快照（只读，给「黑名单」那一档点开看）
+				r.Get("/blacklist/{id}/movies", h.javBlacklistMovies)
+				r.Delete("/blacklist/{id}", h.javDeleteBlacklist)
+
+				// 推送记录（下载记录页）
+				r.Get("/push-records", h.javPushRecords)
+				r.Get("/push-records/downloaders", h.javPushRecordDownloaders)
+				r.Post("/push-records/batch-delete", h.javDeletePushRecords)
+				r.Post("/push-records/{id}/repush", h.javRepushRecord)
+				r.Post("/push-records/{id}/status", h.javSetPushRecordStatus)
+				r.Delete("/push-records/{id}", h.javDeletePushRecord)
+
+				// 媒体服务器与库同步
+				r.Get("/servers", h.javListServers)
+				r.Post("/servers", h.javAddServer)
+				r.Put("/servers/{id}", h.javUpdateServer)
+				r.Delete("/servers/{id}", h.javDeleteServer)
+				r.Post("/servers/{id}/test", h.javTestServer)
+				r.Post("/servers/{id}/sync", h.javSyncServer)
+				r.Post("/sync", h.javSyncAll)
+				r.Get("/sync/status", h.javSyncStatus)
+				r.Get("/sync/schedule", h.javGetSyncSchedule)
+				r.Put("/sync/schedule", h.javUpdateSyncSchedule)
+				r.Get("/library/stats", h.javLibraryStats)
+				r.Get("/library/items", h.javLibraryItems)
+				r.Get("/library/lookup", h.javLibraryLookup)
+			})
+
 			r.Route("/tg-subscribe", func(r chi.Router) {
 				// 配置
 				r.Get("/config", h.getTGSubscribeConfig)
@@ -482,6 +593,9 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/subscriptions/{id}/reset", h.resetTGSubscription)
 				// 搜这条订阅的历史帖（补增订前发过的内容）。手动触发、只落库不推送。
 				r.Post("/subscriptions/{id}/search", h.searchTGHistory)
+				// 拿片名去外部网盘搜索引擎搜磁力。同样手动触发、只落库不推送 ——
+				// 它是「搜历史」的补充：那条只在已订阅的频道里翻，这条不受频道数限制。
+				r.Post("/subscriptions/{id}/search-web", h.searchTGWeb)
 				r.Get("/subscriptions/{id}/episodes", h.listTGSubscriptionEpisodes)
 
 				// 画质方案

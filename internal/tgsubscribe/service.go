@@ -94,12 +94,23 @@ type Service struct {
 	// fetcher 是测试注入口（见 previewFor）：非 nil 时优先于按设置构造的客户端。
 	// 生产代码永远不设置它。
 	fetcher PageFetcher
-	started bool
-	polling bool
-	appCtx  context.Context
-	cancel  context.CancelFunc
+	// pansou 是网盘搜索客户端，与 preview 同一套「按设置构造 + 变了重建」的模式。
+	pansou    webSearchClient
+	pansouKey string
+	// webSearch 是测试注入口（见 webSearcher）：非 nil 时优先。
+	// 生产代码永远不设置它。
+	webSearch webSearchClient
+	started   bool
+	polling   bool
+	appCtx    context.Context
+	cancel    context.CancelFunc
 	// pushTimes 是每小时推送限流用的滑动窗口。
 	pushTimes []time.Time
+	// searching 是正在搜索的订阅 id 集合。
+	//
+	// 加自动搜索之前这里什么都没有：手动路径可以连点两次并发打同一个订阅，
+	// 而搜索站没有配额这回事。现在定时循环也会进来，两条路撞上就是双倍请求。
+	searching map[int64]struct{}
 	// lastPollOK 用于「只在状态跳变时发通知」，避免连接不上时把通知中心刷爆。
 	lastPollOK  bool
 	lastPollErr string
@@ -111,6 +122,35 @@ type Service struct {
 	snapAt    time.Time
 
 	startupGate <-chan struct{}
+}
+
+// beginSearch 给一条订阅占搜索位。返回 false 表示已经有搜索在跑。
+//
+// 占位必须由调用方用 defer endSearch 释放 —— 中途 return 的分支太多了
+// （订阅不存在、搜索没启用、没关键词），漏一个就永久锁死这条订阅。
+func (s *Service) beginSearch(subscriptionID int64) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.searching == nil {
+		s.searching = make(map[int64]struct{})
+	}
+	if _, busy := s.searching[subscriptionID]; busy {
+		return false
+	}
+	s.searching[subscriptionID] = struct{}{}
+	return true
+}
+
+func (s *Service) endSearch(subscriptionID int64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.searching, subscriptionID)
+	s.mu.Unlock()
 }
 
 func New(opts Options) *Service {
@@ -179,7 +219,7 @@ func (s *Service) Register(bus *eventbus.Bus) {
 	eventbus.Subscribe(bus, s.onOfflineDownloadCompleted)
 }
 
-// Start 启动轮询与派发两个 loop。
+// Start 启动轮询、派发、自动搜索三个 loop。
 func (s *Service) Start(ctx context.Context) {
 	if s == nil || s.channels == nil {
 		return
@@ -208,6 +248,10 @@ func (s *Service) Start(ctx context.Context) {
 		s.schedulerLoop(inner)
 	}()
 	go s.dispatchLoop(inner)
+	// 自动网盘搜索。独立 goroutine 而不是并进 schedulerLoop：那条循环的每一步都是
+	// t.me 的限速语义，而这里打的是另一个站、另有自己的间隔与预算。两条都靠
+	// inner 的 cancel 退出，与抓取循环同一个生命周期。
+	go s.webSearchLoop(inner)
 }
 
 // Stop 停掉两个 loop。调用方必须保证它在 eventbus.Close 之前执行 ——

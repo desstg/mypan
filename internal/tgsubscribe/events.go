@@ -90,7 +90,7 @@ func (s *Service) applyDeliveryProgress(
 	}
 
 	s.notifyDelivered(ctx, sub, rec)
-	s.maybeComplete(ctx, sub, rec)
+	s.maybeComplete(ctx, sub)
 }
 
 // findRecordByOfflineTask 按离线任务 ID 反查匹配记录。
@@ -110,18 +110,29 @@ func (s *Service) findRecordByOfflineTask(ctx context.Context, taskID string) *d
 
 // maybeComplete 判定订阅是否可以自动标记完成。
 //
-// 电影：推送下载完成即完成 —— 除非开了洗版，那就继续等更高画质。
+// 洗版：开着就**永远不收尾**，电影与剧集同一条规则。那不是「还差一点」，
+// 而是用户明确要求「有更好的版本就再推一次」—— 收尾会让这条订阅从此不再
+// 参与匹配、也不再推送，与这个意图正好相反。
+//
+// 电影：推送下载完成即完成。要求 PushedCount > 0 而不是无条件完成，
+// 因为本函数除了投递回调之外还会被 UpdateSubscription 调用（见那里），
+// 而在那条路径上「建了订阅但一条都没推过」是常态，不能算完成。
+//
 // 剧集：已入库集数覆盖了 TMDB 上「已播出」的集数才完成。
 // 已知取舍：季在播中（10 集只播了 5 集）时不会自动完成，会一直差 5 集。
 // 这是刻意的 —— 追更本来就该持续，且用户随时可以手动标记完成。
-func (s *Service) maybeComplete(ctx context.Context, sub *domain.TGSubscription, rec *domain.TGMatchRecord) {
+//
+// 只处理 active：暂停/已完成的订阅不会被这里复活。
+func (s *Service) maybeComplete(ctx context.Context, sub *domain.TGSubscription) {
 	if sub.Status != domain.TGSubStatusActive {
+		return
+	}
+	if sub.UpgradeEnabled {
 		return
 	}
 
 	if sub.MediaType == domain.TGMediaTypeMovie {
-		if sub.UpgradeEnabled {
-			// 开着洗版就继续等更高画质，不自动收尾。
+		if sub.PushedCount <= 0 {
 			return
 		}
 		s.completeSubscription(ctx, sub, "影片已入库")

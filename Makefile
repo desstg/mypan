@@ -8,7 +8,7 @@ DOCKER_PLATFORM ?= linux/amd64
 DOCKER_EXPORT ?= dist/$(DOCKER_IMAGE).tar.gz
 
 # 发布到 Docker Hub
-VERSION ?= v1.0.1
+VERSION ?= v2.0.0
 RELEASE_IMAGE ?= desstg/mypan
 RELEASE_TAG ?= latest
 RELEASE_PLATFORMS ?= linux/amd64,linux/arm64

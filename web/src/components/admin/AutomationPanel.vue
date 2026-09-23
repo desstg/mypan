@@ -591,7 +591,6 @@ import {
 } from '../../api/automation'
 import { fetchEmbyLibraries } from '../../api/emby'
 import { formatTime } from '../../utils/format'
-import '@/styles/admin-table.css'
 
 const viewMode = ref('list')
 const loading = ref(false)

@@ -1,0 +1,12 @@
+-- 黑名单条目带一份「加入时符合条件的影片」快照。
+--
+-- 为什么必须落库：拉黑之后这些片在 SubscriptionMovies 里**当场**变成 eligible=false
+-- （那条路径也读黑名单，见 check.go 的 blacklistCriteria），事后再算只能得到空集 ——
+-- 而「黑名单」那一档点开卡片，用户要看的正是「这一拉到底挡住了哪些片」。
+--
+-- 存 JSON 数组（影片 id），与同库既有的 tags_json / preview_images_json 一个路子。
+-- 不建关联表：这份快照只用于读出来渲染卡片，不参与任何 join 或匹配判定
+-- （挡推送靠的是 target_key，见 jav_subscription_blacklist 的 UNIQUE 约束那一列）。
+--
+-- 老条目这一列是空串 = 「没有记录」，UI 上按 0 部处理，不报错。
+ALTER TABLE jav_subscription_blacklist ADD COLUMN movie_ids TEXT NOT NULL DEFAULT '';

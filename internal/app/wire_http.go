@@ -169,6 +169,7 @@ func wireHTTPServer(cfg config.Config, logs *logx.Manager, st *storeBundle, core
 		SpaceCleanup:      spaceCleanupSvc,
 		CoverExtract:      coverExtractSvc,
 		TGSubscribe:       svc.tgSubscribe,
+		JAV:               svc.jav,
 		DataDir:           cfg.DataDir,
 		StrmDir:           cfg.StrmDir,
 		OnSettingsUpdated: cacheSettingsHook(core.cache, st.settings, cfg.DataDir),

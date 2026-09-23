@@ -36,10 +36,30 @@
 
 /* ——————————————— 海报墙 ——————————————— */
 
+/* 列数**钉死**成 20 的约数（5 / 4 / 2），刻意不用 auto-fill 自适应。
+ *
+ * TMDB 的发现列表每页固定 20 条，而自适应列数在常见宽度下会落到 6 列：
+ * 20 ÷ 6 = 3 行余 2 张，最后一行右边空着 4 格，看着像页面没加载完。
+ * 只要列数能整除 20，最后一行就永远是满的 —— 代价是海报比 6 列时大一圈。
+ * 想改列数的话只能从 20 的约数里挑（1/2/4/5/10）——
+ * **改列数就得同时改后端的分页**（TMDB 没有 page_size 参数，要 6 列就得把
+ * 相邻上游页拼成 24 条一页），别只改这一处。 */
 .tg-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 18px;
+}
+
+@media (max-width: 1080px) {
+  .tg-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .tg-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .tg-card {
@@ -728,12 +748,26 @@
   line-height: 1.5;
 }
 
+/* 匹配记录表列多（最多 8 列），容器一窄，默认的自动布局就会把每格折成好几行 ——
+   时间、画质、订阅这些挤成两三行之后整张表基本没法扫视。
+   这里让每格保持单行，装不下改由外层横向滚动（.admin-panel-table-wrap 已改成 auto）；
+   长文本列用省略号收口、悬停看 title。 */
+.tg-record-table td {
+  white-space: nowrap;
+}
+
 /* 匹配历史的关键列 */
 .tg-record__name {
   max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 频道 / 订阅这类「只需要认得出来」的列，收得比发布名窄一些 ——
+   它们一宽就会把发布名和画质挤到屏幕外，而那两个才是扫视时真正要看的。 */
+.tg-record__name--narrow {
+  max-width: 160px;
 }
 
 .tg-record__hash {

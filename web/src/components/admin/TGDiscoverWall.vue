@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import AppButton from "@/components/base/AppButton.vue";
 import AppInput from "@/components/base/AppInput.vue";
+import AppPagination from "@/components/base/AppPagination.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
 import SettingsCard from "@/components/admin/SettingsCard.vue";
@@ -102,11 +102,14 @@ async function load(reset = false) {
   }
 }
 
-function changePage(delta: number) {
-  const next = page.value + delta;
-  if (next < 1 || next > totalPages.value) return;
+const gridRef = ref<HTMLElement | null>(null);
+
+// 分页器在列表**下方**，翻页后不把视口带回顶部的话，用户看到的是新一页的末尾，
+// 会以为页码没生效。越界钳制交给 AppPagination，这里只管跳。
+async function goPage(next: number) {
   page.value = next;
-  void load();
+  await load();
+  gridRef.value?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 watch(
@@ -132,33 +135,34 @@ defineExpose({ load });
 
 <template>
   <div class="tg-wall">
-    <SettingsCard v-if="!searching" title="筛选" accent="var(--brand)">
-      <div class="tg-filters">
-        <div class="tg-filters__field">
-          <label class="tg-filters__label">国家 / 地区</label>
-          <AppSelect v-model="country" :options="COUNTRY_OPTIONS" />
-        </div>
-        <div class="tg-filters__field">
-          <label class="tg-filters__label">类型</label>
-          <AppSelect v-model="genre" :options="genreOptions" />
-        </div>
-        <div class="tg-filters__field">
-          <label class="tg-filters__label">年份</label>
-          <AppInput v-model="year" placeholder="例如 2024" />
-        </div>
-        <div class="tg-filters__field">
-          <label class="tg-filters__label">海报尺寸</label>
-          <SettingsSegment
-            v-model="posterSize"
-            label="海报尺寸"
-            :options="[
-              { value: 'w300', label: '标清' },
-              { value: 'original', label: '原图' },
-            ]"
-          />
-        </div>
+    <!-- 筛选裸放在页面上，不套 SettingsCard：这是一排「选完就看着海报墙」的即时
+         筛选器，不是需要保存的设置，给它一张白底卡片 + 左侧色条会把一个纯粹的操作行
+         抬成和下面海报墙同等重量的一个区块。 -->
+    <div v-if="!searching" class="tg-filters">
+      <div class="tg-filters__field">
+        <label class="tg-filters__label">国家 / 地区</label>
+        <AppSelect v-model="country" :options="COUNTRY_OPTIONS" />
       </div>
-    </SettingsCard>
+      <div class="tg-filters__field">
+        <label class="tg-filters__label">类型</label>
+        <AppSelect v-model="genre" :options="genreOptions" />
+      </div>
+      <div class="tg-filters__field">
+        <label class="tg-filters__label">年份</label>
+        <AppInput v-model="year" placeholder="例如 2024" />
+      </div>
+      <div class="tg-filters__field">
+        <label class="tg-filters__label">海报尺寸</label>
+        <SettingsSegment
+          v-model="posterSize"
+          label="海报尺寸"
+          :options="[
+            { value: 'w300', label: '标清' },
+            { value: 'original', label: '原图' },
+          ]"
+        />
+      </div>
+    </div>
 
     <SettingsCard v-else :title="`搜索「${keyword.trim()}」`" accent="var(--brand)">
       <template #head-aside>
@@ -166,7 +170,7 @@ defineExpose({ load });
       </template>
     </SettingsCard>
 
-    <div v-if="results.length" class="tg-grid">
+    <div v-if="results.length" ref="gridRef" class="tg-grid">
       <button
         v-for="item in results"
         :key="item.id"
@@ -217,20 +221,7 @@ defineExpose({ load });
 
     <div v-else class="tg-wall__footer">加载中…</div>
 
-    <div v-if="!searching && totalPages > 1" class="tg-wall__footer">
-      <AppButton type="button" variant="secondary" size="sm" :disabled="page <= 1" @click="changePage(-1)">
-        上一页
-      </AppButton>
-      <span>{{ page }} / {{ totalPages }}</span>
-      <AppButton
-        type="button"
-        variant="secondary"
-        size="sm"
-        :disabled="page >= totalPages"
-        @click="changePage(1)"
-      >
-        下一页
-      </AppButton>
-    </div>
+    <!-- 搜索模式下 totalPages 恒为 1，分页器自己就不渲染，不用外面再判一次。 -->
+    <AppPagination :page="page" :total-pages="totalPages" @update:page="goPage" />
   </div>
 </template>

@@ -1,0 +1,2066 @@
+/*
+ * 番号（JAV）模块的卡片样式。
+ *
+ * 规则移植自源码的 web/static/theme.css（.rank-card / .card-cover / .rank-chip /
+ * .rank-num / .actor-rank-card / .magnet-card …），但做了两处适配：
+ *
+ *  1. 颜色改用 LitePan 的设计令牌（--brand / --surface-* / --radius-* /
+ *     --shadow-card），不引入源码那套 --accent: #00bfa5 与 --pink 硬编码 ——
+ *     否则这一页会在主题切换时掉队。
+ *  2. 字号与间距等比缩小约 10~15%，栅格列数沿用 tg-subscribe.css 的断点
+ *     （5 / 4 / 2 列），这样番号页和电影/剧集页的节奏是一致的。
+ *
+ * ⚠️ 这份样式表必须在用到它的组件里显式 import。LitePan 的样式是按需打包的，
+ * 漏了 import 会静默丢样式（开发时未必看得出来）。
+ */
+
+/* ————————————————— 卡片网格 ————————————————— */
+
+.jav-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 1280px) {
+  .jav-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .jav-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  .jav-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+
+/* ————————————————— 影片卡片 ————————————————— */
+
+.jav-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    box-shadow 0.2s,
+    transform 0.2s;
+}
+
+.jav-card:hover {
+  box-shadow: var(--shadow-pop);
+  transform: translateY(-2px);
+}
+
+/* 封面 3:2 —— 与源码一致。番号片的封面是横版剧照，不是海报比例。 */
+.jav-card__cover {
+  position: relative;
+  aspect-ratio: 3 / 2;
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+
+.jav-card__cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.jav-card__placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.jav-card__body {
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.jav-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 番号标签：源码是粉色，这里改用品牌色系里最跳的那一档。 */
+.jav-card__num {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--brand);
+  color: var(--text-on-brand);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.jav-card__date {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.jav-card__title {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ————————————————— 封面上的角标 ————————————————— */
+
+.jav-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.jav-chip--brand {
+  background: var(--brand);
+  color: var(--text-on-brand);
+}
+
+.jav-chip--dark {
+  background: rgba(15, 23, 42, 0.6);
+  color: #fff;
+}
+
+/* 封面上的角标（磁链数 / 时长）统一成**蓝底白字**。
+ *
+ * 时长那颗原本是半透明深灰、磁链那颗是品牌色 —— 两种底色在同一排里看着不齐。
+ * 现在都走品牌色（它本身就是蓝的）+ 白字，与卡片右下那颗番号标签的配色也一致。
+ * 只覆盖封面这一层：详情页的评分胶囊、设置页的服务器类型仍在纯色背景上，
+ * 那里的深浅是合适的，不必跟着变。 */
+.jav-card__overlays .jav-chip {
+  background: var(--brand);
+  color: var(--text-on-brand);
+  /* 比基础款再小一号、内边距再紧一点：这两颗是**给画面让位**的配角，
+     底色占到字外一圈就够，多出来的留白只会压住剧照。 */
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+/* 角标容器：左下角一横排。 */
+.jav-card__overlays {
+  position: absolute;
+  left: 7px;
+  bottom: 7px;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+}
+
+/* 已入库 / 未入库。右下角，与源码同位置。 */
+.jav-card__flag {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  z-index: 2;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  font-size: 10.5px;
+  font-weight: 600;
+  background: var(--success);
+  color: #fff;
+}
+
+.jav-card__flag--missing {
+  background: rgba(15, 23, 42, 0.45);
+}
+
+/* 排名角标：1 金 2 银 3 铜，其余半透明黑。三色保留源码的取值。 */
+.jav-rank-num {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12.5px;
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.25);
+}
+
+.jav-rank-num--r1 {
+  background: #f5b301;
+}
+.jav-rank-num--r2 {
+  background: #9ca3af;
+}
+.jav-rank-num--r3 {
+  background: #e67e22;
+}
+.jav-rank-num--rn {
+  background: rgba(15, 23, 42, 0.5);
+}
+
+/* 卡片左上角的订阅按钮。 */
+.jav-card__sub {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border: none;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--brand);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.jav-card__sub--on {
+  background: rgba(16, 185, 129, 0.92);
+  color: #fff;
+}
+
+/* 悬停放大时整个封面轻微提亮，让「可点」这件事更明确。 */
+.jav-card:hover .jav-card__cover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.06);
+  pointer-events: none;
+}
+
+/* —— 订阅卡（影片 / 演员 / 清单 / 在线 / 黑名单 五个视图共用） ——
+ *
+ * 这套 .sub-card__* 类名模板里一直在用，但**此前没有任何样式表定义过它们**。
+ * 后果不是「有点丑」，而是三件很具体的事：
+ *   1. .sub-card-grid 没有网格 → 卡片撑满整行，一屏只看得见一张；
+ *   2. .sub-card__acts 没有 position:absolute → 那排按钮掉进文档流，
+ *      既压不到封面上，还被封面盖住点不着；
+ *   3. .sub-card__icon 没有样式 → 渲染成浏览器默认的灰按钮。
+ * 这里按 .jav-card / .tg-card 的既有语言补齐，别再把类名写进模板却不写样式。 */
+
+.sub-card-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 16px;
+}
+
+/* 断点与 .jav-grid 一致：订阅页和影库/榜单的节奏要一样。 */
+@media (max-width: 1280px) {
+  .sub-card-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .sub-card-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  .sub-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+
+/* 状态胶囊，压在封面左上角。三档颜色对应订阅生命周期。 */
+.sub-card__status {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  z-index: 3;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text-regular);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sub-card__status--active {
+  background: color-mix(in srgb, var(--success) 88%, transparent);
+  color: #fff;
+}
+
+.sub-card__status--paused {
+  background: color-mix(in srgb, var(--text-muted) 82%, transparent);
+  color: #fff;
+}
+
+.sub-card__status--completed,
+.sub-card__status--checking {
+  background: color-mix(in srgb, var(--brand) 88%, transparent);
+  color: var(--text-on-brand);
+}
+
+/* 动作按钮组。**必须 absolute + z-index** —— 少了它按钮会掉进文档流，
+ * 那就是「图上的按键点不到」的直接原因。悬停才浮出，免得一屏全是图标。 */
+.sub-card__acts {
+  position: absolute;
+  z-index: 4;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.sub-card__acts--tr {
+  top: 7px;
+  right: 7px;
+}
+
+/* ————— 被拉黑的订阅卡：整卡置灰 + 右上角红角标 + 点不动 —————
+ *
+ * 粒度是「这条订阅的**目标**被拉黑了」：演员/清单卡表达的就是「它名下的影片
+ * （含以后新出的）都不会再推」。封面点不动由 onCardClick 里那道守卫实现，
+ * 这里只管长相。 */
+.sub-card--blacklisted {
+  cursor: not-allowed;
+}
+
+/* 置灰只作用在**封面图与正文**上，不整卡 filter。
+   整卡 grayscale 会把右上角那颗角标一起变灰 —— 而那颗角标正是要显眼的那个；
+   整卡 opacity 同理，会把它一起压暗。 */
+.sub-card--blacklisted .sub-card__cover img,
+.sub-card--blacklisted .jav-actor-avatar,
+.sub-card--blacklisted .jav-card__placeholder,
+.sub-card--blacklisted .jav-card__body {
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+
+/* 悬停不再上浮、去阴影：这张卡点不动，别给出可点的暗示。 */
+.sub-card--blacklisted:hover {
+  box-shadow: none;
+  transform: none;
+}
+
+/* 封面悬停提亮那条挂在 .jav-card:hover 上，得单独盖掉，否则灰卡悬停还在发亮。 */
+.sub-card--blacklisted:hover .jav-card__cover::after {
+  content: none;
+}
+
+.sub-card--blacklisted .sub-card__cover {
+  cursor: not-allowed;
+}
+
+/* 黑名单角标：**常驻**的状态标记，不像动作组那样悬停才出。
+ * 配色取 --danger（与「删除」那类危险动作同一族），一眼能从一屏卡里扫出来。 */
+.sub-card__badge {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--danger) 92%, transparent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.25);
+}
+
+/* 黑名单那一档卡片上的「N 部」角标：不是警示，用中性色，别和上面的红角标混淆。
+ * 位置右移，让开右上角那颗「移出黑名单」按钮所占的 7px + 约 30px。 */
+.sub-card__badge--count {
+  background: color-mix(in srgb, var(--text-muted) 88%, transparent);
+  font-weight: 600;
+  right: 44px;
+}
+
+/* 黑名单卡片点开看影片快照 —— 封面有真点击时才加这个类。 */
+.sub-card__cover--clickable {
+  cursor: pointer;
+}
+
+/* 角标与悬停动作组**撞同一个角**（.sub-card__acts--tr 也是 top:7px right:7px）。
+ * 裁决：常驻的占原位，悬停才出现的让位到下一行。
+ * 34px = 角标一行（11px 字 + 上下 2px padding 约 20px）+ 7px 间距 + 余量 ——
+ * 改角标字号时这两个数要一起调。 */
+.sub-card--blacklisted .sub-card__acts--tr {
+  top: 34px;
+}
+
+.sub-card__acts--br {
+  bottom: 7px;
+  right: 7px;
+}
+
+.sub-card:hover .sub-card__acts,
+.sub-card:focus-within .sub-card__acts {
+  opacity: 1;
+}
+
+.sub-card__icon {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  color: var(--text-regular);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.sub-card__icon:hover {
+  background: var(--brand);
+  color: var(--text-on-brand);
+}
+
+.sub-card__icon:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.sub-card__icon--danger:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* 卡片底部一行：左=最后检查时间，右=匹配条数 / 出错。 */
+.sub-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* 放不下就**换行**，不要裁。
+   * 左边是「最后检查时间」（一长串日期+时间），右边是「检：N 推：N」——
+   * 两张挤在一行时下面那两条 `text-overflow: ellipsis` 会把右边的数字吃掉，
+   * 用户看到的就是「检：3 推…」这种显示不全（2026-09-22 报上来的）。 */
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sub-card__foot-left,
+.sub-card__foot-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 左边那串时间**可以**省略 —— 它只是个参考，截成「2026-09-22 14…」也还读得懂。 */
+.sub-card__foot-left {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 右边的「检：N 推：N」**不许省** —— 那是这张卡片要说的事。
+ * 放不下时靠上面 `flex-wrap` 换到第二行，而不是把数字吃掉。 */
+.sub-card__foot-right {
+  white-space: nowrap;
+}
+
+.sub-card__foot-error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* 演员 / 清单订阅卡：把 3:2 的横版封面框换成居中的圆头像 —— 与榜单的演员卡同一形态。
+ * 头像直接复用 .jav-actor-avatar（70px 圆），不另造一套。
+ *
+ * 这两种目标都没有横版封面：演员的 cover 给的是头像（照影片那套框摆会把人头两侧
+ * 裁掉），清单压根没有图。操作按钮不动：它们本来就是绝对定位 + 悬停浮出，
+ * 正好压在这张头像上。 */
+.sub-card--avatar .jav-card__cover {
+  aspect-ratio: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 0 8px;
+  background: var(--surface);
+}
+
+.sub-card--avatar .jav-card__body {
+  align-items: center;
+  padding-top: 0;
+  text-align: center;
+}
+
+.sub-card--avatar .jav-actor-name,
+.sub-card--avatar .sub-card__foot {
+  width: 100%;
+}
+
+/* ————————————————— 空态 / 分页 ————————————————— */
+
+/* 空态：图标 + 一句说明，居中。加载中（「加载中…」）走的是同一档 ——
+ * 它们要看起来像同一件事的不同阶段，而不是两种东西。 */
+.jav-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 32px 16px;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  text-align: center;
+}
+
+.jav-empty__icon {
+  font-size: 30px;
+  line-height: 1;
+}
+
+/* 分页条：内部分页器自带样式（AppPagination），这里只管位置。 */
+.jav-pagination {
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+/* 滚动到底的续加载哨兵。它**始终在 DOM 里**（不是 v-if）—— 一旦被移除，
+   IntersectionObserver 就再也收不到回调。所以无内容时它仍然占一点高度，
+   免得页面底部贴死时观察器不触发。 */
+.jav-loadmore {
+  display: flex;
+  justify-content: center;
+  min-height: 36px;
+  padding: 10px 0 4px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+/* ————————————————— 状态胶囊 ————————————————— */
+
+/* 正常 / 异常 / 未配置、订阅中 / 已完成 / 已跳过，都用这一颗。
+ * 底色一律 color-mix 兑出来，三套主题下都不会糊成一块死色。 */
+.jav-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 正常 / 订阅中：绿。 */
+.jav-pill--active {
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  color: var(--success);
+}
+
+/* 异常 / 未同步 / 已完成 / 已跳过：中性灰。
+ * 都走 neutral 是因为调用方只给了 --completed 这一种，CSS 分不出
+ * 「异常」和「未同步」—— 出错时下面那行 .jav-candidate__reasons 是红的，
+ * 信息不至于丢。 */
+.jav-pill--completed,
+.jav-pill--skipped {
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+}
+
+/* 弹窗里影片卡上的两样东西都**压在封面上**（不再占卡片下方一行）：
+ * 状态左上、跳过右上；批量模式的勾选圈也用左上（与状态不同时出现）。
+ * 配色与订阅卡的 .sub-card__status--* 同一套，别的地方看着才一致。 */
+.jav-sub-movie__state {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  z-index: 3;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.jav-sub-movie__state--active {
+  background: color-mix(in srgb, var(--success) 88%, transparent);
+  color: #fff;
+}
+
+.jav-sub-movie__state--completed {
+  background: color-mix(in srgb, var(--brand) 88%, transparent);
+  color: var(--text-on-brand);
+}
+
+.jav-sub-movie__state--skipped {
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text-muted);
+}
+
+.jav-sub-movie__skip {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 3;
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  color: var(--text-regular);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.jav-sub-movie__skip:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--brand);
+}
+
+.jav-sub-movie__skip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 已跳过：这颗键变成「取消跳过」，灰底白字，与订阅卡那颗「已跳过」状态呼应。 */
+.jav-sub-movie__skip--on {
+  background: color-mix(in srgb, var(--text-muted) 85%, transparent);
+  color: #fff;
+}
+
+/* ————————————————— 候选行 ————————————————— */
+
+.jav-candidate {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.jav-candidate + .jav-candidate {
+  margin-top: 8px;
+}
+
+/* 被拒的候选压暗一档。不能藏 —— 用户恰恰要靠它看懂「为什么这颗没被推」。 */
+.jav-candidate--rejected {
+  background: var(--surface-sunken);
+  border-style: dashed;
+}
+
+.jav-candidate__main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.jav-candidate__name {
+  color: var(--text-regular);
+  font-size: 0.82rem;
+  word-break: break-all;
+}
+
+/* 番号 / 体积 / 角标，以及贴在最右端的「推送网盘」。
+ *
+ * 按钮在这一排而不是另起一行：它跟体积、角标读的是同一件事，
+ * 并排才是一句话；另起一行会把每张候选卡都撑高一截。
+ * wrap 是为了窄弹窗 —— 挤不下时按钮落到第二行，仍然是右对齐
+ * （`margin-left: auto` 在换行后作用于那一行的行首，正好把它推到行尾）。 */
+.jav-candidate__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.jav-candidate__push {
+  margin-left: auto;
+  flex: none;
+}
+
+/* 原因/报错文本。**两处在用**：候选的拒收原因、媒体服务器的 last_error。
+ * 所以写通用一点，别只顾其中一处。 */
+.jav-candidate__reasons {
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+/* ————————————————— 设置页 ————————————————— */
+
+/* 统计块：一排「数字 + 标签」。 */
+.jav-stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 10px;
+}
+
+.jav-stat-tile {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  text-align: center;
+}
+
+.jav-stat-tile__num {
+  color: var(--text);
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.jav-stat-tile__label {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 媒体服务器卡：左=名字/地址/报错，右=测试与删除。 */
+.jav-server-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.jav-server-card + .jav-server-card {
+  margin-top: 8px;
+}
+
+.jav-server-card__name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.jav-server-card__url {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  word-break: break-all;
+}
+
+.jav-server-card__actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+/* 时段 chip 行与 cron 预设行：都是「一排会换行的控件」。
+ * 少了 flex，里面的输入框和按钮会各自独占一行。 */
+.jav-preset-row,
+.jav-time-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.jav-time-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px 2px 9px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--brand) 12%, transparent);
+  color: var(--brand);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+/* 删除那个 ✕：给足热区。原来只有一个字宽，点起来很费劲。 */
+.jav-time-chip__x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.jav-time-chip__x:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* 影库页的标签筛选条。 */
+.jav-tag-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 7px 12px;
+  border: 1px solid color-mix(in srgb, var(--brand) 30%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--brand) 8%, transparent);
+  color: var(--text-regular);
+  font-size: 0.82rem;
+}
+
+.jav-tag-bar__label b {
+  color: var(--brand);
+}
+
+.jav-tag-bar__clear {
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.jav-tag-bar__clear:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ————————————————— 榜单页 ————————————————— */
+
+.jav-rank-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 14px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.jav-rank-count {
+  padding: 1px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--brand);
+  color: var(--text-on-brand);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.jav-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.jav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-regular);
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.jav-tab:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.jav-tab--active {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--text-on-brand);
+  font-weight: 600;
+}
+
+/* ————————————————— 演员榜 ————————————————— */
+
+.jav-actor-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 1400px) {
+  .jav-actor-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1100px) {
+  .jav-actor-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@media (max-width: 800px) {
+  .jav-actor-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 560px) {
+  .jav-actor-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.jav-actor-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 14px 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+  text-align: center;
+  transition:
+    box-shadow 0.2s,
+    transform 0.2s;
+}
+
+.jav-actor-card:hover {
+  box-shadow: var(--shadow-pop);
+  transform: translateY(-2px);
+  border-color: var(--brand);
+}
+
+/* 演员卡的角标与订阅按钮左右互换 —— 与源码一致。 */
+.jav-actor-card .jav-rank-num {
+  left: 8px;
+  right: auto;
+}
+
+.jav-actor-card .jav-card__sub {
+  left: auto;
+  right: 7px;
+}
+
+.jav-actor-avatar {
+  width: 70px;
+  height: 70px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--surface-sunken);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 22px;
+}
+
+.jav-actor-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 清单没有头像图，圆里放名字的前两个字，底色照源码的清单徽标来
+   （theme.css 的 .list-logo：紫色渐变 + 白字加粗）。
+
+   为什么这里敢用品牌色之外的颜色：演员卡与清单卡在同一个网格里并排，
+   一边是照片、一边是纯色圆 —— 紫色让「这是清单」一眼分得出来，
+   与详情页里「磁链是蓝的、清单是紫的」也是同一套区分。
+   字重 700、字号 22px：圆的直径是 70px，两个汉字约 44px 宽，四周还留得住气。 */
+.jav-actor-avatar__text {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(135deg, #a855f7, #7c3aed);
+  color: #fff;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  /* 名字以 emoji / 生僻字开头时别溢出成三行 */
+  white-space: nowrap;
+}
+
+/* 用户卡的头像底：青色（品牌色那一系），与清单的紫区分开 ——
+   两档卡片并排时，一眼分得出「这是人」还是「这是片单」。 */
+.jav-actor-avatar__text--user {
+  background: linear-gradient(135deg, #14b8a6, #0d9488);
+}
+
+.jav-actor-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+/* ————————————————— 筛选与排序条 ————————————————— */
+
+.jav-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+/* 筛选栏最右边那颗「订阅该演员」。margin-left:auto 把它顶到行尾 ——
+   筛选条是 flex-wrap 的，宽度不够时它会自己折到下一行，不会挤坏别的控件。 */
+.jav-filters__actor-sub {
+  margin-left: auto;
+}
+
+.jav-sort-chips {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.jav-sort-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.jav-sort-chip:hover {
+  border-color: var(--brand);
+  color: var(--text);
+}
+
+.jav-sort-chip--active {
+  border-color: var(--brand);
+  color: var(--brand);
+  font-weight: 600;
+}
+
+/* 弹窗右上角的关闭键。形态照 AppModal 的 .modal__close（新建整理任务那类弹窗用的
+ * 就是它）：无边框、透明、22px 的 ×，平时 muted、悬停才变正文色。
+ * 那一份是 scoped 样式，复用不到这里，所以声明照抄一份 —— 要改就两边一起改。 */
+.jav-modal__close {
+  border: none;
+  background: transparent;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.jav-modal__close:hover {
+  color: var(--text);
+}
+
+/* 标题栏里那句「另有 N 部没过条件」：不抢眼，但看得见。 */
+.jav-modal__head-hint {
+  margin-left: 10px;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* 固定高度的弹窗面板：这张弹窗里全是**可筛选的列表** —— 切状态页、翻页、批量操作
+ * 之后条数都会变，面板若按内容撑高就会「一下大一下小」，鼠标还没移开窗口就缩了。
+ * 定死高度，让列表区自己滚（.jav-modal__body 本来就是 overflow-y:auto）。 */
+.jav-modal__panel--steady {
+  height: 88vh;
+}
+
+/* 影片子弹窗里的工具栏：左边状态分页、右边「⚙ 操作」（照 21.png）。
+ * 它是**内容区的第一行**（在 .jav-modal__body 里），不是标题栏下面的一条边框 ——
+ * 所以没有 border-bottom，横向内边距也用内容区自己的。 */
+.jav-modal__tabs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+/* 批量选择条：勾选之后出现的操作行。同样在内容区里，做成一块内嵌提示条。 */
+.jav-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  font-size: 12.5px;
+  color: var(--text-regular);
+}
+
+.jav-batch-bar__text {
+  margin-right: auto;
+  font-weight: 600;
+}
+
+/* 弹窗里影片卡外面那层：只为批量模式下的选中态与勾选角标，不改卡片本身。 */
+.jav-sub-movie {
+  position: relative;
+}
+
+/* 选中态画在外层：卡片是子组件，从外面改它的边框要穿透 scoped，
+ * 画一层 outline 更省事，也不会影响卡片自己的悬停样式。 */
+.jav-sub-movie--picked {
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 0 2px var(--brand);
+}
+
+.jav-sub-movie__tick {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 4;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: rgba(15, 23, 42, 0.45);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  /* 点击要落到卡片上（勾选在捕获阶段处理），角标自己不吃事件。 */
+  pointer-events: none;
+}
+
+.jav-sub-movie--picked .jav-sub-movie__tick {
+  background: var(--brand);
+}
+
+/* 搜索结果提示条 —— 源码 search.html 的 search-head，外加一句来源说明。 */
+.jav-search-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  font-size: 12.5px;
+  color: var(--text-regular);
+}
+
+.jav-search-notice__query {
+  color: var(--brand);
+  font-weight: 600;
+}
+
+/* 「已显示 N」：跟总数区分开，它是个会随滚动往上跳的数。 */
+.jav-search-notice__shown {
+  color: var(--text-muted);
+}
+
+/* 回落到本地时的那一句说明，用警告色区分开 —— 它不是错误，但用户要知道
+   自己看到的不是全站结果。 */
+.jav-search-notice__fallback {
+  color: var(--warning);
+}
+
+/* ————————————————— 磁链卡片 ————————————————— */
+
+.jav-magnet {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.jav-magnet__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.jav-magnet__size {
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--surface-sunken);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.jav-magnet__date {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.jav-magnet__name {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+  word-break: break-all;
+  margin-bottom: 8px;
+}
+
+.jav-magnet__foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.jav-badge {
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+}
+
+.jav-badge--on {
+  background: rgba(16, 185, 129, 0.14);
+  color: var(--success);
+}
+
+/* 破解用醒目色 —— 用户最先看的就是它。 */
+.jav-badge--break {
+  background: rgba(239, 68, 68, 0.14);
+  color: var(--danger);
+}
+
+/* 清晰度胶囊：高清挂 HD、超清挂 UHD，**两者只会出现一颗**（超清优先，
+ * 后端 quality.Tags.ResolutionLabel() 已经收敛成单一值，前端不再判优先）。
+ *
+ * 底色用 color-mix 而不是写死的 rgba：--info 在三套主题里是
+ * #1976d2 / #60a5fa / #4c74df，写死 rgba 的话换主题时底色和字色对不上号。 */
+.jav-badge--res {
+  background: color-mix(in srgb, var(--info) 14%, transparent);
+  color: var(--info);
+}
+
+/* 详情页磁链行里的标签**统一成蓝色**。
+ *
+ * 原本一行里四五种颜色：清晰度蓝、破解红、字幕/已推送绿、其余灰 —— 扫过去反而
+ * 看不出重点，而这一栏要回答的只有一个问题「这颗值不值得推」。统一成品牌蓝之后
+ * 靠**文字**区分（4K / 破解 / 字幕 / 已推送），颜色不再抢戏。
+ *
+ * 只作用于详情页的磁链行：检查候选弹窗那一份保持原样 —— 那边的颜色是有语义的
+ * （拒收原因、合格与否），统一成蓝会把那层信息抹掉。 */
+.jav-magnet__foot .jav-badge {
+  background: color-mix(in srgb, var(--brand) 14%, transparent);
+  color: var(--brand);
+}
+
+.jav-magnet__actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+/* 链接的种类（磁链 / ED2K）。只在「评论区分享」档用 —— 磁链 tab 里全是磁链，
+   标出来是废话。比体积淡一档，不跟它抢位置。 */
+.jav-magnet__kind {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+/* 「评论区分享」里的分享者 + 原评论那一行。
+ *
+ * 磁链 tab 的卡片没有这一行：那边「谁抓来的」没有意义（全是 JAVBUS 抓的）。
+ * 而这里「谁贴的、他还说了什么」正是判断这颗靠不靠谱的依据。
+ */
+.jav-share {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.jav-share .fas {
+  flex: none;
+  font-size: 10.5px;
+}
+.jav-share__who {
+  flex: none;
+  font-weight: 600;
+  color: var(--brand);
+}
+.jav-share__who--anon {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+/* 可点的分享者名字（点开看他分享过的影片）。
+   是个 <button>：把默认样式重置掉，否则会得到系统灰底按钮加浏览器默认字体。
+   下划线用虚点 —— 与正文里的普通加粗区分开，又不至于像链接那样抢眼。 */
+.jav-share__who--link {
+  appearance: none;
+  font: inherit;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.jav-share__who--link:hover {
+  color: var(--brand);
+}
+/* 原评论单行截断：评论可以很长，撑开卡片会把链接本身挤下去。
+   全文在 title 里，鼠标停一下就能看全。 */
+.jav-share__comment {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 关联清单：做成和**演员卡**一样的药丸（一个圆形图标 + 名称），整颗可点。
+ *
+ * 与 .jd-actor 逐条对齐 —— 演员那边圆里是头像、名称是主体；这边圆里放个文件夹
+ * 图标、名称后面缀一句「N 部」。两处贴在同一个抽屉里，形状不一样会显得是两套东西。 */
+/* 关联清单：卡片式网格（照 23.png 的版式）—— 清单名在上、部数+箭头在下的居中方卡。
+ *
+ * 列宽给死、列数交给 auto-fill：详情抽屉左边贴着侧边栏、右边顶到窗口边缘，
+ * 宽度随屏幕走。写死列数在宽屏上会拉出一排很宽的卡（不像截图那种小方卡），
+ * auto-fill 才能在任何宽度下保持同一种比例。 */
+.jav-related {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 8px;
+}
+.jav-related__card {
+  /* 它是个 <button>：把这几个默认样式重置掉，否则会得到系统灰底按钮
+     加浏览器默认字体。 */
+  appearance: none;
+  font-family: var(--font-sans);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  /* 一行的卡片高度看齐：名字一行还是两行，卡都一样高。 */
+  min-height: 76px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.jav-related__card:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+/* 清单名可以很长：**最多两行**再截断。
+   只给一行会把「蒙面、眼罩、口罩、口球系列」这种名字切得看不出是什么；
+   不限行数又会让个别卡片比同排的高出一截。 */
+.jav-related__name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+/* 部数 + 箭头。颜色不跟着 .jav-related__card 的 color 走 —— 它要一直是弱化的，
+   只有在 hover 时才跟上品牌色（箭头与文字同步，所以用 currentColor）。 */
+.jav-related__count {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  transition: color 0.15s;
+}
+.jav-related__count i {
+  font-size: 9px;
+}
+.jav-related__card:hover .jav-related__count {
+  color: var(--brand);
+}
+
+/* ————————————————— 详情抽屉 ————————————————— */
+
+/* ————————————————— 详情抽屉 —————————————————
+ *
+ * 按 10.png 的版式：
+ *   标题 → 信息条 → [封面 | 信息卡 + 类别卡] → 演员(通栏) → 简介 → 预览图 → tab 区
+ *
+ * 封面正中一个大圆播放键；演员与类别都是可点的（分别跳搜索与标签筛选）。
+ */
+
+.jd-title {
+  font-size: 1.45rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+
+/* —— 信息条 —— */
+
+.jd-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.jd-meta__left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.jd-meta__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 番号：粉底白字，与源码的 num-tag 同观感。 */
+/* 番号胶囊。
+ *
+ * 底色必须是**已定义**的令牌：这里原本写的是 var(--jav-num)，而那个变量
+ * 全项目没人定义过。var() 取不到值时整条 background 声明作废（回落成
+ * 透明），而下面的 color 是写死的 #fff —— 于是白底白字，番号整块看不见，
+ * 且不报任何错。别再用没定义过的变量名。
+ * 源码这里用的是硬编码的 --pink: #c9379e，按本文件顶部第 1 条改为品牌色。 */
+.jd-num {
+  padding: 3px 10px;
+  border-radius: 7px;
+  background: var(--brand);
+  color: var(--text-on-brand);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.jd-badge {
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  color: var(--text-regular);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.jd-badge--online { background: #ff4d6d; color: #fff; }
+.jd-badge--sub { background: color-mix(in srgb, var(--brand) 14%, transparent); color: var(--brand); }
+
+.jd-meta__item {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+/* 入库状态：进出都做成醒目的胶囊，未入库用琥珀色 + ✕ —— 一眼要能看出这部收了没有。 */
+.jd-lib {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  border-radius: 9px;
+  background: var(--success);
+  color: #fff;
+  font-size: 0.92rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.jd-lib--missing { background: #b45309; }
+.jd-lib i { font-size: 0.8rem; }
+
+/* 描边按钮，与源码的 sub-btn 同款。 */
+.jd-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-regular);
+  font-size: 0.82rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.jd-btn:hover { border-color: var(--brand); color: var(--brand); }
+.jd-btn:disabled { opacity: 0.6; cursor: default; }
+
+/* 只有一个图标、没有文字的 .jd-btn（分享者弹窗里那两颗复制/推送）。
+   正方的窄按键盘：padding 收回成等宽，否则「图标 + 5px gap + 14px 内边距」
+   会撑成一个比文字按钮还宽的空壳。 */
+.jd-btn--icon {
+  padding: 6px 9px;
+}
+.jd-btn i { font-size: 0.8rem; }
+
+/* 已订阅：心形填满品牌色，且不靠悬停才显出来 —— 同一套语义见卡片角上的
+ * .jav-card__sub--on（那颗是绿底白字，因为它压在封面上；这颗在纸面上，用描边更稳）。 */
+.jd-btn--on {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 10%, transparent);
+  color: var(--brand);
+}
+
+/* —— 两栏 —— */
+
+.jd-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .jd-cols { grid-template-columns: minmax(0, 1fr); }
+}
+
+.jd-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* 封面 + 正中播放键。 */
+.jd-cover {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-sunken);
+  aspect-ratio: 3 / 2;
+}
+
+.jd-cover img,
+.jd-cover video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.jd-cover__play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fff;
+  font-size: 1.3rem;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.jd-cover__play:hover {
+  background: rgba(15, 23, 42, 0.75);
+  transform: translate(-50%, -50%) scale(1.06);
+}
+
+/* 关闭键在**右上角**。
+   早先它复用了上面的 .jd-cover__play，于是被那条 top/left:50% + translate(-50%,-50%)
+   钉在画面正中 —— 播放时正好压在原生控制条的进度条上。 */
+.jd-cover__close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fff;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.jd-cover__close:hover {
+  background: rgba(15, 23, 42, 0.8);
+}
+
+/* 通用卡片。信息 / 类别 / 演员 / 简介 / 预览图 都是它。 */
+.jd-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 14px 16px;
+}
+
+.jd-card__title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 12px;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.jd-card__title i { color: var(--text-muted); font-size: 0.85rem; }
+
+/* —— 信息行 —— */
+
+.jd-info {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.jd-info__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.85rem;
+}
+
+.jd-info__k {
+  width: 52px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.jd-info__v {
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  word-break: break-all;
+}
+
+/* 星级。众评用绿色、评分用灰色 —— 与源码两个 stars-wrap 的配色一致。 */
+.jd-stars { display: inline-flex; gap: 1px; }
+.jd-star { color: var(--border); font-size: 0.8rem; }
+.jd-stars--green .jd-star--on { color: var(--success); }
+.jd-stars--gray .jd-star--on { color: var(--text-muted); }
+
+.jd-score { font-weight: 700; color: var(--text); }
+.jd-score__count { font-style: normal; color: var(--text-muted); font-size: 0.78rem; }
+
+/* —— 类别 / 标签 —— */
+
+.jd-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.jd-tag {
+  padding: 4px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-regular);
+  font-size: 0.8rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.jd-tag:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 7%, transparent);
+}
+
+/* —— 演员 —— */
+
+.jd-actors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.jd-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 12px 4px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.jd-actor:hover { border-color: var(--brand); color: var(--brand); }
+
+.jd-actor__avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+
+.jd-actor__avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* —— 简介 —— */
+
+.jd-summary {
+  font-size: 0.85rem;
+  line-height: 1.75;
+  color: var(--text-regular);
+  white-space: pre-wrap;
+}
+
+/* —— 预览图 —— */
+
+/* 预览图：**一排**横向排开，放不下就横向滚动。
+ * 不用网格换行 —— 十几张图折成三四行会把下面的磁链区一路推到屏幕外。 */
+.jd-previews {
+  display: flex;
+  gap: 9px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 8px; /* 给滚动条留位置，否则它会压住图片底边 */
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* 细一点的滚动条。Firefox 走上面的 scrollbar-*，这里是 WebKit。 */
+.jd-previews::-webkit-scrollbar { height: 8px; }
+.jd-previews::-webkit-scrollbar-track { background: transparent; }
+.jd-previews::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.jd-previews::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+.jd-previews img {
+  flex: 0 0 auto;
+  width: 168px;
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  border-radius: 8px;
+  cursor: zoom-in;
+  scroll-snap-align: start;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.jd-previews img:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card);
+}
+
+.jd-count {
+  padding: 1px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--brand);
+  color: var(--text-on-brand);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+/* —— 关联影片 ——
+ * 与预览图同一套：一排横向滚动 + 两端圆形翻页键。
+ * 卡片是**竖版**的：上游的 thumb 是 small_covers 里 147×200 的竖图，用 3:2 会裁掉大半。
+ * 150px / 3:4 正好是它的原尺寸（150×200），也是源码 javdb-center 的 .rel-movie 用的那一组。 */
+.jd-rel-wrap {
+  position: relative;
+}
+
+.jd-rel {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 8px;
+  scroll-snap-type: x proximity;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.jd-rel::-webkit-scrollbar { height: 8px; }
+.jd-rel::-webkit-scrollbar-track { background: transparent; }
+.jd-rel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.jd-rel::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+.jd-rel__card {
+  position: relative;
+  flex: 0 0 auto;
+  width: 150px;
+  aspect-ratio: 3 / 4;
+  border-radius: 9px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-sunken);
+  cursor: pointer;
+  scroll-snap-align: start;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.jd-rel__card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-pop);
+}
+
+.jd-rel__card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 番号压在图片底部的一条深色带上 —— 竖图上直接写字会看不清。 */
+.jd-rel__num {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 14px 6px 6px;
+  background: linear-gradient(to top, rgba(15, 23, 42, 0.85), rgba(15, 23, 42, 0));
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.jd-rel__flag {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--success);
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 600;
+}
+
+.jd-rel__flag--missing { background: rgba(15, 23, 42, 0.55); }
+
+/* 两端圆形翻页键，压在卡片上。 */
+.jd-rel__nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--text-regular);
+  font-size: 1rem;
+  line-height: 1;
+  padding-bottom: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-soft);
+  transition: background 0.15s, color 0.15s;
+}
+
+.jd-rel__nav:hover { background: var(--brand); color: var(--text-on-brand); }
+.jd-rel__nav--prev { left: -12px; }
+.jd-rel__nav--next { right: -12px; }
+
+.jd-empty-hint {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+/* 全屏预览灯箱：毛玻璃背景，右上关闭、左右翻页。
+ *
+ * z-index 走全局令牌（--z-modal）而**不是**跟抽屉比大小的裸数字：灯箱虽然写在
+ * JavMovieDrawer 的模板里，但它 Teleport 到了 body，DOM 上跟 .admin-settings-drawer
+ * 是兄弟 —— 不吃抽屉的层叠上下文，两者直接按数值比。详情抽屉抬到
+ * `--z-dropdown - 10`（10040）后，这里必须高过它，否则点开大图会被抽屉整个盖住。 */
+.jd-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 56px 76px;
+  background: rgba(15, 23, 42, 0.42);
+  /* 毛玻璃。--webkit- 前缀要单独写：Safari 至今不认无前缀的那个。 */
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
+}
+
+.jd-lightbox__img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+  cursor: default;
+}
+
+.jd-lightbox__close,
+.jd-lightbox__arrow {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.jd-lightbox__close:hover,
+.jd-lightbox__arrow:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.jd-lightbox__close {
+  top: 18px;
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  font-size: 1.05rem;
+}
+
+.jd-lightbox__arrow {
+  top: 50%;
+  transform: translateY(-50%);
+  width: 52px;
+  height: 52px;
+  font-size: 1.9rem;
+  line-height: 1;
+  padding-bottom: 5px; /* 让 ‹ › 在圆里视觉居中 */
+}
+
+.jd-lightbox__arrow:hover { transform: translateY(-50%) scale(1.08); }
+.jd-lightbox__arrow--prev { left: 20px; }
+.jd-lightbox__arrow--next { right: 20px; }
+
+/* 只有一张图时不显示左右箭头 —— 点了也不会动，摆着是误导。 */
+.jd-lightbox--single .jd-lightbox__arrow { display: none; }
+
+@media (max-width: 640px) {
+  .jd-lightbox { padding: 48px 12px; }
+  .jd-lightbox__arrow { width: 40px; height: 40px; font-size: 1.5rem; }
+  .jd-lightbox__arrow--prev { left: 6px; }
+  .jd-lightbox__arrow--next { right: 6px; }
+  .jd-previews img { width: 132px; }
+  .jd-rel__card { width: 118px; }
+  /* 一排只放得下一张多一点时，翻页键会盖住卡片本身，收进内侧。 */
+  .jd-rel__nav--prev { left: -6px; }
+  .jd-rel__nav--next { right: -6px; }
+}
