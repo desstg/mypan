@@ -57,6 +57,27 @@ func (s *Service) onOfflineDownloadCompleted(ctx context.Context, event eventbus
 		if err := s.records.SetStatus(ctx, attempt.PushRecordID, domain.JavPushPushed, "", time.Now()); err != nil {
 			s.logWarn("jav mark record pushed failed", "record", attempt.PushRecordID, "err", err)
 		}
+		// 侧车（`<番号>.json`）挂在**这一处**：这是整个模块里唯一的
+		// 「推送真的成功了」判据，订阅推与手动推都汇到这里。
+		//
+		// 用推送记录取磁链名与番号，不用候选表：手动推送（PushMagnetManually）
+		// 的候选是**合成**的、ID == 0，candidates.Get(0) 取不到。
+		//
+		// 写成异步（spawnSidecarWrite 内部起 goroutine）：eventbus 是单 goroutine
+		// 串行分发，一次 115 上传 1~3 秒，内联执行会把总线堵住，连带拖慢
+		// TG 订阅那边同一个事件的订阅者。
+		if s.sidecarEnabled() {
+			if rec, rerr := s.records.Get(ctx, attempt.PushRecordID); rerr != nil {
+				s.logWarn("jav sidecar load record failed", "record", attempt.PushRecordID, "err", rerr)
+			} else if rec != nil {
+				s.spawnSidecarWrite(rec, attempt, offlineCompletedEvent{
+					AccountID:      event.AccountID,
+					TargetParentID: event.TargetParentID,
+					FileID:         event.FileID,
+					DisplayPath:    event.TargetDisplayPath,
+				})
+			}
+		}
 	}
 
 	// 整条订阅的推进状态要重算：这一步决定它是不是「全推完了」。

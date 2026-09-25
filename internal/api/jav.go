@@ -135,37 +135,32 @@ func (h *Handler) javSearch(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, res)
 }
 
-// javRanking 统一处理四种榜单。
+// javRanking 统一处理 Top250 与演员榜。
 //
-// kind 从 URL 里取，param 是榜单自己的参数（Top250 的 type、演员榜的 type）。
+// kind 从 URL 里取，其余参数按 kind 各取各的：
+//   - top250：type（all / video_type / year）+ type_value
+//   - actor：type（0 有码 / 1 无码 / 2 欧美）
 func (h *Handler) javRanking(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !h.javReady(w) {
 			return
 		}
-		param := r.URL.Query().Get("type")
-		if period := r.URL.Query().Get("period"); period != "" {
-			param = period
-		}
+		q := r.URL.Query()
 		// refresh=1 绕过榜单缓存，强制回上游。界面上暂时没有这颗按钮，
 		// 但留着这个口子，将来加「刷新榜单」就是一行的事。
-		movies, actors, err := h.jav.Ranking(r.Context(), kind, param,
-			queryIntDefault(r, "page", 1), r.URL.Query().Get("refresh") != "")
-		if err != nil {
-			writeErr(w, err)
-			return
+		query := jav.RankingQuery{
+			Kind:      kind,
+			Type:      q.Get("type"),
+			TypeValue: q.Get("type_value"),
+			Page:      queryIntDefault(r, "page", 1),
+			Refresh:   q.Get("refresh") != "",
 		}
-		if movies == nil {
-			movies = []jav.MovieCard{}
-		}
-		if actors == nil {
-			actors = []jav.ActorView{}
-		}
-		writeOK(w, map[string]any{"movies": movies, "actors": actors})
+		writeRanking(w, r, h, query)
 	}
 }
 
-// javHotRanking 是热播榜，period 单独一个参数。
+// javHotRanking 是日/周/月榜。period 与 type 是两个独立参数：
+// period 选档（daily/weekly/monthly），type 选内容分类（0/1/2/3）。
 func (h *Handler) javHotRanking(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {
 		return
@@ -179,16 +174,37 @@ func (h *Handler) javHotRanking(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, domain.Errorf(domain.CodeValidation, "未知的榜单周期：%s", period))
 		return
 	}
-	movies, _, err := h.jav.Ranking(r.Context(), period, "",
-		queryIntDefault(r, "page", 1), r.URL.Query().Get("refresh") != "")
+	q := r.URL.Query()
+	writeRanking(w, r, h, jav.RankingQuery{
+		Kind:    period,
+		Type:    q.Get("type"),
+		Page:    queryIntDefault(r, "page", 1),
+		Refresh: q.Get("refresh") != "",
+	})
+}
+
+// writeRanking 跑一次榜单查询并把结果写出去。
+//
+// 响应里带上 total：日/周/月榜是**整榜条数**（官网一次给 60 条，本地切片翻页），
+// 前端据此算总页数，不必再靠「这一页拿满了没」去猜 —— 那个猜法在 60 条 20 一页时
+// 会算出 4 页，多出一个空页。
+func writeRanking(w http.ResponseWriter, r *http.Request, h *Handler, query jav.RankingQuery) {
+	res, err := h.jav.Ranking(r.Context(), query)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if movies == nil {
-		movies = []jav.MovieCard{}
+	if res.Movies == nil {
+		res.Movies = []jav.MovieCard{}
 	}
-	writeOK(w, map[string]any{"movies": movies})
+	if res.Actors == nil {
+		res.Actors = []jav.ActorView{}
+	}
+	writeOK(w, map[string]any{
+		"movies": res.Movies,
+		"actors": res.Actors,
+		"total":  res.Total,
+	})
 }
 
 // javLocalMovies 列本地影库（影库页）。
@@ -301,6 +317,11 @@ func (h *Handler) javPushMagnet(w http.ResponseWriter, r *http.Request) {
 		Magnet   string `json:"magnet"`
 		Name     string `json:"name"`
 		SizeText string `json:"size_text"`
+		// Source 标出这颗资源的来处：详情页的磁链 tab 不传，
+		// 「评论区分享」档传 "comment"。它一路会写进推送记录与元数据侧车
+		// （记录页的「评论分享」标签、侧车的 resource.from_comment）——
+		// 不传的话那两处会恒为假，而这两条路前端共用同一个推送入口。
+		Source string `json:"source"`
 	}
 	if err := decodeJSON(r, &in); err != nil {
 		writeErr(w, err)
@@ -310,7 +331,8 @@ func (h *Handler) javPushMagnet(w http.ResponseWriter, r *http.Request) {
 	if link == "" {
 		link = in.Magnet
 	}
-	res, err := h.jav.PushMagnetManually(r.Context(), chi.URLParam(r, "id"), link, in.Name, in.SizeText)
+	res, err := h.jav.PushMagnetManually(r.Context(), chi.URLParam(r, "id"), link,
+		in.Name, in.SizeText, strings.TrimSpace(in.Source))
 	if err != nil {
 		writeErr(w, err)
 		return

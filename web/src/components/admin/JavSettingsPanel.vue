@@ -110,6 +110,7 @@ type JavDraft = {
   sub_interval_min_sec: number;
   sub_interval_max_sec: number;
   sub_timeout_sec: number;
+  sidecar_enabled: boolean;
   default_account_id: number;
   default_parent_id: string;
   default_display_path: string;
@@ -141,6 +142,7 @@ const draft = reactive<JavDraft>({
   sub_interval_min_sec: 3,
   sub_interval_max_sec: 10,
   sub_timeout_sec: 30,
+  sidecar_enabled: true,
   default_account_id: 0,
   default_parent_id: "",
   default_display_path: "",
@@ -172,6 +174,7 @@ function snapshot() {
     sub_interval_min_sec: draft.sub_interval_min_sec,
     sub_interval_max_sec: draft.sub_interval_max_sec,
     sub_timeout_sec: draft.sub_timeout_sec,
+    sidecar_enabled: draft.sidecar_enabled,
     default_account_id: draft.default_account_id,
     default_parent_id: draft.default_parent_id,
     default_display_path: draft.default_display_path,
@@ -210,6 +213,7 @@ function applyConfig(cfg: JavConfig) {
   draft.sub_interval_min_sec = cfg.sub_interval_min_sec;
   draft.sub_interval_max_sec = cfg.sub_interval_max_sec;
   draft.sub_timeout_sec = cfg.sub_timeout_sec;
+  draft.sidecar_enabled = cfg.sidecar_enabled;
   draft.default_account_id = cfg.default_account_id;
   draft.default_parent_id = cfg.default_parent_id;
   draft.default_display_path = cfg.default_display_path;
@@ -556,7 +560,10 @@ onMounted(async () => {
 
           <SettingsRow>
             <template #info>
-              <SettingsRowLabel label="JAVBUS 域名" />
+              <SettingsRowLabel
+                label="JAVBUS 域名"
+                help-text="磁链的备用来源。JAVDB 的磁链接口已经覆盖有码/无码/欧美/FC2 四档，JAVBUS 是日式有码站的库、只对那一档有补充；两个来源的结果会合并去重。"
+              />
             </template>
             <template #control>
               <AppInput v-model="draft.javbus_base" placeholder="https://www.javbus.com" style="width: 260px" />
@@ -738,6 +745,22 @@ onMounted(async () => {
               <AppInput v-model.number="draft.sub_timeout_sec" type="number" style="width: 100px" />
             </template>
             </SettingsRow>
+
+          <SettingsRow>
+            <template #info>
+              <SettingsRowLabel
+                label="推送时写入元数据文件"
+                help-title="推送时写入元数据文件"
+                help-text="下载完成后，在资源所在的那一层目录里写一个 `<番号>.json`，含番号/演员/片商/标签/画质标记，以及封面、剧照、预告片的原始地址和落盘时的真实文件名。以后想建 nfo、改名、给 Emby 补封面图与剧照，读这个文件就有全部起点，不必再去抓一遍 JAVDB。它不额外请求上游，也不改推送行为；写失败只记日志，不会影响「已推送」这个结论。"
+              />
+            </template>
+            <template #control>
+              <label style="display: inline-flex; gap: 5px; align-items: center; font-size: 12.5px">
+                <input v-model="draft.sidecar_enabled" type="checkbox" />
+                启用
+              </label>
+            </template>
+          </SettingsRow>
 
           <SettingsRow>
             <template #info>

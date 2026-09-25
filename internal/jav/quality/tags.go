@@ -187,6 +187,23 @@ func (t Tags) ResolutionLabel() string {
 	}
 }
 
+// ResolutionLabelWithSize 是**带体积兜底**的档位名，与 ResolutionBadge 共用
+// 同一套优先级（名字优先，名字没表态时 > 18GB 算超清）。
+//
+// 为什么需要它而不是直接叫 ResolutionLabel：那两个出口的判定不同源时，
+// 同一颗磁链会得到「角标写着 4K、档位却是空」这种自相矛盾的结论 ——
+// 而档位是要写进元数据给外部读取方（nfo 生成器）用的，自相矛盾会被它当真。
+func (t Tags) ResolutionLabelWithSize(sizeBytes int64) string {
+	switch t.ResolutionWithSize(sizeBytes) {
+	case 2:
+		return "超清"
+	case 1:
+		return "高清"
+	default:
+		return ""
+	}
+}
+
 // ResolutionWithSize 是**带体积兜底**的档位，排序与洗版判定用这个。
 //
 // 与 Resolution() 只差最后一步：名字里完全没有分辨率信号时，> 18GB 直接进超清档

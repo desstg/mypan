@@ -20,6 +20,13 @@ var (
 	reCodeFC2      = regexp.MustCompile(`(?i)FC2`)
 	reCodeDateSeq  = regexp.MustCompile(`\d{6}[-_]\d{2,3}`)
 
+	// reCodeDateSeqFull 是日期序号型的**整串**形态（`091926-001` / `092426_01`）。
+	//
+	// 与上面那个的区别：那个是「名字里含番号」，这个锚定整串、是「番号本体就是
+	// 日期序号型」。用途不同，别合并 —— 合并了 `ABF-123-091926-001` 这种名字
+	// 也会被当成日期序号型番号。用它的只有 station.go 的 IsDateSeqCode。
+	reCodeDateSeqFull = regexp.MustCompile(`^\d{6}[-_]\d{2,3}$`)
+
 	// 提取番号用（比识别更严：必须带数字），给「只保留番号」命名模式和试跑预览用。
 	reCodeExtract = regexp.MustCompile(`(?i)([A-Z]{2,6}-\d{2,5}|FC2[\w-]*\d+|\d{6}[-_]\d{2,3})`)
 
@@ -66,6 +73,16 @@ func RenameFilename(name string, rules Rules) string {
 // 「到底哪条规则生效了」—— 用 trace 参数而不是另写一份带日志的版本，
 // 是为了保证预览与实际执行**永远不会走岔**。
 func rename(name string, rules Rules, tr *trace) string {
+	// 欧美点分型走自己那条路：只截到番号为止（`Tushy.26.02.22.kazumi…` → `TUSHY.26.02.22`）。
+	//
+	// 放在 HasCode 之前，而且**刻意不让 HasCode 认点分型** —— 那种名字一旦走进下面
+	// 那一整套（删水印/删汉字/压缩空格/转大写），会得到
+	// `BLACKED.26.05.03.NICOLE.DOSHI.XXX.1080P.MP4-P2P` 这种又长又不像番号的东西，
+	// 而不是用户要的「与侧车 json 同名」。见 station.go 的 IsWesternCode。
+	if code, tail := WesternCode(name); code != "" {
+		tr.add("欧美点分型番号，只保留番号")
+		return code + tail
+	}
 	if !HasCode(name) {
 		tr.add("无番号，按原样保留")
 		return name
@@ -372,7 +389,7 @@ func classifyFiltered(name string, rules []ClassifyRule, skipNocode bool) int {
 //
 // 偏偏 junk 表里全是带点的水印（`hhd800.com@`、`4k2.com@`、`www.98T.la@`…），
 // 所以这不是罕见边角，而是这类库的**常态** —— 带水印前缀的目录会被整批塞进
-// 「国产无番号」，哪怕它们清出来就是标准番号。
+// 兜底分类（默认「无匹配」），哪怕它们清出来就是标准番号。
 //
 // 三轮，顺序固定：
 //  1. 原名匹配，跳过「无番号」这类兜底 —— 原名能明确归类的，判罚不变，老库不受影响

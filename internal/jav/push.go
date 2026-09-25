@@ -111,7 +111,13 @@ func (s *Service) autoPush(ctx context.Context, sub *domain.JavSubscription, for
 //
 // **必须留下一次 attempt**（deliverCandidate 会做）：完成事件靠离线任务 id 反查
 // attempt 才能把记录翻成 pushed。少了它，「推了却永远显示 0」会再回来一次。
-func (s *Service) PushMagnetManually(ctx context.Context, movieID, linkURI, linkName, sizeText string) (*PushResultView, error) {
+//
+// source 是这颗资源的来源，取值只有两种：空串（详情页的磁链 tab）与
+// domain.JavSourceComment（「评论区分享」档里那颗）。**订阅推那条路不需要它** ——
+// 候选表里本来就存了 source；而手动推的候选是合成的，不显式传就永远推不出
+// 「这是评论里分享出来的」，于是记录页的「评论分享」标签与元数据侧车里的
+// resource.from_comment 都会恒为假。两处读的是同一个字段，所以只在这一个入口收。
+func (s *Service) PushMagnetManually(ctx context.Context, movieID, linkURI, linkName, sizeText, source string) (*PushResultView, error) {
 	movieID = strings.TrimSpace(movieID)
 	linkURI = strings.TrimSpace(linkURI)
 	if movieID == "" {
@@ -119,6 +125,11 @@ func (s *Service) PushMagnetManually(ctx context.Context, movieID, linkURI, link
 	}
 	if linkURI == "" {
 		return nil, domain.Errorf(domain.CodeValidation, "链接为空")
+	}
+	// 认不出的来源**归一成空串**而不是报错：它是个标注，不是推送能不能做的前提 ——
+	// 为一个前端拼错的字符串把整次推送拦下来，代价与收益不相称。
+	if source != domain.JavSourceComment {
+		source = ""
 	}
 	// 链接种类在**建 attempt 与推送记录之前**就校验掉。
 	//
@@ -154,6 +165,7 @@ func (s *Service) PushMagnetManually(ctx context.Context, movieID, linkURI, link
 		MagnetName:          linkName,
 		SizeText:            sizeText,
 		ResourceFingerprint: fp,
+		Source:              source,
 	}
 	res, err := s.deliverCandidate(ctx, sub, cand, quality.AutoPushKey(sub.ID, fp))
 

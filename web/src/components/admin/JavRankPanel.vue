@@ -1,19 +1,29 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-import AppPagination from "@/components/base/AppPagination.vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import AppSelect from "@/components/base/AppSelect.vue";
 import JavMovieCard from "@/components/admin/JavMovieCard.vue";
 import { getApiErrorMessage } from "@/api/client";
 import { fetchJavRanking, javImageURL } from "@/api/jav";
-import type { JavActor, JavMovieCard as JavCard, JavRankingKind } from "@/types/jav";
+import {
+  JAV_RANK_TYPE_TABS,
+  javTopTypeOptions,
+  javTopTypeParams,
+  type JavActor,
+  type JavMovieCard as JavCard,
+  type JavRankingKind,
+} from "@/types/jav";
 import "@/styles/jav.css";
 
 /**
  * 榜单页。照源码 top250.html：
- *   五档 tab（Top250 / 日榜 / 周榜 / 月榜 / 演员榜）+ 卡片网格 + 分页。
+ *   五档 tab（Top250 / 日榜 / 周榜 / 月榜 / 演员榜）+ 卡片网格。
  *
- * 每页条数与源码一致：Top250 = 40、日/周/月榜 = 20、演员榜一次取 500 不分页。
- * 这几个数不是随手定的 —— 热播榜上游一次就给整榜，本地切片翻页即可；
- * Top250 是真的分页接口，页大小跟着走。
+ * 每页条数：Top250 = 40、日/周/月榜 = 20、演员榜一次取 500 不分页。
+ * 这几个数不是随手定的 —— 日/周/月榜上游一次就给整榜（实测固定 60 条），
+ * 本地切片翻页即可；Top250 是真的分页接口，页大小跟着走。
+ *
+ * 翻页用**拉到底自动加载**（内网那套也是这个交互）：日/周/月榜整榜只有 60 条、
+ * Top250 是无限榜，都比点分页器顺手。
  */
 const props = defineProps<{
   /** 已订阅的目标集合，键是 `${target_type}:${target_id}`。 */
@@ -40,36 +50,57 @@ const TABS: Array<{ key: JavRankingKind; label: string; icon: string }> = [
 const kind = ref<JavRankingKind>("daily");
 const page = ref(1);
 const loading = ref(false);
+/** loadingMore 是「拉下一页中」，与首次/切档的 loading 分开 —— 前者只在底部转圈。 */
+const loadingMore = ref(false);
 const movies = ref<JavCard[]>([]);
 const actors = ref<JavActor[]>([]);
 const error = ref("");
 
-/** 每页条数：与源码一致。演员榜不分页，所以恒为 1。 */
-const PER_PAGE: Record<JavRankingKind, number> = {
-  top250: 40,
-  daily: 20,
-  weekly: 20,
-  monthly: 20,
-  actor: 500,
-};
+/**
+ * 内容分类。三档榜单共用这一个 ref，切 tab 时按各自的可用档位校正。
+ *
+ * 语义随榜单变：日/周/月与演员榜是 0/1/2/3；Top250 走 topType 那个下拉，
+ * 用的是上游的 all / video_type / year，两套编码别混。
+ */
+const rankType = ref("0");
+/** Top250 的下拉值：空 = 全部，'0'..'3' = 分类，四位年份 = 年份。 */
+const topType = ref("");
 
-/** 条数胶囊显示的数字。Top250 就是 250（源站固定榜单），其余按实际拿到多少。 */
+/** 日/周/月榜与演员榜的分类胶囊。演员榜不给 FC2（上游静默回落成有码）。 */
+const typeTabs = computed(() =>
+  kind.value === "actor"
+    ? JAV_RANK_TYPE_TABS.filter((t) => t.value !== "3")
+    : JAV_RANK_TYPE_TABS,
+);
+
+const topTypeOptions = computed(() => javTopTypeOptions());
+
+/** 服务端报的总条数。整榜 60 / Top250 的 250 / 演员数。 */
+const total = ref(0);
+
+/** 条数胶囊显示的数字。Top250 就是 250（源站固定榜单），其余按服务端报的来。 */
 const count = computed(() => {
-  if (kind.value === "top250") return 250;
-  if (kind.value === "actor") return actors.value.length;
-  // 热播榜一次给整榜，但本地只拿到切片 —— 用总条数才准确，拿不到就退回当前页条数。
-  return totalMovies.value || movies.value.length;
+  if (kind.value === "top250") return total.value || 250;
+  if (kind.value === "actor") return actors.value.length || total.value;
+  return total.value || movies.value.length;
 });
 
-/** 热播榜的总条数。分页要靠它算总页数。 */
-const totalMovies = ref(0);
-
-const totalPages = computed(() => {
-  if (kind.value === "actor") return 1;
-  const total = kind.value === "top250" ? 250 : totalMovies.value;
-  if (!total) return 1;
-  return Math.max(1, Math.ceil(total / PER_PAGE[kind.value]));
+/**
+ * 还有没有下一页。
+ *
+ * 靠**服务端报的 total** 算，不再用「这一页拿满了没」去猜 —— 那个猜法在
+ * 整榜 60 条、每页 20 时会得出「还有第 4 页」，拉下去是一个空页。
+ */
+const hasMore = computed(() => {
+  if (kind.value === "actor") return false;
+  if (!total.value) return false;
+  return movies.value.length < total.value;
 });
+
+/** 底部那条状态文案该不该显示。演员榜不分页、出错、首屏还没回来时都不显示。 */
+const showLoadMore = computed(
+  () => !error.value && kind.value !== "actor" && (loadingMore.value || movies.value.length > 0),
+);
 
 /** 卡片上的订阅状态键。演员榜用的是演员类型。 */
 function movieKey(movie: JavCard) {
@@ -80,50 +111,108 @@ function actorKey(actor: JavActor) {
   return `actor:${actor.id.toLowerCase()}`;
 }
 
-async function load() {
-  loading.value = true;
-  error.value = "";
+/** 当前榜单对应的请求参数。 */
+function requestOptions(extra?: { page?: number }) {
+  if (kind.value === "top250") {
+    const { type, typeValue } = javTopTypeParams(topType.value);
+    return { type, typeValue, page: extra?.page ?? page.value };
+  }
+  return { type: rankType.value, page: extra?.page ?? page.value };
+}
+
+/** load 拉一页。append 为 true 时接在现有列表后面（拉到底加载）。 */
+async function load(append = false) {
+  if (append) {
+    if (loading.value || loadingMore.value || !hasMore.value) return;
+    loadingMore.value = true;
+  } else {
+    loading.value = true;
+    error.value = "";
+  }
+  const target = append ? page.value + 1 : page.value;
   try {
-    const res = await fetchJavRanking(kind.value, { page: page.value });
-    movies.value = res.movies ?? [];
-    actors.value = res.actors ?? [];
-    // 热播榜后端一次给整榜再本地切片，所以只能自己估总数：
-    // 拿满一页就说明后面还有。估错顶多多一个空页，比显示「共 1 页」然后
-    // 用户找不到下一页要好。
-    if (kind.value !== "top250" && kind.value !== "actor") {
-      const filled = movies.value.length >= PER_PAGE[kind.value];
-      totalMovies.value = filled
-        ? page.value * PER_PAGE[kind.value] + 1
-        : (page.value - 1) * PER_PAGE[kind.value] + movies.value.length;
+    const res = await fetchJavRanking(kind.value, requestOptions({ page: target }));
+    const next = res.movies ?? [];
+    if (append) {
+      // 按 id 去重再拼：榜单在两次请求之间可能变动，重复的 key 会让 Vue 报
+      // 「Duplicate keys」并且渲染错位。
+      const seen = new Set(movies.value.map((m) => m.id));
+      movies.value = [...movies.value, ...next.filter((m) => !seen.has(m.id))];
+    } else {
+      movies.value = next;
+      actors.value = res.actors ?? [];
     }
+    total.value = res.total ?? 0;
+    page.value = target;
   } catch (err) {
+    // 追加失败保持已有内容：滚到一半一次请求失败，不该把看过的一屏清空。
+    // 首屏失败才清空（那份数据本来就是空的）。
     error.value = getApiErrorMessage(err, "榜单加载失败");
-    movies.value = [];
-    actors.value = [];
+    if (!append) {
+      movies.value = [];
+      actors.value = [];
+      total.value = 0;
+    }
   } finally {
     loading.value = false;
+    loadingMore.value = false;
   }
+}
+
+/** reset 回到第一页并重新拉。切 tab / 切分类都走它。 */
+function reset() {
+  page.value = 1;
+  total.value = 0;
+  movies.value = [];
+  actors.value = [];
+  error.value = "";
+  void load();
 }
 
 function selectTab(next: JavRankingKind) {
   if (kind.value === next) return;
   kind.value = next;
-  page.value = 1;
-  totalMovies.value = 0;
-  void load();
+  // 演员榜没有 FC2 这一档，从日榜带着 3 切过去会显示有码的名单挂在 FC2 下 ——
+  // 上游 type=3 就是静默回落成 0 的。切过去时先归到有码。
+  if (next === "actor" && rankType.value === "3") rankType.value = "0";
+  reset();
 }
 
-function goPage(next: number) {
-  if (next === page.value) return;
-  page.value = next;
-  void load();
+function pickType(next: string) {
+  if (rankType.value === next) return;
+  rankType.value = next;
+  reset();
 }
 
-watch(page, () => {
-  window.scrollTo({ top: 0, behavior: "smooth" });
+watch(topType, () => reset());
+
+// ————————————————————— 拉到底自动加载 —————————————————————
+//
+// 内网那套也是这个交互（IntersectionObserver + 底部哨兵），比点分页器顺手：
+// 日/周/月榜整榜只有 60 条，Top250 本身就是个无限榜。
+//
+// 哨兵**常驻 DOM**（不是 v-if）—— 它一旦被移除，挂在它上面的观察器就再也
+// 收不到回调了。这一条与影库那一档（JavLibraryPanel）是同一个写法。
+const sentinel = ref<HTMLElement | null>(null);
+let observer: IntersectionObserver | null = null;
+
+onMounted(() => {
+  void load();
+  if (typeof IntersectionObserver === "undefined" || !sentinel.value) return;
+  observer = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((e) => e.isIntersecting)) void load(true);
+    },
+    // 提前 300px 就开始拉，滚到底时下一页通常已经在了 —— 与影库同一档间距。
+    { rootMargin: "300px" },
+  );
+  observer.observe(sentinel.value);
 });
 
-onMounted(load);
+onBeforeUnmount(() => {
+  observer?.disconnect();
+  observer = null;
+});
 </script>
 
 <template>
@@ -133,6 +222,8 @@ onMounted(load);
       <span class="jav-rank-count">{{ count }}</span>
     </div>
 
+    <!-- 榜单档位与内容分类**同一排**，中间一条短竖线隔开 —— 两者是同一层的
+         两个维度（看哪份榜 × 看哪一类），拆成两行会让人以为是主从关系。 -->
     <div class="jav-tabs">
       <button
         v-for="tab in TABS"
@@ -144,6 +235,27 @@ onMounted(load);
       >
         <span aria-hidden="true">{{ tab.icon }}</span>{{ tab.label }}
       </button>
+
+      <template v-if="kind !== 'top250'">
+        <span class="jav-tabs__sep" aria-hidden="true"></span>
+        <button
+          v-for="t in typeTabs"
+          :key="t.value"
+          type="button"
+          class="jav-tab"
+          :class="{ 'jav-tab--active': rankType === t.value }"
+          @click="pickType(t.value)"
+        >
+          {{ t.label }}
+        </button>
+      </template>
+    </div>
+
+    <!-- Top250 那一档的分类不是四颗胶囊而是一个「分类/年份」下拉，塞进同一排会把
+         那排撑得很长，所以它仍然单独一行。 -->
+    <div v-if="kind === 'top250'" class="jav-rank-controls">
+      <span class="jav-rank-controls__label">分类</span>
+      <AppSelect v-model="topType" :options="topTypeOptions" style="width: 150px" />
     </div>
 
     <div v-if="error" class="jav-empty">
@@ -208,7 +320,7 @@ onMounted(load);
           v-for="(movie, index) in movies"
           :key="movie.id"
           :movie="movie"
-          :rank="kind === 'top250' ? (page - 1) * PER_PAGE.top250 + index + 1 : 0"
+          :rank="kind === 'top250' ? index + 1 : 0"
           :subscribed="subscribedKeys.has(movieKey(movie))"
           @open="emit('open', movie)"
           @subscribe="emit('subscribe', movie)"
@@ -218,10 +330,22 @@ onMounted(load);
         <div class="jav-empty__icon">⭐</div>
         <div>暂无数据。</div>
       </div>
-
-      <div v-if="!loading && totalPages > 1" class="jav-pagination">
-        <AppPagination :page="page" :total-pages="totalPages" @update:page="goPage" />
-      </div>
     </template>
+
+    <!-- 滚动到底自动续上。
+         哨兵**常驻 DOM**（不放在上面的 v-if/v-else 分支里）—— 挂在它上面的
+         IntersectionObserver 是 onMounted 时挂一次的，一旦它被移除就再也收不到
+         回调；而切 tab 会让分支重渲染。所以它留在这层。
+         没有文案时（演员榜不分页、出错、首屏还没回来）用 --idle 把高度收掉，
+         免得底部留一条空白。 -->
+    <div
+      ref="sentinel"
+      class="jav-loadmore"
+      :class="{ 'jav-loadmore--idle': !showLoadMore }"
+    >
+      <span v-if="loadingMore">加载中…</span>
+      <span v-else-if="hasMore">往下滚，还有 {{ total - movies.length }} 条</span>
+      <span v-else-if="movies.length">已全部加载（{{ total }} 条）</span>
+    </div>
   </div>
 </template>

@@ -373,28 +373,53 @@ func TestPlanClassify(t *testing.T) {
 			dirs = append(dirs, a)
 		}
 	}
-	if len(moves) != 1 {
-		t.Fatalf("分类移动条数 = %d, 期望 1（FC2PPV 那个目录）", len(moves))
+	// 黄金树里有三个东西会被分类：既有的 `FC2PPV-1234567 无码/` 目录，
+	// 以及本轮为平铺的两个视频**刚建**的 `ABP-123/` 与 `普通家庭录像/`
+	// —— 后者是「一轮到位」带来的（以前要跑两轮）。见 stageClassify 的注释。
+	if len(moves) != 3 {
+		t.Fatalf("分类移动条数 = %d, 期望 3（FC2PPV 目录 + 本轮新建的 ABP-123 与 普通家庭录像）", len(moves))
 	}
-	if moves[0].SourceName != "FC2PPV-1234567 无码" {
-		t.Errorf("被分类的目录名 = %q", moves[0].SourceName)
+	byName := map[string]moplan.PlanAction{}
+	for _, m := range moves {
+		byName[m.TargetName] = m
 	}
-	// 分类动作的 target_name 必须是**改完名之后**的名字。带旧名去搬，执行器会在落地后
-	// 照 target_name 再改一次名，把阶段 5 刚改好的目录名又改回去。
-	if moves[0].TargetName != "FC2PPV-1234567" {
-		t.Errorf("分类移动要带改名后的名字，得到 %q", moves[0].TargetName)
+	// 既有子目录那一条：带**改名后**的名字去搬。
+	// 带旧名去搬，执行器会在落地后照 target_name 再改一次名，把阶段 5 刚改好的名字又改回去。
+	fc2, ok := byName["FC2PPV-1234567"]
+	if !ok {
+		t.Fatalf("应当有一条搬 FC2PPV-1234567 的动作，got %v", byName)
 	}
-	if len(dirs) != 1 {
-		t.Fatalf("分类目标目录条数 = %d, 期望 1", len(dirs))
+	if fc2.SourceName != "FC2PPV-1234567 无码" {
+		t.Errorf("被分类的目录名 = %q", fc2.SourceName)
 	}
-	if dirs[0].TargetName != "FC2" {
-		t.Errorf("分类目标目录名 = %q, 期望 FC2（来自规则 target_name）", dirs[0].TargetName)
+	// 本轮新建目录那一条：源 ID 是 `ref:<那条 ensure_dir>`（扫描树里没有它）。
+	abp, ok := byName["ABP-123"]
+	if !ok {
+		t.Fatalf("应当有一条搬本轮新建的 ABP-123 的动作，got %v", byName)
 	}
-	if dirs[0].TargetParentID != target {
-		t.Errorf("分类目标应建在任务的目标根下，得到 %q", dirs[0].TargetParentID)
+	if !strings.HasPrefix(abp.SourceID, moplan.RefPrefix) {
+		t.Errorf("本轮新建的目录要用 ref: 引用它的 ensure_dir，得到 SourceID=%q", abp.SourceID)
 	}
-	if moves[0].TargetParentID != moplan.RefPrefix+dirs[0].ID {
-		t.Errorf("分类移动应引用分类目标目录：%q vs %q", moves[0].TargetParentID, moplan.RefPrefix+dirs[0].ID)
+	// 「无番号」兜底同样适用：平铺的无番号视频建的目录也要归位。
+	if _, ok := byName["普通家庭录像"]; !ok {
+		t.Errorf("本轮新建的 普通家庭录像 也应当被分类（命中「无番号」兜底），got %v", byName)
+	}
+	// 三个分类目标目录：FC2（素人）/ 日本AV / 无匹配（兜底）。
+	if len(dirs) != 3 {
+		t.Fatalf("分类目标目录条数 = %d, 期望 3（FC2 / 日本AV / 无匹配）", len(dirs))
+	}
+	targets := map[string]string{} // 目标名 → ensure_dir 的动作 ID
+	for _, d := range dirs {
+		targets[d.TargetName] = d.ID
+		if d.TargetParentID != target {
+			t.Errorf("分类目标 %q 应建在任务的目标根下，得到 %q", d.TargetName, d.TargetParentID)
+		}
+	}
+	if _, ok := targets["FC2"]; !ok {
+		t.Errorf("应当建 FC2 分类目标（来自规则 target_name），got %v", targets)
+	}
+	if fc2.TargetParentID != moplan.RefPrefix+targets["FC2"] {
+		t.Errorf("分类移动应引用分类目标目录：%q vs %q", fc2.TargetParentID, moplan.RefPrefix+targets["FC2"])
 	}
 }
 
@@ -602,10 +627,13 @@ func TestPlanProtectsTargetRoot(t *testing.T) {
 		if a.SourceID == lib {
 			t.Errorf("分类目标根不该被本任务改动：%+v", a)
 		}
-		// 库里的东西不能被「分类移动」搬出去 —— 分类只扫源目录的一级子目录，
-		// 加上库根本身受保护，所以一条都不该有
-		if stage, _ := a.Metadata["stage"].(string); stage == stageClassify {
-			t.Errorf("库根受保护时不该产生任何分类动作：%+v", a)
+		// 库**里面**的东西不能被「分类移动」搬出去 —— 分类只扫源目录的一级子目录，
+		// 库根本身受保护，所以库里那条子目录一条分类动作都不该有。
+		//
+		// 注意：`ABP-123/` 是本轮为平铺视频**刚建**的目录，它不在库里，会被正常分类 ——
+		// 那是「一轮到位」的设计（见 stageClassify），不是这里要拦的东西。
+		if stage, _ := a.Metadata["stage"].(string); stage == stageClassify && a.SourceName == "FC2PPV-1234567 无码" {
+			t.Errorf("库根里的子目录不该被分类搬出去：%+v", a)
 		}
 	}
 	if !anySkippedContains(plan, "分类目标根") {

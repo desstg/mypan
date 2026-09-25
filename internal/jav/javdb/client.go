@@ -61,8 +61,8 @@ type Options struct {
 	Password string
 	Token    string
 	APIBase  string
-	// SiteBase 是官网地址，只有抓清单页（ListPage）用得上 —— 那是 HTML 抓取，
-	// 走的是另一个域名。留空则用 defaultSiteBase。
+	// SiteBase 是官网地址，只有抓官网清单页（ListPage）用得上 ——
+	// 那是 HTML 抓取，走的是另一个域名。留空则用 defaultSiteBase。
 	SiteBase    string
 	Timeout     time.Duration
 	MinInterval time.Duration
@@ -127,9 +127,21 @@ func New(opts Options) (*Client, error) {
 	}
 
 	return &Client{
-		apiBase:     base,
-		siteBase:    siteBase,
-		http:        &http.Client{Timeout: timeout, Transport: transport},
+		apiBase:  base,
+		siteBase: siteBase,
+		http: &http.Client{
+			Timeout:   timeout,
+			Transport: transport,
+			// **不跟随重定向。**
+			//
+			// 官网对「要登录才给看」的页面是 302 → /login。跟随下去会拿到登录页的
+			// HTML、HTTP 还是 200、解析出 0 条 —— 于是界面上是一片空白，而真正的原因
+			// 是没登录；调用方还会把那个空页当成「翻到底了」。那是「静默变空」那一族，
+			// 必须在这一层拦住：不跟随，让 302 原样回去变成一个看得见的错误。
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		minInterval: opts.MinInterval,
 		retries:     max(opts.Retries, 1),
 		token:       strings.TrimSpace(opts.Token),

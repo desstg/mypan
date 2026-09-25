@@ -5,8 +5,8 @@ import (
 	"log/slog"
 
 	"litepan/internal/domain"
+	"litepan/internal/driver"
 	"litepan/internal/eventbus"
-	"litepan/internal/file"
 	"litepan/internal/offlinedownload"
 	"litepan/internal/settings"
 )
@@ -42,9 +42,20 @@ type Options struct {
 	// 假实现只要十来行，而真实实现天然满足它。
 	Offline OfflinePusher
 
-	// Folders 用来确保推送目标下的子目录存在。为空时不做子目录，
-	// 资源直接落在目标目录里。
-	Folders *file.Service
+	// Folders 用来确保推送目标下的子目录存在，以及给推送成功的资源写元数据侧车。
+	// 为空时不做子目录（资源直接落在目标目录里）、也不写侧车。
+	Folders FolderStore
+}
+
+// FolderStore 是 file.Service 的一个窄切面：建目录 / 列目录 / 查条目 / 上传小文件。
+//
+// 类型是窄接口而不是 *file.Service，只为让测试注入桩 —— 与 Offline 同一个理由。
+// *file.Service 天然满足它，接线处一行都不用改。
+type FolderStore interface {
+	CreateFolder(ctx context.Context, accountID int64, parentID, name string) (*domain.FileItem, error)
+	List(ctx context.Context, accountID int64, parentID string, forceRefresh bool) ([]domain.FileItem, error)
+	Info(ctx context.Context, accountID int64, fileID string) (*domain.FileItem, error)
+	UploadLocal(ctx context.Context, accountID int64, req driver.LocalUploadRequest) (*driver.LocalUploadResult, error)
 }
 
 // OfflinePusher 是离线下载服务的一个很窄的切面：探能力 + 提交。

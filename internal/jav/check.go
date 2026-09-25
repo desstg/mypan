@@ -196,9 +196,9 @@ func (s *Service) runCheck(ctx context.Context, sub *domain.JavSubscription, run
 		magnets, merr := s.ensureMagnets(ctx, mv)
 		if merr != nil {
 			// 一部片抓不到磁链不该中断整轮检查：演员订阅里有几百部，
-			// 其中几部在 JAVBUS 上没有资源是常态。
+			// 其中几部两个来源都没有资源是常态。
 			s.logWarn("jav ensure magnets failed", "movie", mv.ID, "code", mv.Number, "err", merr)
-			// 但**开了评论区链接之后不能再整部跳过** —— JAVBUS 查不到番号是常态，
+			// 但**开了评论区链接之后不能再整部跳过** —— 磁链抓不到是常态，
 			// 而评论里有人分享过恰恰是这些片子里更常见的事。评论那一轮只读本地库，
 			// 一个上游请求都不发，跳过它等于白白丢掉这批候选。
 			if !sub.IncludeCommentLinks {
@@ -208,7 +208,8 @@ func (s *Service) runCheck(ctx context.Context, sub *domain.JavSubscription, run
 		}
 
 		for _, mg := range magnets {
-			// JAVBUS 那条路：语义一个字节都不动。
+			// 磁链表那条路：语义一个字节都不动（两个来源的条目在这里形状一致，
+			// 来源站名只留在 jav_magnets.source 上，不进候选表）。
 			emit(mg, false)
 		}
 
@@ -245,11 +246,15 @@ func (s *Service) runCheck(ctx context.Context, sub *domain.JavSubscription, run
 
 // sourceOfMagnet 把「磁链形状的东西」的 Source 归一到候选表认的两种取值。
 //
-// jav_magnets 那一列存的是 'javbus'（它是**磁链表**的来源标签，见 catalog.go 的
+// jav_magnets 那一列存的是来源站的标签（'javdb' / 'javbus'，见 catalog.go 的
 // ingestMagnets），评论合成的那个存 domain.JavSourceComment。候选表这边只有
-// 「空串 = JAVBUS」与「comment = 评论区」两种，所以这里要把 'javbus' 摁成空串 ——
+// 「空串 = 磁链表」与「comment = 评论区」两种，所以这里要把站名摁成空串 ——
 // 不然后端各处 `Source == domain.JavSourceComment` 的判断看着对、前端拿到的
-// 却是 "javbus"，两边对不上。
+// 却是 "javdb"，两边对不上。
+//
+// 站名**不进候选表**是有意的：候选表那个字段的语义是「这条路是不是评论区来的」
+// （它决定记录页的「评论分享」标签与侧车的 from_comment），不是「从哪个站抓的」。
+// 想知道站名就看 jav_magnets.source —— 那边才是磁链自己的归属。
 func sourceOfMagnet(mg *domain.JavMagnet) string {
 	if strings.EqualFold(strings.TrimSpace(mg.Source), domain.JavSourceComment) {
 		return domain.JavSourceComment
@@ -257,9 +262,9 @@ func sourceOfMagnet(mg *domain.JavMagnet) string {
 	return ""
 }
 
-// buildCandidate 把一颗磁链判成一个候选。两条路（JAVBUS / 评论区）共用它。//
+// buildCandidate 把一颗磁链判成一个候选。两条路（磁链表 / 评论区）共用它。//
 // allowUnknown：缺的元数据（分辨率角标、体积、文件数）是「跳过不判」还是「拒收」。
-// JAVBUS 传 false（与从前逐字节一致），评论区的链接传 true（见 quality.PromptOKCommentLink）。
+// 磁链表传 false（与从前逐字节一致），评论区的链接传 true（见 quality.PromptOKCommentLink）。
 //
 // 返回 nil 表示这颗磁链连候选都不该产生（没有指纹、没有链接）。
 func (s *Service) buildCandidate(

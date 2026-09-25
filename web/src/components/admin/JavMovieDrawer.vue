@@ -468,7 +468,13 @@ function toggleSubscribe() {
  *
  * 不改订阅状态：那由服务端在网盘下完之后统一算（有订阅的话会变成已完成）。
  */
-async function pushMagnet(link: { uri: string; name: string; size_text: string }) {
+async function pushMagnet(link: {
+  uri: string;
+  name: string;
+  size_text: string;
+  /** "comment" 表示这颗来自「评论区分享」档，服务端据此标来源。 */
+  source?: string;
+}) {
   if (!link.uri) return;
   pushing.value = true;
   try {
@@ -476,6 +482,7 @@ async function pushMagnet(link: { uri: string; name: string; size_text: string }
       uri: link.uri,
       name: link.name,
       size_text: link.size_text,
+      source: link.source,
     });
     toast[res.ok ? "success" : "error"](res.message || (res.ok ? "已提交" : "推送失败"));
     if (res.ok) {
@@ -887,7 +894,14 @@ onUnmounted(stopPushPoll);
                   <button
                     class="jd-btn"
                     :disabled="pushing"
-                    @click="pushMagnet({ uri: sh.uri, name: sh.name, size_text: sh.size_text })"
+                    @click="
+                      pushMagnet({
+                        uri: sh.uri,
+                        name: sh.name,
+                        size_text: sh.size_text,
+                        source: 'comment',
+                      })
+                    "
                   >
                     <i class="fas fa-paper-plane" /> 推送
                   </button>

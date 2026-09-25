@@ -747,7 +747,7 @@ func TestPushEd2kManually(t *testing.T) {
 	seedMovie(t, f, "m1", "SSIS-001", "甲", nil)
 
 	uri := "ed2k://|file|SSIS-001.mp4|1234567|ABCDEF0123456789|/"
-	res, err := f.svc.PushMagnetManually(ctx, "m1", uri, "SSIS-001 1080p", "3GB")
+	res, err := f.svc.PushMagnetManually(ctx, "m1", uri, "SSIS-001 1080p", "3GB", "")
 	if err != nil {
 		t.Fatalf("ed2k 手动推送: %v", err)
 	}
@@ -777,7 +777,7 @@ func TestPushRejectsUnknownScheme(t *testing.T) {
 	}
 	seedMovie(t, f, "m1", "SSIS-001", "甲", nil)
 
-	_, err := f.svc.PushMagnetManually(ctx, "m1", "http://example.test/x.torrent", "x", "1GB")
+	_, err := f.svc.PushMagnetManually(ctx, "m1", "http://example.test/x.torrent", "x", "1GB", "")
 	if err == nil {
 		t.Fatal("http 链接应当被拒")
 	}

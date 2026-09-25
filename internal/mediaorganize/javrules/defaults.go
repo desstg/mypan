@@ -56,13 +56,46 @@ var fallbackClassifyRules = []ClassifyRule{
 			"SEXMEX", "ASSHOLEFEVER", "ASSPARADE", "BBCPIE", "DEEPER",
 			"FREEUSEFANTASY", "ILOVEPOV", "JAPANHDV", "IMADEPORN", "BAEB",
 			"CLUBSWEETHEARTS", "THEREALWORKOUT",
+			// 下面这批是**实测用户库里存在、但名单上没有**的站。点分日期型那条
+			// pattern 已经能兜住形状（`BangBros18.19.09.17` 走 pattern 就进国外AV），
+			// 这里补的是**形状认不出**的那些 —— 站名后面不带日期段，
+			// 或者日期段被别的词隔开（`www.xBay.me - TeenFidelity E385 …`）。
+			//
+			// 名单来自扫用户库的全部点分日期型番号（55 种片商）+ 磁链名。
+			// `BANGBROS18` / `BANGBROSCLIPS` / `BANGPOV` 与 `BANGBUS` 同族但**不互为前缀**
+			// （`BANGBROS` 不是 `BANGBUS`），所以逐个列出。
+			"VIXEN", "WIFEY", "BSURPRISE", "USEPOV",
+			"TEENFIDELITY", "BANANAFEVER", "TEAMSKEET", "BRAZZERSEXXTRA", "TUSHYRAW",
+			"BANGBROS18", "BANGBROSCLIPS", "BANGPOV", "PUBLICBANG",
+			"BIGTITSATSCHOOL", "BIGTITSATWORK", "BIGTITSROUNDASSES", "BIGWETBUTTS",
+			"BIGBUTTSLIKEITBIG", "BIGNATURALS", "BIGTITCREAMPIE", "BABYGOTBOOBS",
+			"MOMMYGOTBOOBS", "MILFSLIKEITBIG", "PORNSTARSLIKEITBIG", "TEENSLIKEITBIG",
+			"TEENSLOVEHUGECOCKS", "MONSTERSOFCOCK", "TITTYATTACK", "REALWIFESTORIES",
+			"MIKEINBRAZIL", "DOCTORADVENTURES", "SNEAKYSEX", "SLAYED", "BADMILFS",
+			"BROWNBUNNIES", "FAMILYSTROKES", "GFREVENGE", "AFTERDARK", "WORKMEHARDER",
+			"HOTGIRLSGAME", "EXXXTRASMALL", "ZZSERIES",
 		},
 	},
 	{
 		Name:       "素人",
 		TargetName: "FC2",
 		Includes: []string{
-			"FC2PPV", "CARIB", "1PON", "PACO", "10MU", "HEYZO-", "LUXU-",
+			// `FC2-PPV` 与 `FC2-` 是相对上游加的两条，**修 bug 不是顺手优化**。
+			//
+			// includes 的匹配是纯 `strings.Contains`，不做分隔符归一化，所以上游那份
+			// 只写 `FC2PPV` 时：`FC2-PPV-1234567`（FC2 最常见的写法）对不上。
+			//
+			// 后果不止「漏到别的分类」：`HasCode` 把 `FC2` 当番号，于是这些名字
+			// 既不会命中 includes、也不会掉进「无番号」兜底 —— **整类永远不会被分档**，
+			// 整理多少次都留在原地（实测：用户库里的 `FC2-4939195` 就是这个状态）。
+			//
+			// `FC2-` 单独一条是为了**改名后的形态**：目录/文件按番号改名时有可能
+			// 只剩下 `FC2-4939195`（实测发生过），只列前两条的话改名之后就再也认不出了。
+			// 这个前缀在番号语境里够特异，误伤面很小。
+			//
+			// 没有改成「匹配前去掉分隔符」：那会让 `MD-` 命中 `MDX-…` 之类，
+			// 误伤面比这几条漏网大得多。宁可多列字面量。
+			"FC2PPV", "FC2-PPV", "FC2-", "CARIB", "1PON", "PACO", "10MU", "HEYZO-", "LUXU-",
 			"SIRO-", "GANA-", "PEEP-", "DEBZ-",
 		},
 	},
@@ -75,13 +108,42 @@ var fallbackClassifyRules = []ClassifyRule{
 		},
 	},
 	{
+		// 欧美点分型：`<片商>.<日期>`（`TeenFidelity.19.09.17` / `BangBros18.19.09.17`）。
+		//
+		// **为什么必须有这条 pattern**：这类名字的番号形状本身就认得出片商，
+		// 但站名表永远列不全 —— 实测用户库里有 **55 种**点分日期型片商，
+		// 「国外」的 includes 只覆盖 12 种。没有这条兜底，剩下的（`BangBros18`、
+		// `TeenFidelity`、`Vixen` 改名前的形态…）会掉进「无番号」被塞进
+		// 「国产无番号」，那是**错的归类**。
+		//
+		// 放在「国内」之后、「日本」之前：日式番号（`ABP-123`）与国内站
+		// （`MD-0123`）先被更具体的规则吃掉，轮不到这里。
+		//
+		// 锚定 `^` + 片商名是**纯字母**，这两条把误伤面压到零 ——
+		// 实测拿它扫用户库的 62 个「国产无番号」+ 101 个「日本AV」+ 201 个「FC2」
+		// 目录，**一个都不命中**；而 86 个「国外AV」目录命中 82 个
+		// （剩下 4 个是 Vixen/Wifey 那批，靠 includes 命中）。
+		//
+		// 不锚定、或允许片商名含数字，都会把 `1080p.x264` 这类误收进来，
+		// 而且 `BangBros18`（片商名带数字的真实站）就得靠 includes 兜。
+		Name:       "欧美日期型",
+		TargetName: "国外AV",
+		Pattern:    `^[A-Za-z]+[._-](\d{4}|\d{2})[._-]\d{2}[._-]\d{2}`,
+	},
+	{
 		Name:       "日本",
 		TargetName: "日本AV",
 		Pattern:    `^[A-Za-z]{2,6}-\d{2,5}`,
 	},
 	{
-		Name:       "无番号",
-		TargetName: "国产无番号",
+		Name: "无番号",
+		// 都没匹配到时的兜底目录。
+		//
+		// 叫「无匹配」而不是「国产无番号」：这条规则捕获的是**规则表没命中**的东西，
+		// 而那不等于「国产且没番号」—— 一个没写番号的欧美片也会落到这里，
+		// 放进「国产无番号」是错的归类。名字改成中性的，用户要按自己的口径
+		// 再分就在规则编辑器里改（target_name 本来就可编辑）。
+		TargetName: "无匹配",
 		Nocode:     true,
 	},
 }

@@ -101,6 +101,28 @@ type Ranking struct {
 	Total  int     `json:"total"`
 }
 
+// Magnet 是 /v1/movies/{id}/magnets 给的一颗磁链。
+//
+// 它与 javbus.Magnet 是**两个不同的形状**，别互相套：
+//   - 这里 hd / cnsub / files_count 是上游直接给的布尔与计数，不必从名字里猜
+//     （JAVBUS 那边只能按「高清/字幕」这类可见文本判）；
+//   - size 的单位是 **MB**（实测 3706 = 3.7GB），不是字节。当成字节会得到一颗
+//     3.7KB 的「磁链」，设了体积下限的订阅会把它整批判成「太小」而丢弃 ——
+//     不报错，只是什么都推不出去。
+type Magnet struct {
+	// Hash 是 40 位 btih。上游只给 hash，magnet 链接要调用方自己拼。
+	Hash string `json:"hash"`
+	Name string `json:"name"`
+	// SizeMB 单位是 **MB**。0 表示上游没给，不是「0 字节」。
+	SizeMB FlexInt `json:"size"`
+	// HD / CNSub 上游给布尔，但同一族的字段在别处出现过 0/1 与 "1"，用 any + Truthy。
+	HD         any     `json:"hd"`
+	CNSub      any     `json:"cnsub"`
+	FilesCount FlexInt `json:"files_count"`
+	CreatedAt  string  `json:"created_at"`
+	PikpakURL  string  `json:"pikpak_url"`
+}
+
 // RelatedList 是一条关联清单（人整理的片单）。
 type RelatedList struct {
 	ID          string `json:"id"`

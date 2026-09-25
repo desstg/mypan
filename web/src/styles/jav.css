@@ -574,6 +574,13 @@
   font-size: 0.78rem;
 }
 
+/* 没有文案时（演员榜不分页 / 出错 / 首屏还没回来）把高度收掉。
+ * 元素仍在 DOM 里、观察器仍挂着，只是不占位置 —— 不能真把它移除。 */
+.jav-loadmore--idle {
+  min-height: 0;
+  padding: 0;
+}
+
 /* ————————————————— 状态胶囊 ————————————————— */
 
 /* 正常 / 异常 / 未配置、订阅中 / 已完成 / 已跳过，都用这一颗。
@@ -939,8 +946,36 @@
   font-weight: 600;
 }
 
-/* ————————————————— 演员榜 ————————————————— */
+/* 榜单档位与内容分类之间的分隔线。
+ *
+ * 两者是同一层的两个维度（看哪份榜 × 看哪一类），所以并排；竖线只是把两组
+ * 分开，不制造主从关系。高度取 16px（比胶囊矮一截），颜色用边框色 ——
+ * 它是个分隔符，不该比它分开的东西更显眼。 */
+.jav-tabs__sep {
+  align-self: center;
+  width: 1px;
+  height: 16px;
+  margin: 0 6px;
+  background: var(--border);
+}
 
+/* Top250 那一档的分类是一个「分类/年份」下拉，塞进上面那排会把那排撑得很长，
+ * 所以它单独一行。这里只给位置，不给额外标签 —— 下拉自己写着「全部/有码/…」。 */
+.jav-rank-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: -6px 0 14px;
+}
+
+.jav-rank-controls__label {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* ————————————————— 演员榜 ————————————————— */
 .jav-actor-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -1340,7 +1375,7 @@
 
 /* 「评论区分享」里的分享者 + 原评论那一行。
  *
- * 磁链 tab 的卡片没有这一行：那边「谁抓来的」没有意义（全是 JAVBUS 抓的）。
+ * 磁链 tab 的卡片没有这一行：那边「谁抓来的」没有意义（都是从磁链站抓的）。
  * 而这里「谁贴的、他还说了什么」正是判断这颗靠不靠谱的依据。
  */
 .jav-share {

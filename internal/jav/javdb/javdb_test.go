@@ -2,6 +2,8 @@ package javdb
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -111,7 +113,7 @@ func TestTop250RequiresToken(t *testing.T) {
 	}
 	// 没有 token 时要立刻返回 ErrNoToken，而不是发一次注定 401 的请求 ——
 	// 那既浪费一次外站调用，返回的报错也不如这句清楚。
-	_, err = c.Top250(context.Background(), "", 1, 40)
+	_, err = c.Top250(context.Background(), "all", "", 1, 40)
 	if err == nil {
 		t.Fatal("没有 token 时应当报错")
 	}
@@ -136,5 +138,103 @@ func TestNormalizeImageURLIsIdentity(t *testing.T) {
 	// 刻意不做重写：原脚本会改写成 c0.jdbstatic.com，但那个域名实测不可达。
 	if got := NormalizeImageURL(u); got != u {
 		t.Errorf("NormalizeImageURL 不该改动 URL，got %q", got)
+	}
+}
+
+// TestHotHitsRankingsNotPlayback 日/周/月榜必须打 `/v1/rankings`。
+//
+// 这两个端点名字像、内容完全不是一回事：`/v1/rankings/playback` 是**播放热度榜**
+// （实测 MD0299 SZL028 …），与官网日榜（ABF-387 LUXU-1900 …）零重叠。
+// 改回 playback 会静默地把「日榜」换回一份错的榜 —— 不报错，只是内容不对。
+// 顺带钉住：`type` 必须发出去（上游不传会回「參數不能爲空: type」），
+// 且这个请求**不带 authorization**（它本来就不需要 token）。
+func TestHotHitsRankingsNotPlayback(t *testing.T) {
+	var gotPath, gotQuery, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery, gotAuth = r.URL.Path, r.URL.RawQuery, r.Header.Get("authorization")
+		_, _ = w.Write([]byte(`{"success":1,"data":{"movies":[{"id":"x","number":"ABF-387"}]}}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(Options{APIBase: srv.URL, Retries: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	movies, err := c.Hot(context.Background(), "daily", "1")
+	if err != nil {
+		t.Fatalf("Hot: %v", err)
+	}
+	if len(movies) != 1 || movies[0].Number != "ABF-387" {
+		t.Fatalf("解析结果不对：%+v", movies)
+	}
+	if gotPath != "/v1/rankings" {
+		t.Errorf("路径应当是 /v1/rankings，got %q（playback 那份是另一个榜）", gotPath)
+	}
+	if !strings.Contains(gotQuery, "type=1") {
+		t.Errorf("type 必须发出去，got query %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "period=daily") {
+		t.Errorf("period 必须发出去，got query %q", gotQuery)
+	}
+	if gotAuth != "" {
+		t.Errorf("这个端点不需要 token，不该带 authorization，got %q", gotAuth)
+	}
+}
+
+// TestHotDefaultsAndRejectsBadParams 参数白名单：上游对未知值是**静默回落**的，
+// 本地必须先拦 —— 否则「无码」格子会显示有码的内容，不报错、只是内容不对。
+func TestHotDefaultsAndRejectsBadParams(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"success":1,"data":{"movies":[]}}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(Options{APIBase: srv.URL, Retries: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// 空类型 → 有码（0），空周期 → daily。
+	if _, err := c.Hot(context.Background(), "", ""); err != nil {
+		t.Fatalf("空参数应当回落而不是报错：%v", err)
+	}
+	if !strings.Contains(gotQuery, "type=0") || !strings.Contains(gotQuery, "period=daily") {
+		t.Errorf("空参数应当回落成 type=0&period=daily，got %q", gotQuery)
+	}
+	// 未知分类 / 未知周期都要在本地报错。
+	if _, err := c.Hot(context.Background(), "daily", "zzz"); err == nil {
+		t.Error("未知分类应当报错（上游会静默给有码）")
+	}
+	if _, err := c.Hot(context.Background(), "yearly", "0"); err == nil {
+		t.Error("未知周期应当报错")
+	}
+}
+
+// TestActorRankNeedsNoToken 演员榜匿名可用。
+//
+// 上游实测不带 authorization 也能取 type=0/1/2（结果与官网逐项相同），
+// 客户端里原本挂着的 requireToken 比上游严 —— 结果是「没登录就看不见演员榜」。
+func TestActorRankNeedsNoToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("authorization")
+		_, _ = w.Write([]byte(`{"success":1,"data":{"actors":[{"id":"a1","name":"某演员"}]}}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(Options{APIBase: srv.URL, Retries: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	actors, err := c.ActorRank(context.Background(), "1", 1, 500)
+	if err != nil {
+		t.Fatalf("演员榜不该要 token：%v", err)
+	}
+	if len(actors) != 1 || actors[0].Name != "某演员" {
+		t.Fatalf("解析结果不对：%+v", actors)
+	}
+	if gotAuth != "" {
+		t.Errorf("没配 token 时不该带 authorization，got %q", gotAuth)
 	}
 }

@@ -248,7 +248,7 @@ func retryableListStatus(status int) bool {
 
 // fetchListPage 抓一次清单页。重试与收尾都在 ListPage 里。
 func (c *Client) fetchListPage(ctx context.Context, url string) ([]Movie, int, error) {
-	// 与 API 共用同一套限流与代理：同一个站family，抓猛了一样会被挡。
+	// 与 API 共用同一套限流与代理：同一个站 family，抓猛了一样会被挡。
 	if err := c.throttle(ctx); err != nil {
 		return nil, 0, err
 	}

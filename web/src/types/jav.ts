@@ -193,6 +193,14 @@ export type JavRankingKind = "top250" | "daily" | "weekly" | "monthly" | "actor"
 export interface JavRankingResult {
   movies: JavMovieCard[];
   actors: JavActor[];
+  /**
+   * 这一档的总条数。
+   *
+   * 日/周/月榜是**整榜条数**（官网一次给全，实测固定 60），服务端按 20 一页切片 ——
+   * 分页器靠它算总页数。以前没有这个字段，前端只能拿「这页拿满了没」去猜，
+   * 60 条 20 一页时会算出 4 页、多出一个空页。
+   */
+  total?: number;
 }
 
 /** 订阅的目标类型。 */
@@ -505,6 +513,8 @@ export interface JavConfig {
   sub_interval_min_sec: number;
   sub_interval_max_sec: number;
   sub_timeout_sec: number;
+  /** 推送成功后要不要在资源所在目录写 `<番号>.json`（元数据侧车）。 */
+  sidecar_enabled: boolean;
 
   default_account_id: number;
   default_parent_id: string;
@@ -544,6 +554,7 @@ export interface JavConfigInput {
   sub_interval_min_sec?: number;
   sub_interval_max_sec?: number;
   sub_timeout_sec?: number;
+  sidecar_enabled?: boolean;
   default_account_id?: number;
   default_parent_id?: string;
   default_display_path?: string;
@@ -587,6 +598,51 @@ export const JAV_TYPE_FILTERS = [
   { value: "2", label: "欧美" },
   { value: "3", label: "FC2" },
 ] as const;
+
+/**
+ * 榜单的内容分类胶囊。
+ *
+ * 日/周/月榜与演员榜都是这四档，但**演员榜不给 FC2**：上游 `type=3` 是静默
+ * 回落成 `type=0` 的（实测返回有码那份名单，连 md5 都一样），给了会显示
+ * 「有码的名单挂在 FC2 标签下」。
+ *
+ * 没有「全部」这一档 —— 官网的 `t=` 是必填的，缺省就是有码。
+ */
+export const JAV_RANK_TYPE_TABS = [
+  { value: "0", label: "有码" },
+  { value: "1", label: "无码" },
+  { value: "2", label: "欧美" },
+  { value: "3", label: "FC2" },
+] as const;
+
+/**
+ * Top250 的分类/年份下拉。
+ *
+ * 上游把「分类」和「年份」做成同一个 `type` 参数的两种取值，所以界面是一个下拉：
+ * 空 → `type=all`；0..3 → `type=video_type&type_value=<值>`；
+ * 四位年份 → `type=year&type_value=<年份>`。翻译见 `javTopTypeParams`。
+ */
+export function javTopTypeOptions(now = new Date().getFullYear()) {
+  const years: { value: string; label: string }[] = [];
+  // 2008 是源站 Top250 的起点，与内网那套一致。
+  for (let y = now; y >= 2008; y--) years.push({ value: String(y), label: String(y) });
+  return [
+    { value: "", label: "全部" },
+    { value: "0", label: "有码" },
+    { value: "1", label: "无码" },
+    { value: "2", label: "欧美" },
+    { value: "3", label: "FC2" },
+    ...years,
+  ];
+}
+
+/** 把 Top250 下拉选中的值翻成上游的 (type, type_value) 那一对。 */
+export function javTopTypeParams(value: string): { type: string; typeValue: string } {
+  const v = String(value ?? "").trim();
+  if (v === "") return { type: "all", typeValue: "" };
+  if (["0", "1", "2", "3"].includes(v)) return { type: "video_type", typeValue: v };
+  return { type: "year", typeValue: v };
+}
 
 /** 订阅弹窗里可勾选的质量。 */
 export const JAV_QUALITY_OPTIONS = [

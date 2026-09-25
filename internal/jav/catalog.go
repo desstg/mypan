@@ -3,12 +3,14 @@ package jav
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"litepan/internal/domain"
+	"litepan/internal/jav/javbus"
 	"litepan/internal/jav/javdb"
 	"litepan/internal/jav/quality"
 )
@@ -17,6 +19,10 @@ import (
 const (
 	searchPageSize = 24
 	top250PageSize = 40
+	// top250Total 是 Top250 的固定榜长。上游分页接口不报总数，而榜就是 250 条
+	// （源站页面写死的），所以这里是个常量而不是从响应里读。
+	top250Total = 250
+	// hotPageSize 是日/周/月榜的每页条数。官网一次给整榜（60 条），本地按它切片。
 	hotPageSize    = 20
 	actorRankLimit = 500
 )
@@ -431,6 +437,7 @@ const rankCacheTTL = 12 * time.Hour
 type rankCacheEntry struct {
 	movies  []MovieCard
 	actors  []ActorView
+	total   int
 	fetched time.Time
 }
 
@@ -454,41 +461,84 @@ func (s *Service) rankCachePut(key string, e rankCacheEntry) {
 	s.rankCache[key] = e
 }
 
+// RankingQuery 是一次榜单请求的全部入参。
+//
+// 为什么是结构体而不是「kind + 一个 param 字符串」：param 以前兼着两种语义
+// （Top250 的 type_value、演员榜的 type），现在又多了内容分类与 Top250 的年份 ——
+// 一个字符串装三种意思，调用处谁是谁全靠记，第一个写错的必然是下一个改这块的人。
+// 收进结构体之后，缓存键紧挨着字段列表，加字段时看得见。
+type RankingQuery struct {
+	// Kind 是榜单类型：top250 / daily / weekly / monthly / actor。
+	Kind string
+	// Type 的语义**随 Kind 变**：
+	//   daily / weekly / monthly → 内容分类 '0'..'3'（0 有码 / 1 无码 / 2 欧美 / 3 FC2）
+	//   actor                    → 同上，但没有 '3'（上游静默回落成 0）
+	//   top250                   → 上游的 type 参数：all | video_type | year
+	Type string
+	// TypeValue 只有 top250 用：type=video_type 时是分类值 0..3，type=year 时是年份。
+	TypeValue string
+	Page      int
+	Refresh   bool
+}
+
+// RankingResult 是一次榜单的结果。
+type RankingResult struct {
+	Movies []MovieCard
+	Actors []ActorView
+	// Total 是这一档的总条数。日/周/月榜=整榜条数（官网一次给全，实测固定 60），
+	// 演员榜=演员数，Top250=250。
+	Total int
+}
+
+// cacheKey 是榜单缓存键。**每一个会改变结果的入参都要在这里** ——
+// 漏一个的表现是「切了档位却看到上一档的内容」，不报错，最难查。
+func (q RankingQuery) cacheKey() string {
+	return strings.Join([]string{q.Kind, q.Type, q.TypeValue, strconv.Itoa(q.Page)}, "|")
+}
+
 // Ranking 取榜单。**结果缓存 12 小时**（见 rankCacheTTL）：refresh 为 true 时绕过缓存，
 // 强制回上游拉一次。
 //
-// 缓存键含页码：Top250 是真正的分页接口，各页内容不同；热播榜虽然一次给整榜、
+// 缓存键含页码：Top250 是真正的分页接口，各页内容不同；日/周/月榜虽然一次拿整榜、
 // 本地切片，但按页缓存更省事，也不会因为页大小常量变了对不上。
-func (s *Service) Ranking(ctx context.Context, kind, param string, page int, refresh bool) ([]MovieCard, []ActorView, error) {
+func (s *Service) Ranking(ctx context.Context, q RankingQuery) (RankingResult, error) {
+	page := q.Page
 	if page <= 0 {
 		page = 1
 	}
-	cacheKey := kind + "|" + param + "|" + strconv.Itoa(page)
-	if !refresh {
-		if e, ok := s.rankCacheGet(cacheKey); ok {
-			return e.movies, e.actors, nil
+	q.Page = page
+	key := q.cacheKey()
+	if !q.Refresh {
+		if e, ok := s.rankCacheGet(key); ok {
+			return RankingResult{Movies: e.movies, Actors: e.actors, Total: e.total}, nil
 		}
 	}
 
-	movies, actors, err := s.rankingUpstream(ctx, kind, param, page)
+	res, err := s.rankingUpstream(ctx, q)
 	if err != nil {
-		return nil, nil, err
+		return RankingResult{}, err
 	}
-	s.rankCachePut(cacheKey, rankCacheEntry{movies: movies, actors: actors})
-	return movies, actors, nil
+	s.rankCachePut(key, rankCacheEntry{movies: res.Movies, actors: res.Actors, total: res.Total})
+	return res, nil
 }
 
-func (s *Service) rankingUpstream(ctx context.Context, kind, param string, page int) ([]MovieCard, []ActorView, error) {
+func (s *Service) rankingUpstream(ctx context.Context, q RankingQuery) (RankingResult, error) {
 	client, err := s.javdbClient()
 	if err != nil {
-		return nil, nil, upstreamErr(err)
+		return RankingResult{}, upstreamErr(err)
 	}
 
-	switch kind {
+	switch q.Kind {
 	case RankingActor:
-		actors, err := client.ActorRank(ctx, orDefault(param, "0"), page, actorRankLimit)
+		// 演员榜走**移动端 API**：实测它匿名（完全不带 authorization）就能取
+		// type=0/1/2，且结果与官网 HTML 逐项相同 —— 比抓页面稳，所以优先它。
+		// （客户端里那个 requireToken 因此去掉了：它比上游严。）
+		//
+		// type=3（FC2）上游是**静默回落成 type=0**（实测返回有码那份名单），
+		// 所以前端不给这一档；真传进来也照上游的结果走，不额外造一个假分类。
+		actors, err := client.ActorRank(ctx, orDefault(q.Type, "0"), 1, actorRankLimit)
 		if err != nil {
-			return nil, nil, upstreamErr(err)
+			return RankingResult{}, upstreamErr(err)
 		}
 		out := make([]ActorView, 0, len(actors))
 		for _, a := range actors {
@@ -498,33 +548,42 @@ func (s *Service) rankingUpstream(ctx context.Context, kind, param string, page 
 			})
 			out = append(out, ActorView{ID: a.ID, Name: a.Name, AvatarURL: a.AvatarURL})
 		}
-		return nil, out, nil
+		return RankingResult{Actors: out, Total: len(out)}, nil
 
 	case RankingTop250:
-		movies, err := client.Top250(ctx, param, page, top250PageSize)
+		movies, err := client.Top250(ctx, q.Type, q.TypeValue, q.Page, top250PageSize)
 		if err != nil {
-			return nil, nil, upstreamErr(err)
+			return RankingResult{}, upstreamErr(err)
 		}
-		return s.rankCards(ctx, movies), nil, nil
+		return RankingResult{Movies: s.rankCards(ctx, movies), Total: top250Total}, nil
 
 	case RankingDaily, RankingWeekly, RankingMonthly:
-		movies, err := client.Hot(ctx, kind)
+		// 日/周/月榜走移动端 API 的 `/v1/rankings?period=&type=`。
+		//
+		// 以前这里打的是 `/v1/rankings/playback?filter_by=high_score` —— 那是**播放
+		// 热度榜**（MD0299 SZL028 …），与官网日榜（ABF-387 LUXU-1900 …）**零重叠**，
+		// 也就是说界面上那个「日榜」显示的根本不是日榜。而且它不接受任何类型筛选，
+		// 条目里也没有 type 字段，所以「本地过滤」同样做不到。
+		//
+		// 换到 `/v1/rankings` 之后 period × type 十二种组合与官网页面**逐字节相同**
+		// （内网那套 DB Online 用的也是这个端点），并且**不需要 token**。
+		movies, err := client.Hot(ctx, q.Kind, q.Type)
 		if err != nil {
-			return nil, nil, upstreamErr(err)
+			return RankingResult{}, upstreamErr(err)
 		}
-		// 热播榜一次给整榜，本地切片翻页 —— 与源码一致，省掉重复请求。
-		start := (page - 1) * hotPageSize
+		// 上游一次给整榜（实测固定 60 条），本地切片翻页 —— 省掉重复请求。
+		start := (q.Page - 1) * hotPageSize
 		if start >= len(movies) {
-			return []MovieCard{}, nil, nil
+			return RankingResult{Movies: []MovieCard{}, Total: len(movies)}, nil
 		}
 		end := start + hotPageSize
 		if end > len(movies) {
 			end = len(movies)
 		}
-		return s.rankCards(ctx, movies[start:end]), nil, nil
+		return RankingResult{Movies: s.rankCards(ctx, movies[start:end]), Total: len(movies)}, nil
 
 	default:
-		return nil, nil, domain.Errorf(domain.CodeValidation, "未知的榜单类型：%s", kind)
+		return RankingResult{}, domain.Errorf(domain.CodeValidation, "未知的榜单类型：%s", q.Kind)
 	}
 }
 
@@ -727,8 +786,9 @@ func (s *Service) buildDetail(ctx context.Context, m *domain.JavMovie, refresh b
 	}
 
 	// 磁链抓不到**不该让整个详情抽屉打不开**：影片的标题、封面、演员、简介
-	// 都已经在本地了，用户点进来首先要看到的是这些。磁链抓取会走 JAVBUS，
-	// 它随时可能被墙或改版，把整页拖垮是拿一个次要功能的失败去惩罚主要功能。
+	// 都已经在本地了，用户点进来首先要看到的是这些。磁链抓取要打两个境外站
+	// （JAVDB / JAVBUS），它们随时可能被墙或改版，把整页拖垮是拿一个次要功能的
+	// 失败去惩罚主要功能。
 	//
 	// 单独点「刷新磁链」时（/movies/{id}/magnets）错误照常抛出 ——
 	// 那是用户明确要求的一件事，失败了必须告诉他。
@@ -809,7 +869,7 @@ func relativeMoviesOf(m *domain.JavMovie, inLibrary map[string]struct{}) []Relat
 
 // Magnets 取一部影片的磁链。
 //
-// refresh=true 或者本地一颗都没有时才去 JAVBUS 抓 —— 磁链是稀缺资源，
+// refresh=true 或者本地一颗都没有时才去上游抓 —— 磁链是稀缺资源，
 // 抓一次就够，反复抓既慢又容易被反爬拦。
 func (s *Service) Magnets(ctx context.Context, movieID string, refresh bool) ([]MagnetView, error) {
 	movie, err := s.movies.Get(ctx, movieID)
@@ -902,62 +962,146 @@ func (s *Service) ListMovies(ctx context.Context, listID string, page int) ([]Mo
 	return toCards(s.upsertSummaries(ctx, movies), inLibrary), total, nil
 }
 
-// ingestMagnets 从 JAVBUS 抓一部影片的磁链并入库。
+// ingestMagnets 抓一部影片的磁链并入库。
+//
+// 两个来源取**并集**，不是二选一：
+//
+//	JAVDB  `/v1/movies/{id}/magnets`  用**影片 id**，四档全有，与卡片上的
+//	                                  magnets_count 角标同源；
+//	JAVBUS `/{番号}` 两步 AJAX       日式有码站的库，另外三档的番号它**根本没有
+//	                                  页面**（实测 SZL028 / 092226_100 /
+//	                                  Tushy.2026.09.20 / FC2-4851122 全是 404）。
+//
+// 为什么是并集而不是「先 JAVDB、空再回落 JAVBUS」：实测 SSIS-001 两边各给
+// 26 / 43 条，**重叠只有 25 条** —— 谁也不是谁的超集（JAVBUS 独有 18 条，
+// JAVDB 独有 1 条）。做成兜底的话，有码那档会平白丢掉那 18 条，其中不乏
+// 7GB 的破解版。改动前那套「只有 JAVBUS」则是另外三档整个为 0 条。
+//
+// 两个来源各自失败都只记 warn：一边挂了不该把另一边抓到的结果一起丢掉。
 func (s *Service) ingestMagnets(ctx context.Context, movie *domain.JavMovie) error {
+	id := strings.TrimSpace(movie.ID)
 	code := strings.TrimSpace(movie.Number)
-	if code == "" {
-		return domain.Errorf(domain.CodeValidation, "这部影片没有番号，无法抓取磁链")
-	}
-
-	client, err := s.javbusClient()
-	if err != nil {
-		return err
-	}
-	items, err := client.MagnetsByCode(ctx, code)
-	if err != nil {
-		return upstreamErr(err)
-	}
-	if len(items) == 0 {
-		return domain.Errorf(domain.CodeNotFound, "没有找到 %s 的磁链", code)
+	if id == "" && code == "" {
+		return domain.Errorf(domain.CodeValidation, "这部影片既没有 id 也没有番号，无法抓取磁链")
 	}
 
 	now := time.Now()
-	saved := 0
-	for _, it := range items {
-		sizeBytes, hasSize := quality.ParseSizeBytes(it.Size)
-		rec := &domain.JavMagnet{
-			Fingerprint: quality.MagnetFingerprint(it.Btih, it.Magnet, it.Name),
-			Btih:        it.Btih,
-			MovieID:     movie.ID,
-			Code:        code,
-			Name:        it.Name,
-			SizeText:    it.Size,
-			SizeBytes:   sizeBytes,
-			HasSize:     hasSize,
-			DateText:    it.Date,
-			Magnet:      it.Magnet,
-			HasHD:       it.HasHD,
-			HasSub:      it.HasSub,
-			Source:      "javbus",
-			FetchedAt:   now,
+	saved, fetched := 0, 0
+	var lastErr error
+
+	// —— JAVDB ——
+	if id != "" {
+		if client, err := s.javdbClient(); err != nil {
+			lastErr = err
+		} else if items, err := client.MagnetsByID(ctx, id); err != nil {
+			lastErr = upstreamErr(err)
+			s.logWarn("jav javdb magnets failed", "id", id, "code", code, "err", err)
+		} else {
+			for _, it := range items {
+				n, ok := javdb.NormalizeMagnet(it)
+				if !ok {
+					// hash 不是 40 位十六进制：拼不出合法磁链，留着只会在推送时
+					// 变成一条网盘认不出的链接（而且它看起来「差不多是对的」）。
+					continue
+				}
+				fetched++
+				if s.saveMagnet(ctx, movie, code, "javdb", domain.JavMagnet{
+					Fingerprint: quality.MagnetFingerprint(n.Btih, n.Magnet, n.Name),
+					Btih:        n.Btih,
+					Name:        n.Name,
+					SizeText:    quality.FormatSize(n.SizeBytes),
+					SizeBytes:   n.SizeBytes,
+					HasSize:     n.HasSize,
+					DateText:    n.Date,
+					Magnet:      n.Magnet,
+					HasHD:       n.HasHD,
+					HasSub:      n.HasSub,
+					FileCount:   n.FileCount,
+					HasFiles:    n.HasFiles,
+					FetchedAt:   now,
+				}) {
+					saved++
+				}
+			}
 		}
-		if _, err := s.magnets.Upsert(ctx, rec); err != nil {
-			s.logWarn("jav upsert magnet failed", "code", code, "err", err)
-			continue
-		}
-		saved++
 	}
 
-	// 更新计数，卡片上的磁链角标靠它。用实际落库的条数而不是抓到的条数：
-	// 上游会给同一颗磁链列多行，抓到的 12 条可能只有 5 颗不重复的。
+	// —— JAVBUS：按番号。它只对「有码」那一档有补充（另外三档的番号它没有页面）——
+	if code != "" {
+		if client, err := s.javbusClient(); err != nil {
+			if lastErr == nil {
+				lastErr = err
+			}
+		} else if items, err := client.MagnetsByCode(ctx, code); err != nil {
+			// 404 **不是失败**，是「这个番号在 JAVBUS 没有页面」—— 无码/欧美/FC2
+			// 三档必然如此，有码那档也常有漏网的。每一部片都记一条 warn 会把
+			// 日志刷满，而每一行说的都是正常状态；所以这一类静默跳过。
+			if !errors.Is(err, javbus.ErrCodeNotFound) {
+				if lastErr == nil {
+					lastErr = upstreamErr(err)
+				}
+				s.logWarn("jav javbus magnets failed", "code", code, "err", err)
+			}
+		} else {
+			for _, it := range items {
+				sizeBytes, hasSize := quality.ParseSizeBytes(it.Size)
+				fetched++
+				if s.saveMagnet(ctx, movie, code, "javbus", domain.JavMagnet{
+					Fingerprint: quality.MagnetFingerprint(it.Btih, it.Magnet, it.Name),
+					Btih:        it.Btih,
+					Name:        it.Name,
+					SizeText:    it.Size,
+					SizeBytes:   sizeBytes,
+					HasSize:     hasSize,
+					DateText:    it.Date,
+					Magnet:      it.Magnet,
+					HasHD:       it.HasHD,
+					HasSub:      it.HasSub,
+					FetchedAt:   now,
+				}) {
+					saved++
+				}
+			}
+		}
+	}
+
+	// 更新计数，卡片上的磁链角标靠它。用**实际落库的条数**而不是抓到的条数：
+	// 上游会给同一颗磁链列多行，两个来源之间也会重叠，抓到的 69 条可能只有
+	// 44 颗不重复的。
 	if n, err := s.magnets.CountByMovie(ctx, movie.ID); err == nil {
 		movie.MagnetsCount = n
 		_ = s.movies.Upsert(ctx, movie)
 	}
-	if saved == 0 {
+
+	switch {
+	case saved > 0:
+		return nil
+	case fetched > 0:
+		// 抓到了但一颗都没写进去 —— 这是真的出问题了（数据库层），要说出来。
 		return domain.Errorf(domain.CodeDriverError, "磁链全部入库失败")
+	case lastErr != nil:
+		return lastErr
+	default:
+		// 两个来源都正常回了、但都是空。番号可能为空（只有 id 的片子），
+		// 那时用 id 当名字，别给出一句「没有找到  的磁链」。
+		return domain.Errorf(domain.CodeNotFound, "没有找到 %s 的磁链", orDefault(code, id))
 	}
-	return nil
+}
+
+// saveMagnet 把一颗磁链补齐归属字段后入库。返回 true 表示写成功。
+//
+// 归属（movie_id / code）在这里统一补，两个来源的解析函数就不必各自记一遍 ——
+// 漏掉一处会得到一堆 movie_id 为空的磁链，而它们**不会报错**，
+// 只是在详情页里永远查不出来。
+func (s *Service) saveMagnet(ctx context.Context, movie *domain.JavMovie, code, source string, rec domain.JavMagnet) bool {
+	rec.MovieID = movie.ID
+	rec.Code = code
+	rec.Source = source
+	if _, err := s.magnets.Upsert(ctx, &rec); err != nil {
+		s.logWarn("jav upsert magnet failed", "code", code, "source", source, "err", err)
+		return false
+	}
+	return true
 }
 
 // ————————————————————— 评论 —————————————————————

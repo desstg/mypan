@@ -27,6 +27,15 @@ type Explain struct {
 }
 
 // ExplainName 试跑单个文件名。
+//
+// **试跑只覆盖「清理式」改名**，也就是不读侧车的那一路。有侧车时目录整理走的是
+// 另一套：番号与质量标记从 `<番号>-UC-4K.json` 的文件名里读出来，拼成
+// `番号-UC-4K` 那种名字（见 internal/jav/quality 的 BuildJavFileName）。
+// 那套没法在这里试跑 —— 试跑吃的是用户粘进来的纯文件名，手上没有侧车，
+// 而两套命名法本来就会给出不同的结果（`ABP-123 中文字幕.mp4` 清理式得
+// `ABP-123.mp4`，有侧车时得 `ABP-123-C.mp4`）。
+//
+// 想看带侧车的实际结果，看**整理任务的计划预览** —— 那是真正会执行的动作。
 func ExplainName(name string, rules Rules) Explain {
 	rules = Normalize(rules)
 	tr := &trace{on: true}

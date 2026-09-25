@@ -3,6 +3,7 @@ package javdb
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -143,21 +144,76 @@ func (c *Client) Reviews(ctx context.Context, movieID string, page, pageSize int
 	return data, err
 }
 
-// Hot 取热播榜。period：daily / weekly / monthly。
-func (c *Client) Hot(ctx context.Context, period string) ([]Movie, error) {
-	if period == "" {
+// Hot 取日/周/月榜。period：daily / weekly / monthly；rankType：0 有码 / 1 无码 / 2 欧美 / 3 FC2。
+//
+// 走的是 `/v1/rankings`，**不是** `/v1/rankings/playback`。
+//
+// 这两个端点名字像、内容完全不是一回事，实测（2026-09-25）：
+//   - `/v1/rankings/playback?period=daily&filter_by=high_score` 给的是**播放热度榜**
+//     （`MD0299 SZL028 MIUM-1415 …`），与官网日榜**零重叠**；而且它**不接受任何类型
+//     筛选**（filter_by / type / type_value / video_type / category / rank_type / t /
+//     area / sort_type / page / limit 试遍都一样），条目里也没有 type 字段 ——
+//     所以拿它当「日榜」是错的，想在上面按类型过滤也做不到。
+//   - `/v1/rankings?period=daily&type=0` 解出来的 60 个番号与官网
+//     `/rankings/movies?p=daily&t=censored` **逐字节、逐顺序相同**，
+//     period × type 十二种组合全对过。内网那套 DB Online 用的也是这个端点。
+//
+// `type` 是**必填**的：不传上游直接回「參數不能爲空: type」。传 0-3 之外的值
+// 或未知 period 会**静默回落**（有码 / 日榜），所以调用方必须自己白名单校验，
+// 不能指望上游报错 —— 见 RankTypeValue。
+//
+// 这个接口**不需要 token**（实测完全不带 authorization 也是 200）。
+func (c *Client) Hot(ctx context.Context, period, rankType string) ([]Movie, error) {
+	period = strings.TrimSpace(period)
+	switch period {
+	case "":
 		period = "daily"
+	case "daily", "weekly", "monthly":
+	default:
+		return nil, fmt.Errorf("未知的榜单周期：%s（可用 daily / weekly / monthly）", period)
 	}
+	typeValue, err := RankTypeValue(rankType)
+	if err != nil {
+		return nil, err
+	}
+
 	var data Ranking
-	err := c.get(ctx, "/v1/rankings/playback", url.Values{
-		"period":    {period},
-		"filter_by": {"high_score"},
+	err = c.get(ctx, "/v1/rankings", url.Values{
+		"period": {period},
+		"type":   {typeValue},
 	}, &data)
 	return data.Movies, err
 }
 
-// Top250 取 Top250。需要 token。
-func (c *Client) Top250(ctx context.Context, typeValue string, page, limit int) ([]Movie, error) {
+// RankTypeValue 校验并规范化内容分类（0 有码 / 1 无码 / 2 欧美 / 3 FC2）。
+//
+// 空值回落成 0（有码），与官网默认档一致。
+//
+// 未知值**返回错误**而不是原样透传：上游对 `type=zzz` / `type=9` 是**静默按有码给**
+// 的（实测 success=1、返回有码那份名单），透传会让「无码」格子显示有码的内容 ——
+// 不报错、只是内容不对，属于最难查的那一类。
+func RankTypeValue(rankType string) (string, error) {
+	rankType = strings.TrimSpace(rankType)
+	switch rankType {
+	case "":
+		return "0", nil
+	case "0", "1", "2", "3":
+		return rankType, nil
+	default:
+		return "", fmt.Errorf("未知的内容分类：%s（可用 0 有码 / 1 无码 / 2 欧美 / 3 FC2）", rankType)
+	}
+}
+
+// Top250 取 Top250。需要 token（实测无 token 时上游回 JWTVerificationError）。
+//
+// typeParam / typeValue 是上游那一对参数，两种用法：
+//
+//	type=all                      → 全榜（typeValue 传空）
+//	type=video_type&type_value=1  → 按内容分类（0/1/2/3）
+//	type=year&type_value=2015     → 按年份
+//
+// 上游把「分类」和「年份」做成同一个 type 的两种取值，所以界面上下拉是一个。
+func (c *Client) Top250(ctx context.Context, typeParam, typeValue string, page, limit int) ([]Movie, error) {
 	if err := c.requireToken(); err != nil {
 		return nil, err
 	}
@@ -167,10 +223,13 @@ func (c *Client) Top250(ctx context.Context, typeValue string, page, limit int) 
 	if page <= 0 {
 		page = 1
 	}
+	if typeParam == "" {
+		typeParam = "all"
+	}
 	var data Ranking
 	err := c.get(ctx, "/v1/movies/top", url.Values{
 		"start_rank":     {"1"},
-		"type":           {"all"},
+		"type":           {typeParam},
 		"type_value":     {typeValue},
 		"ignore_watched": {"false"},
 		"page":           {strconv.Itoa(page)},
@@ -179,11 +238,15 @@ func (c *Client) Top250(ctx context.Context, typeValue string, page, limit int) 
 	return data.Movies, err
 }
 
-// ActorRank 取演员热度榜。type：0 有码 / 1 无码 / 2 欧美 / 3 FC2。需要 token。
+// ActorRank 取演员热度榜。type：0 有码 / 1 无码 / 2 欧美 / 3 FC2。
+//
+// **不需要 token**：实测（2026-09-25）完全不带 authorization 头也能取 0/1/2，
+// 且结果与官网 `/rankings/actors?t=*` 逐项相同。这里原本挂着 requireToken，
+// 比上游严 —— 结果是「没登录就看不见演员榜」，而它本来是可以看的。
+//
+// type=3（FC2）上游是**静默回落成 type=0**（返回有码那份名单，md5 都一样），
+// 所以调用方不该给这一档；真传进来也不报错，照上游结果走。
 func (c *Client) ActorRank(ctx context.Context, typeValue string, page, limit int) ([]Actor, error) {
-	if err := c.requireToken(); err != nil {
-		return nil, err
-	}
 	if typeValue == "" {
 		typeValue = "0"
 	}

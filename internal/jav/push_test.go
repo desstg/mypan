@@ -1013,7 +1013,7 @@ func TestPushMagnetManuallyNeedsNoSubscription(t *testing.T) {
 	btih := strings.Repeat("a", 40)
 	uri := "magnet:?xt=urn:btih:" + btih + "&dn=SSIS-001"
 
-	res, err := f.svc.PushMagnetManually(ctx, "m1", uri, "SSIS-001 1080p", "5GB")
+	res, err := f.svc.PushMagnetManually(ctx, "m1", uri, "SSIS-001 1080p", "5GB", "")
 	if err != nil {
 		t.Fatalf("手动推送: %v", err)
 	}
@@ -1065,7 +1065,7 @@ func TestPushMagnetManuallyNeedsNoSubscription(t *testing.T) {
 	// 同一颗磁链再点一次：不会再往网盘塞一遍。
 	// 答复随状态而变 —— 还在途是「正在推送中」，已下完是「之前推送过了」，
 	// 两种都不该算成功、也不该再提交一次。这里钉的是「不重复提交」这一条。
-	again, err := f.svc.PushMagnetManually(ctx, "m1", uri, "SSIS-001 1080p", "5GB")
+	again, err := f.svc.PushMagnetManually(ctx, "m1", uri, "SSIS-001 1080p", "5GB", "")
 	if err != nil {
 		t.Fatalf("重复手动推送: %v", err)
 	}
@@ -1074,6 +1074,65 @@ func TestPushMagnetManuallyNeedsNoSubscription(t *testing.T) {
 	}
 	if len(off.calls) != 1 {
 		t.Errorf("重复点不应当再提交，got %d 次", len(off.calls))
+	}
+}
+
+// TestManualPushRecordsCommentSource 「评论区分享」档里推的那颗要标出来源。
+//
+// 详情页的磁链 tab 与「评论分享」档**共用同一个推送入口**（PushMagnetManually），
+// 而手动推的候选是合成的、不像订阅推那样从候选表带出 source —— 不显式传的话
+// 它恒为空串，于是记录页的「评论分享」标签、元数据侧车的 resource.from_comment
+// 都永远是假。这两处读的是同一个字段，所以钉一次就够。
+func TestManualPushRecordsCommentSource(t *testing.T) {
+	f, _ := fixtureWithPush(t)
+	ctx := context.Background()
+
+	// 手动推送没有订阅可回落，目标只能来自「番号相关设置」的全局默认。
+	if err := f.set.UpdateSilent(ctx, map[string]string{
+		"jav_default_account_id":   "7",
+		"jav_default_parent_id":    "3414031719816154922",
+		"jav_default_display_path": "/CMS影库/冗余",
+	}); err != nil {
+		t.Fatalf("设置默认目标: %v", err)
+	}
+
+	seedMovie(t, f, "m1", "SSIS-001", "甲", nil)
+	btih := strings.Repeat("a", 40)
+	uri := "magnet:?xt=urn:btih:" + btih
+
+	// 详情页那颗：不带 source。
+	if _, err := f.svc.PushMagnetManually(ctx, "m1", uri, "SSIS-001 1080p", "5GB", ""); err != nil {
+		t.Fatalf("手动推送: %v", err)
+	}
+	// 评论分享那颗：换一颗 btih，否则幂等会拦住第二次提交。
+	sharedURI := "magnet:?xt=urn:btih:" + strings.Repeat("b", 40)
+	if _, err := f.svc.PushMagnetManually(ctx, "m1", sharedURI, "SSIS-001 1080p", "5GB",
+		domain.JavSourceComment); err != nil {
+		t.Fatalf("评论分享推送: %v", err)
+	}
+	// 认不出的来源归一成空串，且**不该把这次推送拦下来**。
+	if _, err := f.svc.PushMagnetManually(ctx, "m1",
+		"magnet:?xt=urn:btih:"+strings.Repeat("c", 40), "SSIS-001 1080p", "5GB",
+		"拼错了的来源"); err != nil {
+		t.Fatalf("认不出的来源不该拦住推送: %v", err)
+	}
+
+	records, _, err := f.svc.PushRecords(ctx, domain.JavPushRecordFilter{})
+	if err != nil {
+		t.Fatalf("PushRecords: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("应当有 3 条记录，got %d", len(records))
+	}
+	byMagnet := map[string]PushRecordView{}
+	for _, r := range records {
+		byMagnet[r.Magnet] = r
+	}
+	if got := byMagnet[sharedURI].FromComment; !got {
+		t.Error("评论分享那颗应当标成来自评论")
+	}
+	if got := byMagnet[uri].FromComment; got {
+		t.Error("详情页磁链 tab 推的那颗不该标成来自评论")
 	}
 }
 
@@ -1130,7 +1189,7 @@ func TestMagnetsMarkPushedPerMagnet(t *testing.T) {
 
 	// 手动推 a 那颗。提交成功但网盘还在下。
 	if _, err := f.svc.PushMagnetManually(ctx, "m1",
-		"magnet:?xt=urn:btih:"+pushed, "SSIS-001 1080p", "5GB"); err != nil {
+		"magnet:?xt=urn:btih:"+pushed, "SSIS-001 1080p", "5GB", ""); err != nil {
 		t.Fatalf("手动推送: %v", err)
 	}
 	assertStates(false, true, pushed)
@@ -1163,7 +1222,7 @@ func TestMagnetsIgnoreFailedPush(t *testing.T) {
 		[]javbus.Magnet{magnet(btih, "SSIS-001 1080p", "5GB")})
 
 	res, err := f.svc.PushMagnetManually(ctx, "m1",
-		"magnet:?xt=urn:btih:"+btih, "SSIS-001 1080p", "5GB")
+		"magnet:?xt=urn:btih:"+btih, "SSIS-001 1080p", "5GB", "")
 	if err != nil {
 		t.Fatalf("手动推送: %v", err)
 	}
@@ -1212,7 +1271,7 @@ func TestMagnetsPushedSurvivesMagnetRename(t *testing.T) {
 	seedMovie(t, f, "m1", "SSIS-001", "甲",
 		[]javbus.Magnet{magnet(btih, "SSIS-001 1080p", "5GB")})
 	if _, err := f.svc.PushMagnetManually(ctx, "m1",
-		"magnet:?xt=urn:btih:"+btih, "SSIS-001 1080p", "5GB"); err != nil {
+		"magnet:?xt=urn:btih:"+btih, "SSIS-001 1080p", "5GB", ""); err != nil {
 		t.Fatalf("手动推送: %v", err)
 	}
 	f.svc.onOfflineDownloadCompleted(ctx, offlineCompleted("task-1"))

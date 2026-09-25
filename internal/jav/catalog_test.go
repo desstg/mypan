@@ -33,9 +33,16 @@ type stubJavdb struct {
 	// searchPages 非空时按页返回，用于验翻页聚合。
 	searchPages [][]javdb.Movie
 	searchCalls int
-	// hotResult / hotCalls 给热播榜用：验「缓存命中就不再打上游」。
+	// hotResult / hotCalls 给日/周/月榜用：验「缓存命中就不再打上游」，
+	// hotCalls 记的是**调用参数**（period|type），用来验「换类型是另一次上游调用」。
 	hotResult []javdb.Movie
-	hotCalls  int
+	hotCalls  []string
+	// top250Result / top250Calls 给 Top250 用：记录 (type, typeValue) 好验参数透传。
+	top250Result []javdb.Movie
+	top250Calls  []string
+	// actorRankResult / actorRankCalls 给演员榜用。
+	actorRankResult []javdb.Actor
+	actorRankCalls  []string
 	// relatedResult / relatedErr / relatedCalls 给「关联清单」那一档用。
 	relatedResult []javdb.RelatedList
 	relatedErr    error
@@ -49,6 +56,11 @@ type stubJavdb struct {
 	listPageCalls []string
 	// lastUsed 给「后台避让」用：默认零值 → 当作一直闲着。
 	lastUsed time.Time
+	// magnetsByID / magnetByIDErr / magnetCalls 给磁链那条路用（JAVDB 主源）。
+	// 默认空切片：磁链用例大多只想验 JAVBUS 那一侧，不该被主源干扰。
+	magnetsByID   []javdb.Magnet
+	magnetByIDErr error
+	magnetCalls   []string
 }
 
 func (s *stubJavdb) Login(context.Context, string, string) (string, error) { return "tok", nil }
@@ -82,6 +94,13 @@ func (s *stubJavdb) Movie(_ context.Context, id string) (javdb.Movie, error) {
 	return s.movieResult, s.movieErr
 }
 
+// MagnetsByID 是磁链的主源（用影片 id）。默认返回空 —— 磁链用例想验 JAVBUS
+// 那条路时不必先把这个桩喂满；要验并集的用例自己填 magnetsByID。
+func (s *stubJavdb) MagnetsByID(_ context.Context, id string) ([]javdb.Magnet, error) {
+	s.magnetCalls = append(s.magnetCalls, id)
+	return s.magnetsByID, s.magnetByIDErr
+}
+
 func (s *stubJavdb) Reviews(_ context.Context, _ string, page, _ int) (javdb.ReviewsResp, error) {
 	s.reviewCalls++
 	if s.reviewErr != nil {
@@ -97,15 +116,21 @@ func (s *stubJavdb) Reviews(_ context.Context, _ string, page, _ int) (javdb.Rev
 	}
 	return s.reviewResult, nil
 }
-func (s *stubJavdb) Hot(context.Context, string) ([]javdb.Movie, error) {
-	s.hotCalls++
+
+// Hot 是日/周/月榜的上游（`/v1/rankings`）。记录 period|type 好验参数透传与缓存键。
+func (s *stubJavdb) Hot(_ context.Context, period, rankType string) ([]javdb.Movie, error) {
+	s.hotCalls = append(s.hotCalls, period+"|"+rankType)
 	return s.hotResult, nil
 }
-func (s *stubJavdb) Top250(context.Context, string, int, int) ([]javdb.Movie, error) {
-	return nil, nil
+
+func (s *stubJavdb) Top250(_ context.Context, typeParam, typeValue string, _, _ int) ([]javdb.Movie, error) {
+	s.top250Calls = append(s.top250Calls, typeParam+"|"+typeValue)
+	return s.top250Result, nil
 }
-func (s *stubJavdb) ActorRank(context.Context, string, int, int) ([]javdb.Actor, error) {
-	return nil, nil
+
+func (s *stubJavdb) ActorRank(_ context.Context, typeValue string, _, _ int) ([]javdb.Actor, error) {
+	s.actorRankCalls = append(s.actorRankCalls, typeValue)
+	return s.actorRankResult, nil
 }
 func (s *stubJavdb) Related(context.Context, string, int) ([]javdb.RelatedList, error) {
 	s.relatedCalls++
@@ -676,20 +701,229 @@ func TestMagnetsServesCacheWhenScrapeFails(t *testing.T) {
 	}
 }
 
-func TestMagnetsRequiresNumber(t *testing.T) {
+// TestMagnetsRequiresIdentifier 两个标识都没有时才拒。
+//
+// 以前这里是「没有番号就抓不了」—— 因为磁链只从 JAVBUS 抓，而它按番号找。
+// 现在主源是 JAVDB 的 `/v1/movies/{id}/magnets`，**用 id 不用番号**，
+// 所以「有 id 没番号」的片子照样能抓到磁链（无码/欧美/FC2 那几档常常没有
+// 规整番号）。判据跟着放宽，但两个都没有时仍然是拒。
+func TestMagnetsRequiresIdentifier(t *testing.T) {
 	f := newCatalogFixture(t)
 	ctx := context.Background()
 
-	// 没有番号的影片抓不了磁链 —— JAVBUS 是按番号找的。
+	// 有 id、没有番号：JAVDB 那条路照走，JAVBUS 那条跳过。
 	f.db.movieResult = javdb.Movie{ID: "m1", Number: "", Title: "没有番号"}
 	if _, err := f.svc.IngestMovie(ctx, "m1"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := f.svc.Magnets(ctx, "m1", true); err == nil {
-		t.Fatal("没有番号时应当报错")
+		t.Fatal("两边都没磁链时应当报错")
+	}
+	if len(f.db.magnetCalls) != 1 || f.db.magnetCalls[0] != "m1" {
+		t.Errorf("应当用影片 id 去问 JAVDB，calls=%v", f.db.magnetCalls)
 	}
 	if len(f.bus.calls) != 0 {
-		t.Errorf("不该去打 JAVBUS，calls=%v", f.bus.calls)
+		t.Errorf("没有番号时不该去打 JAVBUS，calls=%v", f.bus.calls)
+	}
+}
+
+// TestMagnetsUnionOfBothSources 两个来源取**并集**。
+//
+// 这一条是整件事的核心：改动前只有 JAVBUS，于是无码/欧美/FC2 三档的磁链
+// 常年是 0 条（JAVBUS 是日式有码站的库，那些番号它根本没有页面）。
+// 而做成「先 JAVDB、空再回落 JAVBUS」也不对 —— 实测 SSIS-001 两边各给
+// 26 / 43 条、**重叠只有 25 条**，谁也不是谁的超集，兜底会平白丢掉
+// JAVBUS 独有那 18 条（其中有 7GB 的破解版）。
+func TestMagnetsUnionOfBothSources(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+
+	f.db.movieResult = javdb.Movie{ID: "m1", Number: "SSIS-001", Title: "标题"}
+	if _, err := f.svc.IngestMovie(ctx, "m1"); err != nil {
+		t.Fatalf("seed movie: %v", err)
+	}
+
+	shared := strings.Repeat("a", 40)
+	onlyDB := strings.Repeat("b", 40)
+	onlyBus := strings.Repeat("c", 40)
+
+	// JAVDB 那份：角标与文件数直接来自上游，size 单位是 MB。
+	f.db.magnetsByID = []javdb.Magnet{
+		{Hash: shared, Name: "SSIS-001 1080p", SizeMB: 4096, HD: true, CNSub: false, FilesCount: 2},
+		{Hash: onlyDB, Name: "SSIS-001 2160p", SizeMB: 8192, HD: true, CNSub: true, FilesCount: 1},
+	}
+	// JAVBUS 那份：只有它有的那颗。
+	f.bus.magnets = []javbus.Magnet{
+		{Btih: shared, Name: "SSIS-001 1080p", Size: "4GB", Magnet: "magnet:?xt=urn:btih:" + shared},
+		{Btih: onlyBus, Name: "SSIS-001-UC 无码破解 4K", Size: "6.5GB", Date: "2024-01-01",
+			Magnet: "magnet:?xt=urn:btih:" + onlyBus},
+	}
+
+	items, err := f.svc.Magnets(ctx, "m1", true)
+	if err != nil {
+		t.Fatalf("Magnets: %v", err)
+	}
+	// 3 颗而不是 2 颗：重复的那颗按指纹合并，两边独有的都在。
+	if len(items) != 3 {
+		t.Fatalf("应当是两边并集（3 颗），got %d：%s", len(items), names(items))
+	}
+	if got := strings.Join([]string{items[0].Btih, items[1].Btih, items[2].Btih}, ","); !strings.Contains(got, onlyBus) ||
+		!strings.Contains(got, onlyDB) || !strings.Contains(got, shared) {
+		t.Errorf("三颗都该在: %s", got)
+	}
+
+	// JAVDB 独有那颗的中字角标要留住 —— 它是上游直接给的，名字里看不出来。
+	var dbOnly *MagnetView
+	for i := range items {
+		if items[i].Btih == onlyDB {
+			dbOnly = &items[i]
+		}
+	}
+	if dbOnly == nil {
+		t.Fatal("JAVDB 独有的那颗丢了")
+	}
+	if !dbOnly.Subtitle {
+		t.Errorf("cnsub=true 应当带出中字角标，got %+v", *dbOnly)
+	}
+
+	// 文件数不在 MagnetView 上（界面上不展示），直接查库确认它落进去了 ——
+	// 订阅的「最大文件数」条件读的就是这一列。
+	stored, err := f.st.JavMagnets.ListByMovie(ctx, "m1")
+	if err != nil {
+		t.Fatalf("ListByMovie: %v", err)
+	}
+	var dbRow *domain.JavMagnet
+	for _, m := range stored {
+		if m.Btih == onlyDB {
+			dbRow = m
+		}
+	}
+	if dbRow == nil {
+		t.Fatal("JAVDB 那颗没有落库")
+	}
+	if !dbRow.HasFiles || dbRow.FileCount != 1 {
+		t.Errorf("文件数应当从上游带过来: %v/%d", dbRow.HasFiles, dbRow.FileCount)
+	}
+	if dbRow.Source != "javdb" {
+		t.Errorf("来源应当记成 javdb（与 JAVBUS 区分）: %q", dbRow.Source)
+	}
+	if dbRow.SizeText != "8 GB" {
+		t.Errorf("体积文本应当是格式化过的: %q", dbRow.SizeText)
+	}
+
+	// 计数用**落库条数**：两个来源重叠的那颗只算一次。
+	movie, _ := f.st.JavMovies.Get(ctx, "m1")
+	if movie.MagnetsCount != 3 {
+		t.Errorf("magnets_count = %d, want 3（并集去重后）", movie.MagnetsCount)
+	}
+}
+
+// TestMagnetsSurvivesOneSourceFailing 一边挂了不该把另一边抓到的结果一起丢掉。
+func TestMagnetsSurvivesOneSourceFailing(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+
+	f.db.movieResult = javdb.Movie{ID: "m1", Number: "SSIS-001", Title: "标题"}
+	if _, err := f.svc.IngestMovie(ctx, "m1"); err != nil {
+		t.Fatalf("seed movie: %v", err)
+	}
+
+	// JAVBUS 挂了（它在国内本来就时通时不通），JAVDB 正常。
+	f.bus.magnetErr = errors.New("403 forbidden")
+	btih := strings.Repeat("e", 40)
+	f.db.magnetsByID = []javdb.Magnet{{Hash: btih, Name: "SSIS-001 1080p", SizeMB: 5000, HD: true}}
+
+	items, err := f.svc.Magnets(ctx, "m1", true)
+	if err != nil {
+		t.Fatalf("JAVDB 拿到了就不该报错: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("应当有 1 颗（来自 JAVDB），got %d", len(items))
+	}
+}
+
+// TestMagnetsBothSourcesFail 两个来源都挂了：错误要说出来，不能是一片空白。
+func TestMagnetsBothSourcesFail(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+
+	f.db.movieResult = javdb.Movie{ID: "m1", Number: "SSIS-001", Title: "标题"}
+	if _, err := f.svc.IngestMovie(ctx, "m1"); err != nil {
+		t.Fatalf("seed movie: %v", err)
+	}
+
+	f.db.magnetByIDErr = errors.New("503")
+	f.bus.magnetErr = errors.New("403 forbidden")
+	if _, err := f.svc.Magnets(ctx, "m1", true); err == nil {
+		t.Fatal("两个来源都挂了时应当报错，而不是返回空列表")
+	}
+}
+
+// TestMagnetsJavbus404IsNotAnError JAVBUS 的 404 是**正常状态**，不是失败。
+//
+// JAVBUS 是日式有码站的库：无码 / 欧美 / FC2 三档的番号它必然没有页面，
+// 有码那档也常有漏网的。这类「这儿没有」必须静默跳过（不记 warn、不影响结果），
+// 否则每一部片都会在日志里留一条正常状态的告警，而真正的故障淹在里面。
+func TestMagnetsJavbus404IsNotAnError(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+
+	f.db.movieResult = javdb.Movie{ID: "m1", Number: "SZL028", Title: "无码片"}
+	if _, err := f.svc.IngestMovie(ctx, "m1"); err != nil {
+		t.Fatalf("seed movie: %v", err)
+	}
+
+	f.bus.magnetErr = javbus.ErrCodeNotFound
+	btih := strings.Repeat("a", 40)
+	f.db.magnetsByID = []javdb.Magnet{{Hash: btih, Name: "SZL028", SizeMB: 1153}}
+
+	items, err := f.svc.Magnets(ctx, "m1", true)
+	if err != nil {
+		t.Fatalf("JAVBUS 没有这个番号不该让整次抓取失败: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("应当拿到 JAVDB 那一颗，got %d", len(items))
+	}
+
+	// 而**真的故障**仍然要冒出来。换一个新夹具：上面那次已经往本地落了磁链，
+	// 同一个夹具上「本地有磁链」会走缓存那条路，验不到失败分支。
+	g := newCatalogFixture(t)
+	g.db.movieResult = javdb.Movie{ID: "m1", Number: "SZL028", Title: "无码片"}
+	if _, err := g.svc.IngestMovie(ctx, "m1"); err != nil {
+		t.Fatalf("seed movie: %v", err)
+	}
+	g.bus.magnetErr = errors.New("403 forbidden")
+	if _, err := g.svc.Magnets(ctx, "m1", true); err == nil {
+		t.Fatal("两边都失败时应当报错")
+	}
+}
+
+// TestMagnetsDropsBadHash 上游给不出合法 hash 的条目要被丢掉。
+//
+// 留着的话会在推送时变成一条网盘认不出的链接 —— 而它看起来「差不多是对的」，
+// 用户看到的是「推送失败」而不是「这条磁链本来就是坏的」。
+func TestMagnetsDropsBadHash(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+
+	f.db.movieResult = javdb.Movie{ID: "m1", Number: "SSIS-001", Title: "标题"}
+	if _, err := f.svc.IngestMovie(ctx, "m1"); err != nil {
+		t.Fatalf("seed movie: %v", err)
+	}
+
+	good := strings.Repeat("f", 40)
+	f.db.magnetsByID = []javdb.Magnet{
+		{Hash: good, Name: "SSIS-001 1080p", SizeMB: 4096, HD: true},
+		{Hash: "abc", Name: "半截 hash", SizeMB: 4096},
+		{Hash: "", Name: "没有 hash", SizeMB: 4096},
+	}
+
+	items, err := f.svc.Magnets(ctx, "m1", true)
+	if err != nil {
+		t.Fatalf("Magnets: %v", err)
+	}
+	if len(items) != 1 || items[0].Btih != good {
+		t.Fatalf("只该留下合法 hash 那一颗，got %d：%s", len(items), names(items))
 	}
 }
 
@@ -891,36 +1125,155 @@ func TestSearchLocalFallbackKeepsPlaying(t *testing.T) {
 func TestRankingCachesResults(t *testing.T) {
 	f := newCatalogFixture(t)
 	ctx := context.Background()
+	// 日/周/月榜走移动端 API 的 `/v1/rankings`（不是 `/v1/rankings/playback`，
+	// 那是播放热度榜、与官网日榜零重叠，见 javdb/api.go 的 Hot）。
 	f.db.hotResult = []javdb.Movie{{ID: "ra1", Number: "SSIS-001", Title: "甲"}}
 
-	if _, _, err := f.svc.Ranking(ctx, RankingDaily, "", 1, false); err != nil {
+	if _, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Page: 1}); err != nil {
 		t.Fatalf("首次 Ranking: %v", err)
 	}
-	if f.db.hotCalls != 1 {
-		t.Fatalf("首次应当打一次上游，got %d", f.db.hotCalls)
+	if len(f.db.hotCalls) != 1 {
+		t.Fatalf("首次应当打一次上游，got %d", len(f.db.hotCalls))
 	}
 
 	// 第二次不传 refresh：应当命中缓存。
-	if _, _, err := f.svc.Ranking(ctx, RankingDaily, "", 1, false); err != nil {
+	if _, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Page: 1}); err != nil {
 		t.Fatalf("二次 Ranking: %v", err)
 	}
-	if f.db.hotCalls != 1 {
-		t.Errorf("第二次应当命中缓存，上游调用数 = %d, want 1", f.db.hotCalls)
+	if len(f.db.hotCalls) != 1 {
+		t.Errorf("第二次应当命中缓存，上游调用数 = %d, want 1", len(f.db.hotCalls))
 	}
 
 	// 换个页码是另一个缓存键，要回上游。
-	if _, _, err := f.svc.Ranking(ctx, RankingDaily, "", 2, false); err != nil {
+	if _, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Page: 2}); err != nil {
 		t.Fatalf("第二页 Ranking: %v", err)
 	}
-	if f.db.hotCalls != 2 {
-		t.Errorf("换页应当是另一个缓存键，上游调用数 = %d, want 2", f.db.hotCalls)
+	if len(f.db.hotCalls) != 2 {
+		t.Errorf("换页应当是另一个缓存键，上游调用数 = %d, want 2", len(f.db.hotCalls))
 	}
 
 	// refresh=true：绕过缓存强制回上游。
-	if _, _, err := f.svc.Ranking(ctx, RankingDaily, "", 1, true); err != nil {
+	if _, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Page: 1, Refresh: true}); err != nil {
 		t.Fatalf("强制刷新: %v", err)
 	}
-	if f.db.hotCalls != 3 {
-		t.Errorf("refresh 应当强制回上游，调用数 = %d, want 3", f.db.hotCalls)
+	if len(f.db.hotCalls) != 3 {
+		t.Errorf("refresh 应当强制回上游，调用数 = %d, want 3", len(f.db.hotCalls))
+	}
+}
+
+// TestRankingCacheKeyIncludesType 换内容分类必须是另一个缓存键。
+//
+// 这是缓存键最容易漏的一维：漏了的表现是「切了有码/无码却看到上一档的内容」——
+// 不报错、不刷新，只是内容不对，属于最难查的那一类。
+func TestRankingCacheKeyIncludesType(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	f.db.hotResult = []javdb.Movie{{ID: "ra1", Number: "SSIS-001", Title: "甲"}}
+
+	if _, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Type: "0", Page: 1}); err != nil {
+		t.Fatalf("有码 Ranking: %v", err)
+	}
+	if _, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Type: "1", Page: 1}); err != nil {
+		t.Fatalf("无码 Ranking: %v", err)
+	}
+	if len(f.db.hotCalls) != 2 {
+		t.Fatalf("换分类应当是另一个缓存键，上游调用数 = %d, want 2", len(f.db.hotCalls))
+	}
+	// 参数真的透到上游了（不是本地拿同一份再过滤）。
+	if f.db.hotCalls[0] != "daily|0" || f.db.hotCalls[1] != "daily|1" {
+		t.Errorf("上游应当分别收到 daily|0 与 daily|1，got %v", f.db.hotCalls)
+	}
+	// 各自二次访问仍命中缓存。
+	if _, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Type: "0", Page: 1}); err != nil {
+		t.Fatalf("有码二次: %v", err)
+	}
+	if len(f.db.hotCalls) != 2 {
+		t.Errorf("二次应当命中缓存，上游调用数 = %d, want 2", len(f.db.hotCalls))
+	}
+}
+
+// TestRankingTop250ThreadsType 验 Top250 的 type / type_value 透到上游。
+func TestRankingTop250ThreadsType(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	f.db.top250Result = []javdb.Movie{{ID: "t1", Number: "SSIS-002", Title: "乙"}}
+
+	if _, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingTop250, Type: "video_type", TypeValue: "1", Page: 1}); err != nil {
+		t.Fatalf("Top250 Ranking: %v", err)
+	}
+	if len(f.db.top250Calls) != 1 || f.db.top250Calls[0] != "video_type|1" {
+		t.Fatalf("上游应当收到 video_type|1，got %v", f.db.top250Calls)
+	}
+	// 年份是同一个 type 的另一种取值。
+	if _, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingTop250, Type: "year", TypeValue: "2015", Page: 1}); err != nil {
+		t.Fatalf("Top250 年份 Ranking: %v", err)
+	}
+	if len(f.db.top250Calls) != 2 || f.db.top250Calls[1] != "year|2015" {
+		t.Fatalf("换年份应当是另一次上游调用，got %v", f.db.top250Calls)
+	}
+}
+
+// TestRankingHotSlicesWholeChart 日/周/月榜：官网一次给整榜，本地按页切片，
+// 且 total 报的是**整榜条数**（不是这一页的条数）。
+//
+// total 报错的表现：前端算不出总页数，只能靠「这页拿满了没」去猜 ——
+// 60 条 20 一页时会算出 4 页，多出一个空页。
+func TestRankingHotSlicesWholeChart(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	whole := make([]javdb.Movie, 0, 60)
+	for i := 0; i < 60; i++ {
+		whole = append(whole, javdb.Movie{ID: fmt.Sprintf("m%02d", i), Number: fmt.Sprintf("SSIS-%03d", i)})
+	}
+	f.db.hotResult = whole
+
+	first, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Type: "0", Page: 1})
+	if err != nil {
+		t.Fatalf("第一页: %v", err)
+	}
+	if len(first.Movies) != hotPageSize {
+		t.Errorf("第一页应当 %d 条，got %d", hotPageSize, len(first.Movies))
+	}
+	if first.Total != 60 {
+		t.Errorf("total 应当是整榜条数 60，got %d", first.Total)
+	}
+
+	last, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Type: "0", Page: 3})
+	if err != nil {
+		t.Fatalf("第三页: %v", err)
+	}
+	if len(last.Movies) != hotPageSize {
+		t.Errorf("第三页应当 %d 条，got %d", hotPageSize, len(last.Movies))
+	}
+
+	// 越界页给空切片而不是报错（前端翻过头时不该炸）。
+	beyond, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingDaily, Type: "0", Page: 9})
+	if err != nil {
+		t.Fatalf("越界页: %v", err)
+	}
+	if len(beyond.Movies) != 0 {
+		t.Errorf("越界页应当空，got %d 条", len(beyond.Movies))
+	}
+	if beyond.Total != 60 {
+		t.Errorf("越界页的 total 仍应是 60，got %d", beyond.Total)
+	}
+}
+
+// TestRankingActorDefaultsType 演员榜不给 type 时按有码（0）走 ——
+// 与官网默认档一致，也与上游的兜底一致。
+func TestRankingActorDefaultsType(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	f.db.actorRankResult = []javdb.Actor{{ID: "a1", Name: "某演员"}}
+
+	res, err := f.svc.Ranking(ctx, RankingQuery{Kind: RankingActor, Page: 1})
+	if err != nil {
+		t.Fatalf("演员榜: %v", err)
+	}
+	if len(f.db.actorRankCalls) != 1 || f.db.actorRankCalls[0] != "0" {
+		t.Fatalf("默认应当是 type=0，got %v", f.db.actorRankCalls)
+	}
+	if res.Total != 1 || len(res.Actors) != 1 {
+		t.Errorf("演员榜 total/条数不对：total=%d len=%d", res.Total, len(res.Actors))
 	}
 }

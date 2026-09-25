@@ -24,7 +24,6 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/eventbus"
-	"litepan/internal/file"
 	"litepan/internal/jav/javbus"
 	"litepan/internal/jav/javdb"
 	"litepan/internal/settings"
@@ -53,7 +52,7 @@ type Service struct {
 	log      *slog.Logger
 
 	offline OfflinePusher
-	folders *file.Service
+	folders FolderStore
 	// imageClient 专供图片代理。
 	//
 	// 与抓取客户端分开：抓取那个带限流（JAVDB 会封），而图片一次榜单就是几十张，
@@ -108,9 +107,18 @@ type JavdbClient interface {
 	Search(ctx context.Context, keyword, movieType string, page, limit int) ([]javdb.Movie, error)
 	SearchPage(ctx context.Context, keyword, movieType string, page, limit int, fromRecent bool, sortBy string) ([]javdb.Movie, error)
 	Movie(ctx context.Context, movieID string) (javdb.Movie, error)
+	// MagnetsByID 取一部影片的磁链（`/v1/movies/{id}/magnets`）。
+	//
+	// 与 JAVBUS 那条路取**并集**（见 catalog.go 的 ingestMagnets），不是主备：
+	// 它用影片 id 而不是番号，四档（有码/无码/欧美/FC2）全都有，而且与
+	// `magnets_count` 角标同源；但实测有码那档它有 1/3 的条目是 JAVBUS 没有的、
+	// JAVBUS 反过来还有 18 条是它没有的，谁也不是谁的超集。
+	MagnetsByID(ctx context.Context, movieID string) ([]javdb.Magnet, error)
 	Reviews(ctx context.Context, movieID string, page, pageSize int) (javdb.ReviewsResp, error)
-	Hot(ctx context.Context, period string) ([]javdb.Movie, error)
-	Top250(ctx context.Context, typeValue string, page, limit int) ([]javdb.Movie, error)
+	// Hot 取日/周/月榜。period：daily/weekly/monthly；rankType：0/1/2/3（内容分类）。
+	// 走 `/v1/rankings`，见 javdb/api.go 那段说明（与 /v1/rankings/playback 不是一回事）。
+	Hot(ctx context.Context, period, rankType string) ([]javdb.Movie, error)
+	Top250(ctx context.Context, typeValue, typeParam string, page, limit int) ([]javdb.Movie, error)
 	ActorRank(ctx context.Context, typeValue string, page, limit int) ([]javdb.Actor, error)
 	Related(ctx context.Context, movieID string, limit int) ([]javdb.RelatedList, error)
 	// ListPage 抓官网清单页的第 page 页（HTML）。
@@ -327,7 +335,7 @@ func (s *Service) javdbClient() (JavdbClient, error) {
 
 	key := strings.Join([]string{
 		s.settings.String(settings.KeyJavAPIBase),
-		// 官网地址也要进 key：改了它就得重建客户端（抓清单页用它）。
+		// 官网地址也要进 key：改了它就得重建客户端（抓官网清单页用它）。
 		s.settings.String(settings.KeyJavSiteBase),
 		s.settings.StringAllowEmpty(settings.KeyJavToken),
 		strconv.Itoa(s.settings.Int(settings.KeyJavMinIntervalMS)),

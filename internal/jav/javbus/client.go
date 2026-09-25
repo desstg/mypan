@@ -2,6 +2,7 @@ package javbus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,10 @@ import (
 	"strings"
 	"time"
 )
+
+// errHTTPNotFound 是内部哨兵：详情页 404 = 这个番号在这儿没有页面。
+// 只在 get 与 MagnetsByCode 之间传递，外面看到的是 ErrCodeNotFound。
+var errHTTPNotFound = errors.New("HTTP 404")
 
 // UA 用桌面浏览器的：JAVBUS 对非常规 UA 会返回一个空表而不是 403，
 // 而空表与「这部片确实没有磁链」无法区分，会导致磁链被静默漏掉。
@@ -77,12 +82,24 @@ func New(opts Options) (*Client, error) {
 	}, nil
 }
 
+// ErrCodeNotFound 表示这个番号在 JAVBUS 里**没有页面**。
+//
+// 它不是一个「失败」：JAVBUS 是日式有码站的库，无码 / 欧美 / FC2 那三档的番号
+// 它本来就没有（实测 SZL028 / 092226_100 / Tushy.2026.09.20 / FC2-4851122 全 404），
+// 而且有码那档也常有漏网的（实测 DLDSS-547 / FNS-261 也是 404）。
+//
+// 所以调用方要能把它和「真的坏了」分开：404 只该让这个来源静默地不出声，
+// 不该记 warn（那会把日志刷满，而每一行都是正常状态），更不该当成错误抛给用户。
+var ErrCodeNotFound = errors.New("javbus: 该番号在 JAVBUS 没有页面")
+
 // MagnetsByCode 按番号取磁链。
 //
 // 两步：先拉详情页抠出 gid/uc/img，再用它们请求 ajax 接口。
 //
 // Cookie existmag=all 是关键：默认视图只显示「有磁链」的条目，
 // 而有些资源要在「全部」视图里才出现。少了这个 Cookie 会稳定少抓一批。
+//
+// 番号不存在时返回 ErrCodeNotFound（见它的注释）。
 func (c *Client) MagnetsByCode(ctx context.Context, code string) ([]Magnet, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
@@ -91,6 +108,9 @@ func (c *Client) MagnetsByCode(ctx context.Context, code string) ([]Magnet, erro
 
 	page, err := c.get(ctx, c.baseURL+"/"+url.PathEscape(code))
 	if err != nil {
+		if errors.Is(err, errHTTPNotFound) {
+			return nil, fmt.Errorf("%w（%s）", ErrCodeNotFound, code)
+		}
 		return nil, fmt.Errorf("抓取详情页失败: %w", err)
 	}
 
@@ -150,6 +170,9 @@ func (c *Client) get(ctx context.Context, rawURL string) (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return "", errHTTPNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}

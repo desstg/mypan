@@ -42,3 +42,8 @@ drivers/115/
 .tmp_serve_web.mjs
 .playwright-mcp/
 .backup-logos/
+
+# 本地临时件（不入库）
+# 从真库导出的规则快照 / 一次性探针产物
+/tmp-real-rules.json
+/tmp-dbtool/

@@ -66,6 +66,10 @@ type ConfigView struct {
 	SubIntervalMaxSec   int      `json:"sub_interval_max_sec"`
 	SubTimeoutSec       int      `json:"sub_timeout_sec"`
 
+	// SidecarEnabled 控制推送成功后要不要在资源所在目录写 `<番号>.json`
+	// （元数据侧车，见 sidecar.go）。默认开。
+	SidecarEnabled bool `json:"sidecar_enabled"`
+
 	// —— 推送默认目标 ——
 	DefaultAccountID    int64  `json:"default_account_id"`
 	DefaultParentID     string `json:"default_parent_id"`
@@ -111,6 +115,8 @@ type ConfigInput struct {
 	SubIntervalMinSec   *int     `json:"sub_interval_min_sec"`
 	SubIntervalMaxSec   *int     `json:"sub_interval_max_sec"`
 	SubTimeoutSec       *int     `json:"sub_timeout_sec"`
+
+	SidecarEnabled *bool `json:"sidecar_enabled"`
 
 	DefaultAccountID    *int64 `json:"default_account_id"`
 	DefaultParentID     string `json:"default_parent_id"`
@@ -179,6 +185,8 @@ func (s *Service) Config(ctx context.Context) (ConfigView, error) {
 		SubIntervalMinSec:   s.settings.Int(settings.KeyJavSubIntervalMinSec),
 		SubIntervalMaxSec:   s.settings.Int(settings.KeyJavSubIntervalMaxSec),
 		SubTimeoutSec:       s.settings.Int(settings.KeyJavSubTimeoutSec),
+
+		SidecarEnabled: s.sidecarEnabled(),
 
 		DefaultParentID:     strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavDefaultParentID)),
 		DefaultDisplayPath:  strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavDefaultPath)),
@@ -338,6 +346,9 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 	if in.SubTimeoutSec != nil {
 		patch[settings.KeyJavSubTimeoutSec] = strconv.Itoa(*in.SubTimeoutSec)
 	}
+	if in.SidecarEnabled != nil {
+		patch[settings.KeyJavSidecarEnabled] = boolString(*in.SidecarEnabled)
+	}
 
 	if in.DefaultAccountID != nil {
 		patch[settings.KeyJavDefaultAccountID] = strconv.FormatInt(*in.DefaultAccountID, 10)
@@ -460,7 +471,8 @@ func (s *Service) probeJavdb(ctx context.Context, out *TestConnectionResult) {
 	}
 
 	start := time.Now()
-	_, err = client.Hot(ctx, "daily")
+	// 探活用日榜：不需要 token、一次请求就回，正好验签名与节点。
+	_, err = client.Hot(ctx, "daily", "0")
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		out.Javdb = ConnectionResult{Message: err.Error(), LatencyMS: latency}
@@ -504,7 +516,8 @@ func (s *Service) TestNodes(ctx context.Context) []ConnectionResult {
 			results = append(results, ConnectionResult{Message: err.Error()})
 			continue
 		}
-		_, err = client.Hot(ctx, "daily")
+		// 探活用日榜（同上）。
+		_, err = client.Hot(ctx, "daily", "0")
 		latency := time.Since(start).Milliseconds()
 		if err != nil {
 			results = append(results, ConnectionResult{Message: err.Error(), LatencyMS: latency})

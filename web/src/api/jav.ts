@@ -71,7 +71,7 @@ export function testJavNodes() {
 
 export function fetchJavRanking(
   kind: JavRankingKind,
-  options: { type?: string; page?: number } = {},
+  options: { type?: string; typeValue?: string; page?: number } = {},
 ) {
   const path =
     kind === "actor"
@@ -80,7 +80,11 @@ export function fetchJavRanking(
         ? "top"
         : "hot";
   const params: Record<string, string | number | undefined> = { page: options.page };
-  if (kind === "actor" || kind === "top250") params.type = options.type;
+  // 三个榜单都要带 type，但语义不同：
+  //   日/周/月 + 演员榜 → 内容分类 '0'..'3'
+  //   Top250            → 上游的 type 参数：all / video_type / year（配 type_value）
+  params.type = options.type;
+  if (kind === "top250") params.type_value = options.typeValue;
   if (kind === "daily" || kind === "weekly" || kind === "monthly") {
     params.period = kind;
   }
@@ -252,7 +256,7 @@ export function fetchJavRuns(id: number, limit = 20) {
  */
 export function pushJavMagnet(
   movieId: string,
-  input: { uri: string; name?: string; size_text?: string },
+  input: { uri: string; name?: string; size_text?: string; source?: string },
 ) {
   return http.post<JavPushResult>(
     `${BASE}/movies/${encodeURIComponent(movieId)}/push-magnet`,

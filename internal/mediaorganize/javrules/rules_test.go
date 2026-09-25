@@ -290,8 +290,8 @@ func TestExplainNameNoCode(t *testing.T) {
 	if res.Changed {
 		t.Error("无番号不该标记为已改动")
 	}
-	if res.ClassifyTarget != "国产无番号" {
-		t.Errorf("应归到无番号分类，得到 %q", res.ClassifyTarget)
+	if res.ClassifyTarget != "无匹配" {
+		t.Errorf("应归到兜底分类，得到 %q", res.ClassifyTarget)
 	}
 }
 

@@ -238,6 +238,14 @@ const (
 	KeyJavSubLastRunAt      = "jav_sub_last_run_at"
 	KeyJavSubLastPushAt     = "jav_sub_last_push_at"
 
+	// KeyJavSidecarEnabled 控制推送成功后要不要在资源所在目录写 `<番号>.json`。
+	//
+	// 默认**开**：它不做任何多余的上游请求，也不改推送行为，只是在推送已有结论
+	// 之后多写一个几 KB 的文件；而它记下的东西（演员、片商、封面与剧照的原始地址、
+	// 落盘时的真实文件名）一旦没记，将来想建 nfo、给 Emby 补图都只能回上游重刮，
+	// 而 JAVDB 会封号。见 internal/jav/sidecar.go。
+	KeyJavSidecarEnabled = "jav_sidecar_enabled"
+
 	// 推送默认目标。订阅自身留空时回落到这里。
 	KeyJavDefaultAccountID    = "jav_default_account_id"
 	KeyJavDefaultParentID     = "jav_default_parent_id"
@@ -412,7 +420,7 @@ func defaultSpecs() []Spec {
 		boolSpec(KeyMOJavCleanEmpty, "media_organize", "番号·清理空目录", "番号整理后删除源目录里已空的子目录。只删空目录，不影响有内容的目录。", "true"),
 		intSpec(KeyMOJavMaxDirs, "media_organize", "番号·扫描目录上限", "单次扫描最多遍历的目录数，防止超大目录树把任务卡死。", "500", "", 10, 100000),
 		stringSpec(KeyMOJavDeleteTypes, "media_organize", "番号·可删除的文件类型", "只有这些扩展名在小文件清理时会被删（英文分号分隔）；留空表示不限类型。", ""),
-		stringSpec(KeyMOJavDeleteExclude, "media_organize", "番号·不删除的文件类型", "这些扩展名永远不会被小文件清理删掉（英文分号分隔）；留空表示不排除任何类型。", "nfo;ass;ssa;srt;sub;idx;sup;vtt;jpg;jpeg;png;webp;bmp"),
+		stringSpec(KeyMOJavDeleteExclude, "media_organize", "番号·不删除的文件类型", "这些扩展名永远不会被小文件清理删掉（英文分号分隔）；留空表示不排除任何类型。", "nfo;ass;ssa;srt;sub;idx;sup;vtt;jpg;jpeg;png;webp;bmp;json"),
 		{
 			Key:     KeyAIOrganizeEnabled,
 			Type:    TypeBool,
@@ -624,6 +632,11 @@ func defaultSpecs() []Spec {
 		{Key: KeyJavSubTimeoutSec, Type: TypeInt, Default: "30", Min: intp(5), Max: intp(300), Hidden: true},
 		{Key: KeyJavSubLastRunAt, Type: TypeString, Default: "", Hidden: true},
 		{Key: KeyJavSubLastPushAt, Type: TypeString, Default: "", Hidden: true},
+
+		// 默认 true，与「装完就该看得见」的 jav_enabled 同一个取向：它只是
+		// 在推送成功之后多写一个几 KB 的 JSON，不做多余的上游请求。
+		// 不想要的人自己去「番号相关设置」里关掉。
+		{Key: KeyJavSidecarEnabled, Type: TypeBool, Default: "true", Hidden: true},
 
 		{Key: KeyJavDefaultAccountID, Type: TypeString, Default: "0", Hidden: true},
 		{Key: KeyJavDefaultParentID, Type: TypeString, Default: "", Hidden: true},
