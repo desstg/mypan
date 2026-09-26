@@ -278,7 +278,7 @@ func TestWesternDatePatternClassifies(t *testing.T) {
 	}
 	for _, n := range hits {
 		idx := ClassifyNameFallback(n, "", rs)
-		if idx < 0 || rs[idx].TargetName != "国外AV" {
+		if idx < 0 || rs[idx].TargetName != "欧美" {
 			got := "不命中"
 			if idx >= 0 {
 				got = rs[idx].Name + "→" + rs[idx].TargetName
@@ -289,30 +289,33 @@ func TestWesternDatePatternClassifies(t *testing.T) {
 
 	// **回归**：这些一个都不能被抢走。日式番号与国内站排在「欧美日期型」之前，
 	// 且它们的形状（`ABP-123` 只有一段数字）本来就匹配不上这条 pattern。
-	// 断言的是**命中了哪条规则**（规则名），不是目标目录名 ——
-	// 目标目录名是用户可改的（默认表叫「无匹配」，用户库里那份叫「国产无番号」）。
-	keep := []struct{ name, wantRule string }{
-		{"ABP-123", "日本"},
-		{"SSIS-001 中文字幕", "日本"},
-		{"FC2-PPV-4750465", "素人"},
-		{"091926-001-CARIB", "素人"},
-		{"HEYZO-3837", "素人"},
-		{"SIRO-5071", "素人"},
-		{"MD-0123", "国内"},
-		{"MAN-001", "国内"},
-		{"普通家庭录像", "无番号"},
-		{"1080p.x264", "无番号"}, // 只有两段数字，不该被当成日期
-		{"my.file.name", "无番号"},
-		{"1pon-101913-682", "素人"}, // 站名在 includes 里，先命中素人
+	// 断言的是**落到哪个目录**（target_name），不是命中了哪条规则 ——
+	// 同一个目标目录可以有多条规则（`MD-0123` 现在命中「国产·无连字符」，
+	// `MAN-001` 也一样），按规则名断言会把「加了条同目标的规则」这种无害改动
+	// 报成失败。真正要防的是**被别的档抢走**（比如 `ABP-123` 落进「欧美」），
+	// 那在 target_name 上一眼看得出。
+	keep := []struct{ name, wantTarget string }{
+		{"ABP-123", "有码"},
+		{"SSIS-001 中文字幕", "有码"},
+		{"FC2-PPV-4750465", "无码"},
+		{"091926-001-CARIB", "无码"},
+		{"HEYZO-3837", "无码"},
+		{"SIRO-5071", "无码"},
+		{"MD-0123", "国产"},
+		{"MAN-001", "国产"},
+		{"普通家庭录像", "未匹配"},
+		{"1080p.x264", "未匹配"}, // 只有两段数字，不该被当成日期
+		{"my.file.name", "未匹配"},
+		{"1pon-101913-682", "无码"}, // 站名在 includes 里，先命中素人
 	}
 	for _, c := range keep {
 		idx := ClassifyNameFallback(c.name, "", rs)
 		got := "不命中"
 		if idx >= 0 {
-			got = rs[idx].Name
+			got = rs[idx].TargetName
 		}
-		if got != c.wantRule {
-			t.Errorf("%q 应当命中「%s」，got %s（规则顺序被改动了？）", c.name, c.wantRule, got)
+		if got != c.wantTarget {
+			t.Errorf("%q 应当进「%s」，got %s（规则顺序被改动了？）", c.name, c.wantTarget, got)
 		}
 	}
 }
@@ -341,7 +344,7 @@ func TestWesternDatePatternAnchored(t *testing.T) {
 	if !strings.Contains(pat, "[A-Za-z]+") {
 		t.Errorf("片商名应当是纯字母段，got %q", pat)
 	}
-	// 顺序：必须排在「日本」之前（否则日式番号会先被它吃掉？不 —— 反过来，
+	// 顺序：必须排在「有码」之前（否则日式番号会先被它吃掉？不 —— 反过来，
 	// 排在后面的话 pattern 规则仍能命中，但「国内」的 includes 会先被检查，
 	// 这个顺序是刻意定的，钉住它）。
 	idxWestern, idxJapan := -1, -1
@@ -349,11 +352,11 @@ func TestWesternDatePatternAnchored(t *testing.T) {
 		switch r.Name {
 		case "欧美日期型":
 			idxWestern = i
-		case "日本":
+		case "有码":
 			idxJapan = i
 		}
 	}
 	if idxWestern < 0 || idxJapan < 0 || idxWestern > idxJapan {
-		t.Errorf("「欧美日期型」应当排在「日本」之前，got %d vs %d", idxWestern, idxJapan)
+		t.Errorf("「欧美日期型」应当排在「有码」之前，got %d vs %d", idxWestern, idxJapan)
 	}
 }

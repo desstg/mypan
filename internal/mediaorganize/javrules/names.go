@@ -3,6 +3,7 @@ package javrules
 import (
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // 本文件是规则引擎的核心：番号识别 / 改名 / 分类。
@@ -16,7 +17,27 @@ import (
 
 var (
 	// 番号识别三正则，与旧面板 web.py:292 一致。
-	reCodeAlphaNum = regexp.MustCompile(`(?i)[A-Za-z]{2,6}-\d{2,5}`)
+	//
+	// reCodeAlphaNum 里的 `[A-Za-z]?` 是**相对 115-auto 的唯一一处放宽**：
+	// 原来要求连字符后直接跟数字，于是 `MKD-S03` / `MKBD-S118` 这类
+	// 「连字符后先跟一个字母再跟数字」的番号**整体认不出**。后果是三处连锁失效：
+	//
+	//  1. `HasCode` 为假 → `RenameFilename` 原样返回，这类片永远不改名；
+	//  2. `parseSidecarName` 拿 HasCode 兜底 → 推送时写出的 `MKD-S03.json`
+	//     不被当成侧车 → 视频不会被命名成标准番号，json 也没有任何动作搬它，
+	//     会被落在源目录里不管；
+	//  3. `ownerFor` 拿 `ExtractCode` 抽番号 → 容器目录（一目录多份侧车）里
+	//     这类视频抽不出番号，整部片被判「认不出、保持原样」。
+	//
+	// 之所以敢放宽，是它**严格包含**旧正则（旧的能匹的新的全能匹，只是多认一类），
+	// 所以「老库里已按旧规则处理过的文件」不会因此改名 —— 那些名字本来就已被旧正则
+	// 认作有番号，走的是同一套清理。实测拿真库 7909 个番号 + 1.6 万条磁链名 +
+	// 2922 条磁盘路径扫过：新增认作番号的只有 `MKD-*` / `MKBD-*` 一族，
+	// 外加一条带水印前缀的噪声（`3xhd.us-n0932`，它的水印本来就会被删掉）。
+	//
+	// 可选字母取 0~1 个（而不是 `{0,2}`）：实测片商名带两个字母的形态
+	// （`MBR-BA112`）在库里只出现过一次，多放一个字母的位置只会扩大误伤面。
+	reCodeAlphaNum = regexp.MustCompile(`(?i)[A-Za-z]{2,6}-[A-Za-z]?\d{2,5}`)
 	reCodeFC2      = regexp.MustCompile(`(?i)FC2`)
 	reCodeDateSeq  = regexp.MustCompile(`\d{6}[-_]\d{2,3}`)
 
@@ -28,22 +49,262 @@ var (
 	reCodeDateSeqFull = regexp.MustCompile(`^\d{6}[-_]\d{2,3}$`)
 
 	// 提取番号用（比识别更严：必须带数字），给「只保留番号」命名模式和试跑预览用。
-	reCodeExtract = regexp.MustCompile(`(?i)([A-Z]{2,6}-\d{2,5}|FC2[\w-]*\d+|\d{6}[-_]\d{2,3})`)
+	//
+	// 与 reCodeAlphaNum 一样带上可选字母 —— 两处**必须同步**：不同步的话，
+	// `MKD-S03` 会被判「有番号」却在试跑预览里显示「识别到的番号：空」，
+	// 而试跑是用户判断规则对不对的唯一窗口。
+	reCodeExtract = regexp.MustCompile(`(?i)([A-Z]{2,6}-[A-Za-z]?\d{2,5}|FC2[\w-]*\d+|\d{6}[-_]\d{2,3})`)
+
+	// reCodeCNSolid 是**国内厂牌 + 直接接数字**的形态（`MGL0002` / `MD0292` / `MDSR0006-1`）。
+	//
+	// 为什么需要它：国内那批番号在磁链与 JAVDB 的 number 字段里**经常不带连字符**，
+	// 而上面那条 reCodeAlphaNum 要求有连字符 —— 于是 `MGL0002` 判不出番号，
+	// 连锁失效（与 `MKD-S03` 那次同一个病）：
+	//
+	//  1. `parseSidecarName` 拿 HasCode 兜底 → 推送写出的 `MGL0002.json`
+	//     不被当成侧车 → 视频不改名、json 没有任何动作搬它，落在源目录里；
+	//  2. `ExtractCode` 抽不出番号 → 容器目录里这类视频配不上侧车。
+	//
+	// **为什么不用泛化的「字母直接接数字」**：那个形态全库有 289 个、74 种前缀，
+	// 里面混着 `n0417`（25 个）/ `crazyasia00414`（40 个）/ `PEWORLD00016` 这类
+	// 一看就是随手起的名字，认作番号会把无关文件卷进改名。这里只认**已知的国内厂牌**，
+	// 实测全库新增认作番号 79 个，全部是国内厂牌；磁盘 5840 个不同段里
+	// HasCode 判定翻转 12 个，其中**改名结果不同的 0 个**。
+	//
+	// **`MTVQ` 刻意不在表里**：`MTVQ1-EP13` 是「节目名 + 期数」而不是「厂牌 + 序号」，
+	// 规范化会把它改成 `MTVQ-1-EP13`（改错）。分类那条 pattern 里留着它无所谓 ——
+	// 分类不改名。
+	//
+	// 捕获组是给 ExtractCode 用的：`\d+(?:-\d+)*` 吃掉「数字 + 若干段 `-数字`」，
+	// 于是 `MDSR0006-1` 抽出的是完整番号而不是只到第一个数字（`MDSR0`）。
+	// **必须要求每段连字符后面跟数字**：写成 `[\d-]*` 会把尾巴上那个 `-` 也吃掉，
+	// `MD0250-2-NTR-X` 会抽成 `MD0250-2-`（带个悬空连字符）。
+	//
+	// 前缀表与 defaults.go 的「国产·无连字符」分类 pattern **同源**，改一处要对另一处。
+	reCodeCNSolid = regexp.MustCompile(`(?i)^(` + cnBrandGroup(cnBrandPrefixes) + cnSolidBody + `)`)
 
 	// 删汉字：Python 的 [一-鿿] 即 U+4E00–U+9FFF。
 	reCJK = regexp.MustCompile(`[\x{4e00}-\x{9fff}]`)
 )
 
+// cnBrandPrefixes 是国内站的厂牌前缀，`|` 分隔，供两条正则共用。
+//
+// 名单来自**实测用户库的「国产AV」目录**（247 个，222 个是番号形态）+ 上游那份
+// includes 里的 12 条（去掉尾连字符）。`MDCM`/`MDAG`/`MDWP`/`MDHG`/`MDHS`/`MAD`/
+// `MGL`/`MSD`/`SZL`/`BLX`/`BLXC`/`MCY`/`NHAV`/`EMTC`/`EMX`/`MFK`/`MPG`/`MNSC`/
+// `WMM`/`MM`/`NI`/`FX`/`GX`/`PH`/`TZ`/`DA` 这些是用户库里出现、上游没覆盖的。
+//
+// 逐个拿全库 8179 个番号验过：按「前缀 + 直接接数字」匹配，**没有抢走任何一个**
+// 现在落在「有码/无码/欧美」的日式番号 —— `MM` 不会命中 `MMB-045`、
+// `NI` 不会命中 `NIMA-011`、`DA` 不会命中 `DAJ-017`（前缀后面必须**直接**跟数字）。
+const cnBrandPrefixes = `MD|MDX|MDSJ|MDSR|MDHT|MAN|XB|XJX|JDSY|RAS|QQCM|AIMD|` +
+	`MDCM|MDAG|MDWP|MDHG|MDHS|MAD|MGL|MSD|SZL|BLX|BLXC|MCY|NHAV|` +
+	`EMTC|EMX|MFK|MPG|MNSC|WMM|MM|NI|PME|FX|GX|PH|TZ|DA|` +
+	`MDCN|MDL|PMC|MB|PMS|GDCM|PM|CZ|MHG|MT|PC|PMA|AAP|AAVV|CP`
+
+// 下面两条正则除「厂牌候选段」之外的部分。抽成常量，是为了让「代码表那份」与
+// 「并上用户厂牌那份」用**同一段模式**编译 —— 两处各写一遍的话，将来改了一处
+// 就会出现「同一份文件在识别时说有番号、在补连字符时又认不出来」这种分家。
+const (
+	cnSolidBody = `\d+(?:-\d+)*` // 厂牌后面直接接数字，可带若干段 `-数字`（`MDSR0006-1`）
+	cnSplitBody = `(\d.*)$`      // 切分用：厂牌之后剩下的全部（含那个数字）
+)
+
+// cnBrandGroup 把厂牌候选段包成非捕获组。
+func cnBrandGroup(alt string) string { return `(?:` + alt + `)` }
+
+// cnCodeBrands 是 cnBrandPrefixes 的集合形式（大写）。
+//
+// 只为一件事：用户填的厂牌里凡是**代码表已有的**都剔掉 —— 那 12 条 `MD-`/`MDX-`
+// 本来就在代码表里，不剔的话**默认规则**也会走「动态编译」那条路，白白多一份
+// 正则，而且「用户没填东西时行为逐字不变」这条保证就说不清了。
+var cnCodeBrands = func() map[string]struct{} {
+	set := make(map[string]struct{}, 64)
+	for _, b := range strings.Split(cnBrandPrefixes, "|") {
+		set[strings.ToUpper(strings.TrimSpace(b))] = struct{}{}
+	}
+	return set
+}()
+
+// cnBrandAlt 拼出「代码表 + 用户表」的候选段（`|` 分隔，不含外层分组）。
+//
+// 代码表**永远排在最前**：正则的候选是按顺序试的，代码表在前保证了
+// 「用户没填厂牌」与「用户填的都是代码表里已有的」两种情况下匹配结果与
+// 加这个功能之前**逐字一致** —— 老库的改名结果不会因此变化。
+//
+// 每个 token 都过一遍 cnBrandToken（归一化 + 形状判断），所以调用方把设置页里
+// 那个原样的 `zzbrand-` 传进来也没问题；形状不像厂牌的直接丢掉。
+func cnBrandAlt(brands []string) string {
+	var extra []string
+	seen := make(map[string]struct{}, len(brands))
+	for _, raw := range brands {
+		// 走同一个归一化：`HasCodeWithBrands` 是导出的，调用方完全可能直接把设置页里
+		// 那个 `zzbrand-` 原样传进来。
+		brand, ok := cnBrandToken(raw)
+		if !ok {
+			continue
+		}
+		if _, known := cnCodeBrands[brand]; known {
+			continue
+		}
+		if _, dup := seen[brand]; dup {
+			continue
+		}
+		seen[brand] = struct{}{}
+		extra = append(extra, regexp.QuoteMeta(brand))
+	}
+	if len(extra) == 0 {
+		return cnBrandPrefixes
+	}
+	return cnBrandPrefixes + "|" + strings.Join(extra, "|")
+}
+
+// cnBrandRegexes 是「把用户厂牌并进代码表」之后编译出来的一套正则。
+type cnBrandRegexes struct {
+	solid *regexp.Regexp // 识别 / 抽番号，与 reCodeCNSolid 同形
+	split *regexp.Regexp // 补连字符，与 reCNSolidSplit 同形
+}
+
+// cnBrandDefaults 是「没有用户厂牌」那一套，直接复用包级那两个正则。
+var cnBrandDefaults = &cnBrandRegexes{solid: reCodeCNSolid, split: reCNSolidSplit}
+
+// cnBrandCache 按候选段缓存编译结果。
+//
+// 为什么要缓存：`rename` 是热路径（一次计划要跑几千个文件），而对一条 60 多个
+// 候选的正则来说 `regexp.MustCompile` 不是零成本，每个文件都编一遍纯属浪费。
+// 键是候选段本身，所以同一份规则只编一次；用户每改一次规则才可能多一条，
+// 条数天然很少，不必再做淘汰。
+var cnBrandCache sync.Map // 候选段 → *cnBrandRegexes
+
+// cnBrandRegexesFor 取「代码表 + 这些用户厂牌」对应的一套正则。
+func cnBrandRegexesFor(brands []string) *cnBrandRegexes {
+	if len(brands) == 0 {
+		return cnBrandDefaults
+	}
+	alt := cnBrandAlt(brands)
+	if alt == cnBrandPrefixes {
+		return cnBrandDefaults
+	}
+	if v, ok := cnBrandCache.Load(alt); ok {
+		return v.(*cnBrandRegexes)
+	}
+	r := &cnBrandRegexes{
+		solid: regexp.MustCompile(`(?i)^(` + cnBrandGroup(alt) + cnSolidBody + `)`),
+		split: regexp.MustCompile(`(?i)^(` + cnBrandGroup(alt) + `)` + cnSplitBody),
+	}
+	cnBrandCache.Store(alt, r)
+	return r
+}
+
+// cnTargetName 是国产那一档的分类目录名。
+const cnTargetName = "国产"
+
+// CNBrandsFromRules 从分类规则里取出「用户填的国产厂牌」（大写、去重、保序）。
+//
+// 为什么需要它：`HasCode` 那份厂牌表是**代码里硬编码**的，用户遇到没收录的
+// 国产厂牌（`MDCN` / `MDL` 当初就是这么漏掉的）只能干等发版。而分类规则是用户
+// 在设置页能改的 —— 让他把厂牌填进「国产」那条的关键词里，改名与认侧车也跟着认。
+//
+// 取法：**目标目录（或规则名）以「国产」开头的规则**，遍历它们的 includes。
+// 与匹配方式无关，所以用户在「国产」那条的关键词里填就认；`国产·无连字符`
+// 那条是正则模式，厂牌写在正则里、拆不出 token，不从它取。
+//
+// 为什么别的规则不参与：从「有码」里取会把日式片商当国产厂牌，于是
+// `SSIS001` 这种「片商直接接数字」的形态会被认成番号、还会被补上连字符。
+//
+// 两条判据（目标目录 / 规则名）都看，是因为**这两个字段用户都能改**：只看目标
+// 目录的话，用户把目标目录改名成「国产AV」这个功能就静默失效了 —— 而
+// 「填了没用、也不报错」正是这次要修掉的那个病。
+func CNBrandsFromRules(rules []ClassifyRule) []string {
+	out := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	for _, r := range rules {
+		if !isCNClassifyRule(r) {
+			continue
+		}
+		for _, inc := range r.Includes {
+			brand, ok := cnBrandToken(inc)
+			if !ok {
+				continue
+			}
+			if _, dup := seen[brand]; dup {
+				continue
+			}
+			seen[brand] = struct{}{}
+			out = append(out, brand)
+		}
+	}
+	return out
+}
+
+// isCNClassifyRule 报告这条分类规则是不是「国产」那一档。
+func isCNClassifyRule(r ClassifyRule) bool {
+	return strings.HasPrefix(strings.TrimSpace(r.TargetName), cnTargetName) ||
+		strings.HasPrefix(strings.TrimSpace(r.Name), cnTargetName)
+}
+
+// cnBrandToken 判断一个关键词像不像「国产厂牌前缀」，像则返回归一化后的本体。
+//
+// 判据（拿用户库那份规则实跑过：挑出来正好 13 个厂牌，不夹带别的）——
+// 去掉首尾空白、去掉尾部 `-`/`_`、转大写之后：
+//   - 长度 2~8；含至少一个字母；只含 [A-Za-z0-9-_]
+//   - 含空格 / 点 / 括号 / 中文的一律不算（`[中文字幕]` 那种水印不能当厂牌）
+//
+// **尾部连字符要去掉**：规则表里那 12 条都写成 `MD-`，而这张厂牌表要匹配的是
+// 「厂牌**直接接数字**」的无连字符形态（`MD0292`），留着 `-` 反而一个都匹配不上。
+// 带连字符的形态由 reCodeAlphaNum 兜着（`MD-0123`），本来就不需要这张表。
+func cnBrandToken(token string) (string, bool) {
+	brand := strings.ToUpper(strings.TrimSpace(token))
+	brand = strings.TrimSpace(strings.TrimRight(brand, "-_"))
+	if len(brand) < 2 || len(brand) > 8 {
+		return "", false
+	}
+	hasLetter := false
+	for i := 0; i < len(brand); i++ {
+		c := brand[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			hasLetter = true
+		case c >= '0' && c <= '9':
+		case c == '-' || c == '_':
+		default:
+			return "", false
+		}
+	}
+	// 纯数字不算：`123` 这种当厂牌会把一批日期序号型的名字卷进改名。
+	if !hasLetter {
+		return "", false
+	}
+	return brand, true
+}
+
 // 改名时要删掉的字面字符。`/` 和 `\` 一并删掉是因为它们会破坏路径。
 const stripChars = `【】[]/\`
 
-// HasCode 判断文件名（不含扩展名）是否含番号：字母-数字 / FC2 / 日期-序号 三种格式。
+// HasCode 判断文件名（不含扩展名）是否含番号：
+// 字母-数字 / 国内厂牌直接接数字 / FC2 / 日期-序号 四种格式。
 //
 // **这个判定是改名的闸门** —— 返回 false 时 RenameFilename 原样返回，无番号的文件
 // （多数带中文标题）不会被「删汉字」那套删空。
 func HasCode(name string) bool {
+	return HasCodeWithBrands(name, nil)
+}
+
+// HasCodeWithBrands 与 HasCode 同义，但**额外**把用户填的厂牌当番号前缀
+// （见 CNBrandsFromRules）。brands 为空时与 HasCode 逐字等价。
+//
+// 为什么不给 HasCode 加个参数了事：HasCode 还被**分类的兜底判定**用
+// （classifyFiltered 里的 `!HasCode(name)`），那里必须用代码里那份表 ——
+// 否则用户往「国产」加一个词，那个词就再也不进兜底（自指），而兜底规则本该
+// 捕获「规则表没命中」的东西。两件事共用一个函数就迟早会有人顺手把参数传进去。
+//
+// 用途是**改名 / 认侧车**这一条路：`RenameFilename` 与 `parseSidecarName`、
+// `ownerFor`。它们要回答的是「这个名字能不能挤出一个番号来」，多认一个厂牌
+// 只会让更多片子被正确命名，不会改变任何既有文件的归类。
+func HasCodeWithBrands(name string, brands []string) bool {
 	stem, _ := splitExt(name)
 	return reCodeAlphaNum.MatchString(stem) ||
+		cnBrandRegexesFor(brands).solid.MatchString(stem) ||
 		reCodeFC2.MatchString(stem) ||
 		reCodeDateSeq.MatchString(stem)
 }
@@ -54,11 +315,32 @@ func HasCode(name string) bool {
 //   - 「只保留番号」命名模式
 //   - 设置页试跑预览里显示「识别到的番号」
 //   - 检测端点挑样例
+//   - javplanner 的 ownerFor（容器目录里按视频名抽出番号去配侧车）
 //
 // 比 HasCode 严：这里的 FC2 分支要求带数字，所以裸的 `fc2-ppv.mp4`（HasCode 为真）
 // 提取不到番号 —— 调用方必须处理空串，退回清理后的名字。
+//
+// 国内厂牌直接接数字那种形态（`MGL0002` / `MD0292`）走单独一条正则：
+// reCodeExtract 要求连字符，抽不出它们，而 ownerFor 拿不到番号就会把整部片
+// 判成「认不出、保持原样」。
 func ExtractCode(name string) string {
-	return reCodeExtract.FindString(name)
+	return ExtractCodeWithBrands(name, nil)
+}
+
+// ExtractCodeWithBrands 与 ExtractCode 同义，但**额外**认用户填的国产厂牌。
+//
+// 两个用途都必须用它，否则会出最难看的那种不一致：
+//   - `javplanner` 的 `ownerFor`（容器目录里按视频名抽出番号去配侧车）——
+//     认不出番号就会把整部片判成「认不出、保持原样」；
+//   - 设置页的试跑预览（`ExplainName`）—— 预览与实际执行分家，用户会以为规则坏了。
+func ExtractCodeWithBrands(name string, brands []string) string {
+	if code := reCodeExtract.FindString(name); code != "" {
+		return code
+	}
+	if m := cnBrandRegexesFor(brands).solid.FindStringSubmatch(name); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // RenameFilename 按规则算出新文件名。无番号 → 原样返回。
@@ -83,7 +365,10 @@ func rename(name string, rules Rules, tr *trace) string {
 		tr.add("欧美点分型番号，只保留番号")
 		return code + tail
 	}
-	if !HasCode(name) {
+	// 用户填的国产厂牌算一次就够（本次改名里识别与补连字符都要用），
+	// 而 `CNBrandsFromRules` 要扫一遍规则表 —— 放在这里，不放进下面每个分支里。
+	brands := CNBrandsFromRules(rules.ClassifyRules)
+	if !HasCodeWithBrands(name, brands) {
 		tr.add("无番号，按原样保留")
 		return name
 	}
@@ -171,10 +456,69 @@ func rename(name string, rules Rules, tr *trace) string {
 	if finalStem != cleaned {
 		tr.add("去空格并转大写")
 	}
+
+	// 国内厂牌的番号**补上连字符**（`MGL0002` → `MGL-0002`）。
+	//
+	// 为什么：国内那批番号在磁链名与 JAVDB 的 number 里经常不带连字符，
+	// 而**用户库里的既有形态是带连字符的**（实测他「国产AV」那 247 个目录里
+	// `MGL-0002` / `MDSR-0006-1` / `MD-0292` 都是他手工改的）。不补的话，
+	// 同一部片在库里有两种名字，媒体服务器按番号配对时就对不上。
+	//
+	// **放在最后一步**：转大写之后再做，于是只需处理一种大小写形态；
+	// 而且它不参与前面的清理，改出来的名字仍会被同一条分类规则命中
+	// （实测 `MGL-0002` 与 `MGL0002` 都进「国产」）。
+	//
+	// 只对**已知国内厂牌**做：泛化的「字母段与数字段之间插连字符」会把
+	// `MTVQ1-EP13`（节目名+期数）改成 `MTVQ-1-EP13`、把 `n0417` 改成 `N-0417`。
+	if withHyphen, ok := NormalizeCNHyphenWithBrands(finalStem, brands); ok {
+		tr.add("国内番号补连字符")
+		finalStem = withHyphen
+	}
+
 	// 扩展名本身保持原样大小写：播放器与媒体服务器按扩展名识别类型，
 	// 大写扩展名（.MP4）在这里没有好处，却可能在大小写敏感的环境里出问题。
 	return finalStem + ext
 }
+
+// NormalizeCNHyphen 给「国内厂牌 + 数字」的番号补上连字符，第二个返回值表示有没有改动。
+//
+//	MGL0002     → MGL-0002      （改）
+//	MDSR0006-1  → MDSR-0006-1   （改）
+//	MD0292      → MD-0292       （改）
+//	MGL-0002    → 原样           （已经有了，幂等）
+//	MTVQ1-EP13  → 原样           （MTVQ 不在厂牌表里）
+//	ABC-123     → 原样           （不是国内厂牌）
+//
+// **导出**给 `javplanner` 用：有侧车时走的是 `quality.BuildJavFileName`
+// （不经过 RenameFilename），所以那条路必须自己调一次 —— 否则同一部片在库里
+// 会有两种名字（`MGL0002/` 与 `MGL-0002/`），媒体服务器按番号配对时就对不上。
+//
+// **幂等**是必须的：整理要能反复跑。已经带连字符的形态（`MGL-0002`）里，
+// 字母段后面紧跟的就是 `-` 而不是数字，正则匹配不上，自然原样返回。
+func NormalizeCNHyphen(stem string) (string, bool) {
+	return NormalizeCNHyphenWithBrands(stem, nil)
+}
+
+// NormalizeCNHyphenWithBrands 与 NormalizeCNHyphen 同义，但**额外**认用户填的
+// 国产厂牌（`ZZBRAND0001` → `ZZBRAND-0001`）。
+//
+// 必须跟着厂牌表一起放宽：识别与补连字符是两个出口，只放宽前者的话，
+// 用户新加的厂牌会被认成番号、却得不到带连字符的标准形态 —— 同一部片在库里
+// 有两种写法（`ZZBRAND0001` 与既有那批手工改过的 `MGL-0002`），媒体服务器
+// 按番号配对时就对不上。
+func NormalizeCNHyphenWithBrands(stem string, brands []string) (string, bool) {
+	m := cnBrandRegexesFor(brands).split.FindStringSubmatch(stem)
+	if m == nil {
+		return stem, false
+	}
+	return m[1] + "-" + m[2], true
+}
+
+// reCNSolidSplit 把「国内厂牌 + 数字…」切成两段：`^((?:<厂牌>))(\d.*)$`。
+//
+// 大小写不敏感（改名那一步已经转成大写，但试跑预览可能喂进来小写），
+// 厂牌段原样保留 —— 上层已经把主名转成大写了。
+var reCNSolidSplit = regexp.MustCompile(`(?i)^(` + cnBrandGroup(cnBrandPrefixes) + `)` + cnSplitBody)
 
 // trimStemEdges 去掉主名首尾的空白与悬空连接符。
 // 主名中间的空白不动（那可能是原意，如「SSIS-001 -4K」）。

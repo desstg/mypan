@@ -49,7 +49,7 @@ func (f *fakeFS) List(_ context.Context, _ int64, parentID string, _ bool) ([]do
 //	  小样片.mp4                         5MB  小文件 → 删
 //	  tiny.mp4                          20MB  小文件 → 删
 //	  普通家庭录像.mp4                    2GB  无番号 → 不改名，但会被建目录移入
-//	  FC2PPV-1234567 无码/                     命中「素人」→ 分类搬到 目标根/FC2
+//	  FC2PPV-1234567 无码/                     命中「无码和素人」→ 分类搬到 目标根/无码
 //	    FC2PPV-1234567.mp4              3GB
 //	  空目录/                                   本来就是空 → 不该出现在计划里
 //	  整理库/                                   分类目标根（就在源目录下）
@@ -404,9 +404,9 @@ func TestPlanClassify(t *testing.T) {
 	if _, ok := byName["普通家庭录像"]; !ok {
 		t.Errorf("本轮新建的 普通家庭录像 也应当被分类（命中「无番号」兜底），got %v", byName)
 	}
-	// 三个分类目标目录：FC2（素人）/ 日本AV / 无匹配（兜底）。
+	// 三个分类目标目录：无码（无码和素人）/ 有码 / 未匹配（兜底）。
 	if len(dirs) != 3 {
-		t.Fatalf("分类目标目录条数 = %d, 期望 3（FC2 / 日本AV / 无匹配）", len(dirs))
+		t.Fatalf("分类目标目录条数 = %d, 期望 3（无码 / 有码 / 未匹配）", len(dirs))
 	}
 	targets := map[string]string{} // 目标名 → ensure_dir 的动作 ID
 	for _, d := range dirs {
@@ -415,11 +415,11 @@ func TestPlanClassify(t *testing.T) {
 			t.Errorf("分类目标 %q 应建在任务的目标根下，得到 %q", d.TargetName, d.TargetParentID)
 		}
 	}
-	if _, ok := targets["FC2"]; !ok {
-		t.Errorf("应当建 FC2 分类目标（来自规则 target_name），got %v", targets)
+	if _, ok := targets["无码"]; !ok {
+		t.Errorf("应当建「无码」分类目标（来自规则 target_name），got %v", targets)
 	}
-	if fc2.TargetParentID != moplan.RefPrefix+targets["FC2"] {
-		t.Errorf("分类移动应引用分类目标目录：%q vs %q", fc2.TargetParentID, moplan.RefPrefix+targets["FC2"])
+	if fc2.TargetParentID != moplan.RefPrefix+targets["无码"] {
+		t.Errorf("分类移动应引用分类目标目录：%q vs %q", fc2.TargetParentID, moplan.RefPrefix+targets["无码"])
 	}
 }
 

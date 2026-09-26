@@ -8,7 +8,6 @@ import (
 	"litepan/internal/store"
 )
 
-
 // TestSettingsDictCarriesProxyURL 钉住「设置字典里必须带 proxy_url」。
 //
 // 下游有两条路（TMDB 连通性测试、目录整理的搜片）是拿这个 map 去喂

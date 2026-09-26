@@ -20,6 +20,13 @@ import (
 // 但允许改配置（那一条固定用出厂默认的排除表）。
 func buildPlanWith(t *testing.T, fs *fakeFS, sourceID, targetID string, cfg Config) *moplan.Plan {
 	t.Helper()
+	return buildPlanJavRules(t, fs, sourceID, targetID, cfg, javrules.Defaults())
+}
+
+// buildPlanJavRules 同上，但连番号规则一起给 —— buildPlanWith 固定用出厂默认表，
+// 而「用户自己加厂牌」那批用例要的恰恰是改过规则的整理。
+func buildPlanJavRules(t *testing.T, fs *fakeFS, sourceID, targetID string, cfg Config, rules javrules.Rules) *moplan.Plan {
+	t.Helper()
 	cfg.SourceDirID = sourceID
 	cfg.TargetRootID = targetID
 	if cfg.ActionType == "" {
@@ -34,12 +41,27 @@ func buildPlanWith(t *testing.T, fs *fakeFS, sourceID, targetID string, cfg Conf
 	if cfg.MetadataExtensions == "" {
 		cfg.MetadataExtensions = defaultMetadataExtensions
 	}
-	p := New(context.Background(), fs, 1, cfg, javrules.Defaults(), "task-1", nil, nil)
+	p := New(context.Background(), fs, 1, cfg, rules, "task-1", nil, nil)
 	plan, err := p.Build()
 	if err != nil {
 		t.Fatalf("Build 失败：%v", err)
 	}
 	return plan
+}
+
+// withCNBrand 往「国产」那条关键词规则里加一个厂牌 —— 用户在设置页做的就是这件事。
+func withCNBrand(t *testing.T, brand string) javrules.Rules {
+	t.Helper()
+	rules := javrules.Defaults()
+	for i := range rules.ClassifyRules {
+		r := rules.ClassifyRules[i]
+		if r.TargetName == "国产" && r.EffectiveMode() == javrules.ModeIncludes {
+			rules.ClassifyRules[i].Includes = append(r.Includes, brand)
+			return rules
+		}
+	}
+	t.Fatal("默认规则表里没有「国产」的关键词规则")
+	return rules
 }
 
 // seedConfig 是「按侧车整理」的常规配置：小文件阈值 300MB，不删小文件。
@@ -76,7 +98,7 @@ func TestParseSidecarName(t *testing.T) {
 	}
 	for _, c := range accept {
 		t.Run("认=>"+c.name, func(t *testing.T) {
-			number, marks, ok := parseSidecarName(c.name)
+			number, marks, ok := parseSidecarName(c.name, nil)
 			if !ok {
 				t.Fatalf("%s 应当认出是侧车", c.name)
 			}
@@ -102,7 +124,7 @@ func TestParseSidecarName(t *testing.T) {
 	}
 	for _, name := range reject {
 		t.Run("不认=>"+name, func(t *testing.T) {
-			if number, _, ok := parseSidecarName(name); ok {
+			if number, _, ok := parseSidecarName(name, nil); ok {
 				t.Errorf("%q 不该认成侧车，却给出番号 %q", name, number)
 			}
 		})
@@ -660,7 +682,7 @@ func TestDeepVideoKeepsItsDepth(t *testing.T) {
 	if len(classified) != 1 {
 		t.Fatalf("`合集` 应当被分类移动（现状如此），got %v", classified)
 	}
-	if !strings.Contains(classified[0], "无匹配") {
+	if !strings.Contains(classified[0], "未匹配") {
 		t.Errorf("`合集` 没有番号，应当落进兜底分类，got %q", classified[0])
 	}
 }
@@ -710,8 +732,8 @@ func TestSidecarNumberWinsOverDirtyDirName(t *testing.T) {
 			cls = append(cls, a.SourceName+" → "+a.Reason)
 		}
 	}
-	if len(cls) != 1 || !strings.Contains(cls[0], "日本") {
-		t.Errorf("应当按侧车的番号归到日本AV，got %v", cls)
+	if len(cls) != 1 || !strings.Contains(cls[0], "有码") {
+		t.Errorf("应当按侧车的番号归到「有码」，got %v", cls)
 	}
 	if anySkippedContains(plan, "认不出番号") {
 		t.Error("有侧车时不该出现「认不出番号」的跳过")
@@ -758,8 +780,8 @@ func TestDirtyDirNameWithoutSidecar(t *testing.T) {
 			cls = append(cls, a.Reason)
 		}
 	}
-	if len(cls) != 1 || !strings.Contains(cls[0], "日本") {
-		t.Errorf("分类应当命中日本（第二轮吃的是清理后的目录名），got %v", cls)
+	if len(cls) != 1 || !strings.Contains(cls[0], "有码") {
+		t.Errorf("分类应当命中「有码」（第二轮吃的是清理后的目录名），got %v", cls)
 	}
 }
 
@@ -854,8 +876,8 @@ func TestClassifyMovesWholeDirWithMetadata(t *testing.T) {
 	if len(dirMoves) != 1 {
 		t.Fatalf("应当只有一条「搬目录」动作，got %d", len(dirMoves))
 	}
-	if !strings.Contains(dirMoves[0].Reason, "日本") {
-		t.Errorf("应当归到日本AV，got %q", dirMoves[0].Reason)
+	if !strings.Contains(dirMoves[0].Reason, "有码") {
+		t.Errorf("应当归到「有码」，got %q", dirMoves[0].Reason)
 	}
 	// 字幕/图片**不该**有自己的搬运动作 —— 它们是随目录走的。
 	for _, a := range plan.Actions {
@@ -1169,6 +1191,381 @@ func TestSidecarLetterCodeNeverGetsStation(t *testing.T) {
 		}
 		if len(dirNames) != 1 || dirNames[0] != number {
 			t.Errorf("%s：目录名应当是纯番号 %q，got %v", name, number, dirNames)
+		}
+	}
+}
+
+// TestSidecarLetterAfterDashCode 连字符后先跟一个字母的番号（`MKD-S03`）走完整条链。
+//
+// 这一条钉的是**三处连锁**（改动前它们一起失效，而且全是静默的）：
+//
+//	HasCode 认不出 → 侧车 `MKD-S03.json` 不被认作侧车
+//	               → 视频不会被命名成标准番号、json 没有任何动作搬它
+//	               → 分类命中不了「日本」，落进兜底的「无匹配」
+//
+// 实测来源：用户 2026-09-25 推的这部片（JAVDB number 就是 `MKD-S03`），
+// 整理后进了「国产无番号」。
+func TestSidecarLetterAfterDashCode(t *testing.T) {
+	fs := newFakeFS()
+	const root = "/root"
+	fs.add(root, "MKD-S03.json", 1200, false) // 推送时写出的侧车
+	fs.add(root, "MKD-S03.mp4", 3_900*mb, false)
+	target := fs.add(root, "整理库", 0, true)
+
+	plan := buildPlanWith(t, fs, root, target, seedConfig())
+
+	// 侧车要**认得出来**：认不出时 diagnostics 里不会有 sidecars 这一项。
+	if plan.Diagnostics["sidecars"] == nil {
+		t.Error("MKD-S03.json 没被认作侧车 —— 视频不会按标准番号命名，json 也不会被搬走")
+	}
+
+	// 建目录：名字是纯番号。
+	dirNames := []string{}
+	for _, a := range actionsFor(plan, stageMoveIn) {
+		if a.Kind == moplan.ActionKindEnsureDir {
+			dirNames = append(dirNames, a.TargetName)
+		}
+	}
+	if len(dirNames) != 1 || dirNames[0] != "MKD-S03" {
+		t.Fatalf("应当只建一个名为 MKD-S03 的目录，got %v", dirNames)
+	}
+
+	// 改名：视频进标准名（这个名字里本来就没有需要清理的东西，所以与原名相同）。
+	renames := namesOf(actionsFor(plan, stageRename), func(a moplan.PlanAction) string {
+		return a.SourceName + "→" + a.TargetName
+	})
+	if len(renames) != 0 {
+		// 名字已经是 `MKD-S03.mp4`，标准名算出来一样 → 不产生动作（幂等）。
+		// 有动作就说明算出来的名字与原名不同，那是另一回事。
+		t.Logf("改名动作 = %v（原名已是标准形态，期望为空）", renames)
+	}
+
+	// 移入：视频与 json 都要进 `MKD-S03/`。
+	moved := map[string]string{}
+	for _, a := range actionsFor(plan, stageMoveIn) {
+		if a.Kind == moplan.ActionKindRelocate {
+			moved[a.SourceName] = a.TargetName
+		}
+	}
+	if _, ok := moved["MKD-S03.mp4"]; !ok {
+		t.Errorf("视频应当移入作品目录，got %v", moved)
+	}
+	if _, ok := moved["MKD-S03.json"]; !ok {
+		t.Errorf("侧车应当跟着移入作品目录，got %v", moved)
+	}
+
+	// 分类：命中「日本」→ 日本AV（**不是**兜底的「无匹配」）。
+	classify := actionsFor(plan, stageClassify)
+	found := false
+	for _, a := range classify {
+		if a.Kind == moplan.ActionKindRelocate && a.TargetName == "MKD-S03" {
+			if !strings.Contains(a.Reason, "有码") {
+				t.Errorf("分类理由应当是「有码」，got %q", a.Reason)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("MKD-S03 应当被分类搬走，动作：%v", classify)
+	}
+}
+
+// TestSidecarCNNoHyphenCode 国内番号的**无连字符**形态（`MGL0002`）走完整条链。
+//
+// 这一条钉的是与 `MKD-S03` 同一族、但**另一处**的连锁失效：
+//
+//	HasCode 认不出「国内厂牌直接接数字」 → 侧车 `MGL0002.json` 不被认作侧车
+//	                                    → 视频不改名、json 没有任何动作搬它
+//
+// 与 `MKD-S03` 那次的区别：那次分类也一起错了（落进兜底），
+// 这次分类**本来就是对的**（有「国产·无连字符」那条 pattern），
+// 所以现场看起来是「进了对目录但名字没改」—— 更容易被当成「还没跑到」而不是 bug。
+//
+// 实测来源：用户 2026-09-26 早上推的 `MGL0002` / `MDSR0006-1` 两部。
+//
+// 另外钉住**规范化**：带连字符与不带连字符两种推送形态必须**收敛到同一套名字**
+// （用户库里的既有形态是带连字符的，那是他手工改的）。
+func TestSidecarCNNoHyphenCode(t *testing.T) {
+	// 推送形态 → 期望的名字（三种形态收敛到同一套）
+	cases := []struct {
+		label, sidecar, video, wantNumber string
+	}{
+		{"无连字符", "MGL0002.json", "MGL0002 沉溺偷情的淫乱姐妹.mp4", "MGL-0002"},
+		{"带连字符", "MGL-0002.json", "MGL-0002 沉溺偷情的淫乱姐妹.mp4", "MGL-0002"},
+		{"带 -N 后缀", "MDSR0006-1.json", "MDSR0006-1.mp4", "MDSR-0006-1"},
+		{"目录名是中文标题", "MD0292.json", "【麻】MD0292胁迫调教.mp4", "MD-0292"},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			fs := newFakeFS()
+			const root = "/root"
+			fs.add(root, c.sidecar, 900, false)
+			fs.add(root, c.video, 688*mb, false)
+			target := fs.add(root, "整理库", 0, true)
+
+			plan := buildPlanWith(t, fs, root, target, seedConfig())
+
+			// ① 侧车要认得出来
+			if plan.Diagnostics["sidecars"] == nil {
+				t.Fatalf("%s 没被认作侧车 —— 视频不会改名、json 也不会被搬走", c.sidecar)
+			}
+
+			// ② 建目录：名字是**规范化之后**的番号
+			dirNames := []string{}
+			for _, a := range actionsFor(plan, stageMoveIn) {
+				if a.Kind == moplan.ActionKindEnsureDir {
+					dirNames = append(dirNames, a.TargetName)
+				}
+			}
+			if len(dirNames) != 1 || dirNames[0] != c.wantNumber {
+				t.Errorf("应当只建一个名为 %q 的目录，got %v", c.wantNumber, dirNames)
+			}
+
+			// ③ 视频改名成 <规范化番号>.<ext>
+			wantVideo := c.wantNumber + ".mp4"
+			gotVideo := ""
+			for _, a := range actionsFor(plan, stageRename) {
+				if a.TargetName == wantVideo {
+					gotVideo = a.TargetName
+				}
+			}
+			if gotVideo != wantVideo {
+				t.Errorf("视频应当改名成 %q，改名动作：%v", wantVideo,
+					namesOf(actionsFor(plan, stageRename), func(a moplan.PlanAction) string {
+						return a.SourceName + "→" + a.TargetName
+					}))
+			}
+
+			// ④ 侧车跟着改成同一个番号（用户要求两者同名）
+			wantJSON := c.wantNumber + ".json"
+			moved := map[string]bool{}
+			for _, a := range actionsFor(plan, stageMoveIn) {
+				if a.Kind == moplan.ActionKindRelocate {
+					moved[a.TargetName] = true
+				}
+			}
+			if !moved[wantJSON] {
+				t.Errorf("侧车应当改名并移入成 %q，移入的有：%v", wantJSON, moved)
+			}
+
+			// ⑤ 分类：命中「国产·无连字符」→ 进 `国产/`
+			classified := false
+			for _, a := range actionsFor(plan, stageClassify) {
+				if a.Kind == moplan.ActionKindRelocate && a.TargetName == c.wantNumber {
+					if !strings.Contains(a.Reason, "国产") {
+						t.Errorf("分类理由应当含「国产」，got %q", a.Reason)
+					}
+					classified = true
+				}
+			}
+			if !classified {
+				t.Errorf("%s 应当被分类搬走，动作：%v", c.wantNumber, actionsFor(plan, stageClassify))
+			}
+		})
+	}
+}
+
+// TestSidecarCNHyphenIdempotent 规范化必须**幂等** —— 整理要能反复跑。
+//
+// 第二轮读到的已经是带连字符的形态（`MGL-0002`），算出来必须同名、不产生任何动作。
+// 不幂等的话每跑一次整理都会改一次名（`MGL-0002` → 若算法错就变成 `MGL--0002`）。
+func TestSidecarCNHyphenIdempotent(t *testing.T) {
+	fs := newFakeFS()
+	const root = "/root"
+	// 第一轮跑完之后的形态：目录已建好、名字已规范化
+	sub := fs.add(root, "MGL-0002", 0, true)
+	fs.add(sub, "MGL-0002.json", 900, false)
+	fs.add(sub, "MGL-0002.mp4", 688*mb, false)
+	target := fs.add(root, "整理库", 0, true)
+
+	plan := buildPlanWith(t, fs, root, target, seedConfig())
+
+	if got := actionsFor(plan, stageRename); len(got) != 0 {
+		t.Errorf("第二轮不该再产生改名动作，got %v",
+			namesOf(got, func(a moplan.PlanAction) string { return a.SourceName + "→" + a.TargetName }))
+	}
+	if got := actionsFor(plan, stageMoveIn); len(got) != 0 {
+		t.Errorf("第二轮不该再产生建目录/移入动作，got %d 条", len(got))
+	}
+}
+
+// TestSidecarCNPrefixNotStolen 国内厂牌的 pattern **不该**吃掉日式番号。
+//
+// `MDB-082` / `MDS-061` / `MDTM-270` 这些是日本 Madonna 的番号（带连字符），
+// 前缀与国内的 `MD` 重叠 —— 它们必须仍落在「有码」，不能被「国产」抢走。
+func TestSidecarCNPrefixNotStolen(t *testing.T) {
+	for _, code := range []string{"MDB-082", "MDS-061", "MDTM-270", "MDYD-636", "ABP-123", "SSIS-001"} {
+		fs := newFakeFS()
+		const root = "/root"
+		fs.add(root, code+".json", 900, false)
+		fs.add(root, code+".mp4", 688*mb, false)
+		target := fs.add(root, "整理库", 0, true)
+
+		plan := buildPlanWith(t, fs, root, target, seedConfig())
+		for _, a := range actionsFor(plan, stageClassify) {
+			if a.Kind == moplan.ActionKindRelocate && a.TargetName == code {
+				if strings.Contains(a.Reason, "国产") {
+					t.Errorf("%s 是日式番号，不该进「国产」，理由：%q", code, a.Reason)
+				}
+			}
+		}
+	}
+}
+
+// TestSidecarUserBrandFromRules 用户在设置页新加的国产厂牌走完整条链。
+//
+// 起因（用户原话）：「国产厂牌各种各样的，随时都会有没加厂牌表的，到时自己加入，
+// 这样方便。」而此前**填了只生效一半** —— 分类规则读的是库里的表，而
+// `HasCode`（改名与认侧车的闸门）读的是代码里硬编码的 `cnBrandPrefixes`：
+//
+//	ZZBRAND0001（无连字符） → 分类「国产」✅ / 侧车认不出 ❌ / 不改名 ❌ / json 落源目录
+//	ZZBRAND-0001（带连字符）→ 靠通用正则兜住，看不出问题
+//
+// 所以这里钉住**无连字符**那种形态：加了厂牌就整条链跑通，不加就一切照旧。
+func TestSidecarUserBrandFromRules(t *testing.T) {
+	fs := newFakeFS()
+	const root = "/root"
+	fs.add(root, "ZZBRAND0001.json", 900, false) // 推送时写出的侧车
+	fs.add(root, "ZZBRAND0001 沉溺偷情的淫乱姐妹.mp4", 688*mb, false)
+	target := fs.add(root, "整理库", 0, true)
+
+	plan := buildPlanJavRules(t, fs, root, target, seedConfig(), withCNBrand(t, "ZZBRAND"))
+
+	// ① 侧车认得出来 —— 认不出时 diagnostics 里不会有 sidecars 这一项。
+	if plan.Diagnostics["sidecars"] == nil {
+		t.Fatal("ZZBRAND0001.json 没被认作侧车 —— 视频不会改名、json 也不会被搬走")
+	}
+
+	// ② 建目录：名字是**补上连字符**的番号（与用户库里既有形态一致）
+	dirNames := []string{}
+	for _, a := range actionsFor(plan, stageMoveIn) {
+		if a.Kind == moplan.ActionKindEnsureDir {
+			dirNames = append(dirNames, a.TargetName)
+		}
+	}
+	if len(dirNames) != 1 || dirNames[0] != "ZZBRAND-0001" {
+		t.Fatalf("应当只建一个名为 ZZBRAND-0001 的目录，got %v", dirNames)
+	}
+
+	// ③ 视频改名成标准形态（侧车自己也跟着改，所以按名字找而不是数条数）
+	renames := map[string]string{}
+	for _, a := range actionsFor(plan, stageRename) {
+		renames[a.SourceName] = a.TargetName
+	}
+	if got := renames["ZZBRAND0001 沉溺偷情的淫乱姐妹.mp4"]; got != "ZZBRAND-0001.mp4" {
+		t.Errorf("视频应当改名成 ZZBRAND-0001.mp4，got %q（全部：%v）", got, renames)
+	}
+
+	// ④ 侧车跟着改成同一个番号，并跟着移入
+	moved := map[string]bool{}
+	for _, a := range actionsFor(plan, stageMoveIn) {
+		if a.Kind == moplan.ActionKindRelocate {
+			moved[a.TargetName] = true
+		}
+	}
+	for _, want := range []string{"ZZBRAND-0001.mp4", "ZZBRAND-0001.json"} {
+		if !moved[want] {
+			t.Errorf("%s 应当移入作品目录，移入的有：%v", want, moved)
+		}
+	}
+
+	// ⑤ 分类：命中用户的「国产」规则 → 进 `国产/`
+	classified := false
+	for _, a := range actionsFor(plan, stageClassify) {
+		if a.Kind == moplan.ActionKindRelocate && a.TargetName == "ZZBRAND-0001" {
+			if !strings.Contains(a.Reason, "国产") {
+				t.Errorf("分类理由应当含「国产」，got %q", a.Reason)
+			}
+			classified = true
+		}
+	}
+	if !classified {
+		t.Errorf("ZZBRAND-0001 应当被分类搬走，动作：%v", actionsFor(plan, stageClassify))
+	}
+}
+
+// TestSidecarUserBrandAbsent 同一棵树、同一个名字：**规则里没加这个厂牌**时行为照旧。
+//
+// 这一半与上面那条同等重要 —— 「多认一个厂牌」只能是**加法**：加之前是什么样，
+// 不加的时候还得是什么样（认不出番号 → 不改名 → 目录名是清理后的原名 → 落兜底）。
+func TestSidecarUserBrandAbsent(t *testing.T) {
+	fs := newFakeFS()
+	const root = "/root"
+	fs.add(root, "ZZBRAND0001.json", 900, false)
+	fs.add(root, "ZZBRAND0001 沉溺偷情的淫乱姐妹.mp4", 688*mb, false)
+	target := fs.add(root, "整理库", 0, true)
+
+	plan := buildPlanWith(t, fs, root, target, seedConfig()) // 出厂默认规则
+
+	if plan.Diagnostics["sidecars"] != nil {
+		t.Error("没加厂牌时那份 json 不该被认作侧车")
+	}
+	dirNames := []string{}
+	for _, a := range actionsFor(plan, stageMoveIn) {
+		if a.Kind == moplan.ActionKindEnsureDir {
+			dirNames = append(dirNames, a.TargetName)
+		}
+	}
+	// 目录名是**原名扣掉扩展名**（没有番号 → 不改名，`RenameFilename` 原样返回整串，
+	// 连中文标题一起）。关键是它**没有**被补上连字符。
+	if len(dirNames) != 1 || dirNames[0] != "ZZBRAND0001 沉溺偷情的淫乱姐妹" {
+		t.Fatalf("目录名应当是原样返回的名字，got %v", dirNames)
+	}
+	// 分类：认不出厂牌 → 没有 pattern 命中 → 兜底的「未匹配」
+	// （`HasCode` 为假，所以兜底那条吃得到它 —— 这条同时钉住了「兜底没被自指破坏」）
+	classified := false
+	for _, a := range actionsFor(plan, stageClassify) {
+		if a.Kind == moplan.ActionKindRelocate && a.TargetName == "ZZBRAND0001 沉溺偷情的淫乱姐妹" {
+			if !strings.Contains(a.Reason, "未匹配") {
+				t.Errorf("应当落进兜底的「未匹配」，理由：%q", a.Reason)
+			}
+			classified = true
+		}
+	}
+	if !classified {
+		t.Errorf("哪怕认不出番号，兜底分类也该把它搬走，动作：%v", actionsFor(plan, stageClassify))
+	}
+}
+
+// TestSidecarUserBrandKeepsJapanese 加了厂牌之后，**番号识别**不能被带偏。
+//
+// 挑的是与用户会填的厂牌形状最像的那批：`SS` 之于 `SSIS-001`、`NIM` 之于 `NIMA-011`
+// —— 厂牌表放宽的只是「`<厂牌>` 后面**直接**接数字」这一种形态，所以带连字符的
+// 日式番号该走的还是原来那条路（原样、不补连字符、不改名）。
+//
+// **刻意不在这里断言分类落点**：分类走的是关键词的纯子串匹配，用户往「国产」里
+// 填了 `SS`，那么所有含 `SS` 的名字（含 `SSIS-001`）都会命中「国产」—— 那是他
+// 自己那条规则的意思，预览里看得见，与本次改动无关（不填 `SS` 就没有这回事）。
+// 厂牌表的责任边界是「番号认不认得出、要不要补连字符」。
+func TestSidecarUserBrandKeepsJapanese(t *testing.T) {
+	for _, code := range []string{"SSIS-001", "MMB-045", "NIMA-011", "MDB-082"} {
+		fs := newFakeFS()
+		const root = "/root"
+		fs.add(root, code+".json", 900, false)
+		fs.add(root, code+".mp4", 688*mb, false)
+		target := fs.add(root, "整理库", 0, true)
+
+		// 同时加两个「危险」厂牌：它们是上面那些日式番号的前缀。
+		rules := withCNBrand(t, "SS")
+		for i := range rules.ClassifyRules {
+			r := rules.ClassifyRules[i]
+			if r.TargetName == "国产" && r.EffectiveMode() == javrules.ModeIncludes {
+				rules.ClassifyRules[i].Includes = append(r.Includes, "NIM")
+			}
+		}
+		plan := buildPlanJavRules(t, fs, root, target, seedConfig(), rules)
+
+		// 视频文件名**一个动作都不该有**（标准名算出与原名相同 → 幂等），
+		// 目录名也不该变（侧车在场时目录名取纯番号，同样原样）。
+		for _, a := range actionsFor(plan, stageRename) {
+			if a.SourceName == code+".mp4" {
+				t.Errorf("加了厂牌 `SS`/`NIM` 之后 %s 被改名成 %q", code, a.TargetName)
+			}
+		}
+		for _, a := range actionsFor(plan, stageMoveIn) {
+			if a.Kind == moplan.ActionKindEnsureDir && a.TargetName != code {
+				t.Errorf("目录名应当是 %q，got %q", code, a.TargetName)
+			}
 		}
 	}
 }

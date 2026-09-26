@@ -41,11 +41,15 @@ func ExplainName(name string, rules Rules) Explain {
 	tr := &trace{on: true}
 	renamed := rename(name, rules, tr)
 
+	// 识别与抽番号都带上用户填的国产厂牌，与实际执行**同一套判据** ——
+	// 试跑是用户判断「我加的这条规则到底有没有用」的唯一窗口，预览里认得出、
+	// 整理时不认（或反过来）比不显示更糟。
+	brands := CNBrandsFromRules(rules.ClassifyRules)
 	dirStem, _ := splitExt(renamed)
 	res := Explain{
 		Name:     name,
-		HasCode:  HasCode(name),
-		Code:     ExtractCode(name),
+		HasCode:  HasCodeWithBrands(name, brands),
+		Code:     ExtractCodeWithBrands(name, brands),
 		Renamed:  renamed,
 		DirName:  dirStem,
 		Changed:  renamed != name,

@@ -43,12 +43,32 @@ var fallbackReplaceRules = []ReplaceRule{
 
 // fallbackClassifyRules 分类规则，顺序即优先级，首个命中者胜。
 //
-// 相比旧面板只去掉了 target_cid（115 专属的目录 ID），改成 target_name ——
-// 目标根目录下的相对子目录名，执行时按名找、找不到就建，这样同一套规则在所有网盘上都能用。
+// **这份默认表已经偏离 115-auto 的出厂值了**（原来那份在
+// `115-auto/multipan/organize_rules.py` 的 FALLBACK_CLASSIFY_RULES，5 条）。
+// 偏离逐条有据，都是实测踩出来的，不是顺手优化：
+//
+//  1. **多了「欧美日期型」这条 pattern**（原表 5 条 → 6 条）。原表只有
+//     includes，而站名表永远列不全 —— 实测用户库里有 55 种点分日期型片商，
+//     includes 只覆盖 12 种，剩下的会掉进兜底被塞进「国产无番号」，那是错的归类。
+//  2. **「素人」的 includes 补了 `FC2-PPV` 与 `FC2-`**（原表只有 `FC2PPV`）。
+//     includes 是纯 strings.Contains，`FC2-PPV-1234567` 这种最常见的写法对不上；
+//     而 `HasCode` 认 FC2，于是这些名字**既不入 includes 也不入兜底**，
+//     整类永远不会被分档。
+//  3. **「国外」的 includes 从 27 条补到 69 条**（实测用户库的片商名单）。
+//  4. **「日本」的 pattern 放宽成「连字符后可选一个字母」**，与 names.go 的
+//     reCodeAlphaNum 同源（`MKD-S03` 这类番号原来整体认不出）。
+//  5. **规则名与目标目录名换成中性口径**：国外→欧美、素人→无码和素人、
+//     国内→国产、日本→有码、无番号→未匹配。兜底那条的目标尤其不能叫
+//     「国产无番号」—— 它捕获的是**规则表没命中**的东西，而那不等于
+//     「国产且没番号」，一部没写番号的欧美片落进去就是错的归类。
+//
+// 目标目录名（target_name）在目标根目录下按名找、找不到就建，所以这套口径
+// 决定的是**媒体库里的目录结构**：`欧美 / 无码 / 国产 / 有码 / 未匹配`。
+// 用户要按自己的口径分，在设置页的规则编辑器里改（两个名字都可编辑）。
 var fallbackClassifyRules = []ClassifyRule{
 	{
-		Name:       "国外",
-		TargetName: "国外AV",
+		Name:       "欧美",
+		TargetName: "欧美",
 		Includes: []string{
 			"BLACKED", "BLACKEDRAW", "BRAZZERS", "BRAZZERSEXTRA", "RKPRIME",
 			"MILFY", "DIGITALPLAYGROUND", "TUSHY", "BANGBUS", "DAUGHTERSWAP",
@@ -56,8 +76,8 @@ var fallbackClassifyRules = []ClassifyRule{
 			"SEXMEX", "ASSHOLEFEVER", "ASSPARADE", "BBCPIE", "DEEPER",
 			"FREEUSEFANTASY", "ILOVEPOV", "JAPANHDV", "IMADEPORN", "BAEB",
 			"CLUBSWEETHEARTS", "THEREALWORKOUT",
-			// 下面这批是**实测用户库里存在、但名单上没有**的站。点分日期型那条
-			// pattern 已经能兜住形状（`BangBros18.19.09.17` 走 pattern 就进国外AV），
+			// 下面这批是**实测用户库里存在、但上游名单上没有**的站。点分日期型那条
+			// pattern 已经能兜住形状（`BangBros18.19.09.17` 走 pattern 就进欧美），
 			// 这里补的是**形状认不出**的那些 —— 站名后面不带日期段，
 			// 或者日期段被别的词隔开（`www.xBay.me - TeenFidelity E385 …`）。
 			//
@@ -77,8 +97,10 @@ var fallbackClassifyRules = []ClassifyRule{
 		},
 	},
 	{
-		Name:       "素人",
-		TargetName: "FC2",
+		// 无码与素人**合成一档**：这两类在媒体库里的归置需求是一样的
+		// （都不是日式有码片），而分开两档只会让目录变碎。
+		Name:       "无码和素人",
+		TargetName: "无码",
 		Includes: []string{
 			// `FC2-PPV` 与 `FC2-` 是相对上游加的两条，**修 bug 不是顺手优化**。
 			//
@@ -100,50 +122,93 @@ var fallbackClassifyRules = []ClassifyRule{
 		},
 	},
 	{
-		Name:       "国内",
-		TargetName: "国产AV",
+		// 欧美点分型：`<片商>.<日期>`（`TeenFidelity.19.09.17` / `BangBros18.19.09.17`）。
+		//
+		// **为什么必须有这条 pattern**：这类名字的番号形状本身就认得出片商，
+		// 但站名表永远列不全 —— 实测用户库里有 **55 种**点分日期型片商，
+		// 「欧美」的 includes 只覆盖 12 种。没有这条兜底，剩下的（`BangBros18`、
+		// `TeenFidelity`、`Vixen` 改名前的形态…）会掉进兜底被塞进
+		// 「国产无番号」，那是**错的归类**。
+		//
+		// 放在「国产」之后、「有码」之前：日式番号（`ABP-123`）与国内站
+		// （`MD-0123`）先被更具体的规则吃掉，轮不到这里。
+		//
+		// 锚定 `^` + 片商名是**纯字母**，这两条把误伤面压到零 ——
+		// 实测拿它扫用户库的 62 个「未匹配」+ 101 个「有码」+ 201 个「无码」
+		// 目录（当时的目录名还是旧口径「国产无番号 / 日本AV / FC2 / 国外AV」），
+		// **一个都不命中**；而 86 个「欧美」目录命中 82 个
+		// （剩下 4 个是 Vixen/Wifey 那批，靠 includes 命中）。
+		//
+		// 不锚定、或允许片商名含数字，都会把 `1080p.x264` 这类误收进来，
+		// 而且 `BangBros18`（片商名带数字的真实站）就得靠 includes 兜。
+		Name:       "欧美日期型",
+		TargetName: "欧美",
+		Pattern:    `^[A-Za-z]+[._-](\d{4}|\d{2})[._-]\d{2}[._-]\d{2}`,
+	},
+	{
+		// 国内站番号的**无连字符**形态（`MD0292` / `MDX0020` / `JDSY008`）。
+		//
+		// 为什么单列一条 pattern 而不是塞进下面那条的 includes：includes 是
+		// **纯 strings.Contains，不做分隔符归一化**（照搬 115-auto 的行为），
+		// 而下面那 12 条前缀**全部带尾连字符** —— `MD0292` 里没有 `MD-`，
+		// 一个都不命中。实测用户库里 46 个国内番号栽在这上面（`MD` 22 个、
+		// `MDSR` 9 个、`MDX` 7 个、`JDSY` 6 个…），整理后全落进兜底分类。
+		//
+		// 前缀后面允许一个可选分隔符（`[-_]?`），所以 `MD-0123` 与 `MD0292`
+		// 两种形态都吃 —— 但**下面那条 includes 必须保留**：它的子串匹配
+		// 顺手覆盖了别的形态，实测拿掉它会让 88 个已在「国产」的番号改判
+		// （`AMD-315` / `CEMD-163` / `SMD-115` 这类**日本**番号也是靠子串
+		// 命中进来的 —— 那是既有行为，与 115-auto 一致，本次不动）。
+		//
+		// 左边要求「开头或非字母数字」：`【麻】MD0292胁迫调教…` 这种带标题
+		// 前缀的名字也要认得出 —— 而 `MD0292` 这类番号 `HasCode` 为假，
+		// 改名不会动它，目录名就是整条标题，分类只能吃原名。
+		//
+		// 不放宽 HasCode：那会让 289 个「字母直接接数字」的名字都算番号
+		// （`n0417` / `crazyasia00414` 那种），代价与收益不相称。
+		Name:       "国产·无连字符",
+		TargetName: "国产",
+		Pattern: `(?:^|[^A-Za-z0-9])(?:` +
+			// 上游那 12 条 includes 的前缀
+			`MD|MDX|MDSJ|MDSR|MDHT|MAN|XB|XJX|JDSY|RAS|QQCM|AIMD|` +
+			// 下面这批是**实测用户库「国产AV」目录里出现、而上面那 12 条没覆盖**的
+			// 厂牌（麻豆的 MDCM/MDAG/MDWP、大象的 DA、以及 MGL/MSD/SZL/BLX…）。
+			// 逐个拿全库 8166 个番号验过：按这条 pattern 的形状匹配，
+			// **一个都没抢走**现在落在「有码/无码/欧美」的番号 —— `MM` 不会命中
+			// `MMB-045`、`NI` 不会命中 `NIMA-011`、`DA` 不会命中 `DAJ-017`，
+			// 因为前缀后面必须**直接**跟分隔符或数字。
+			`MDCM|MDAG|MDWP|MDHG|MDHS|MAD|MGL|MSD|SZL|BLX|BLXC|MCY|NHAV|` +
+			`EMTC|EMX|MFK|MPG|MNSC|WMM|MTVQ|MM|NI|PME|FX|GX|PH|TZ|DA|` +
+			`MDCN|MDL|PMC|MB|PMS|GDCM|PM|CZ|MHG|MT|PC|PMA|AAP|AAVV|CP` +
+			`)[-_]?\d`,
+	},
+	{
+		Name:       "国产",
+		TargetName: "国产",
 		Includes: []string{
 			"MD-", "MDX-", "MDSJ-", "MDSR-", "MDHT-", "MAN-", "XB-", "XJX-",
 			"JDSY-", "RAS-", "QQCM-", "AIMD-",
 		},
 	},
 	{
-		// 欧美点分型：`<片商>.<日期>`（`TeenFidelity.19.09.17` / `BangBros18.19.09.17`）。
-		//
-		// **为什么必须有这条 pattern**：这类名字的番号形状本身就认得出片商，
-		// 但站名表永远列不全 —— 实测用户库里有 **55 种**点分日期型片商，
-		// 「国外」的 includes 只覆盖 12 种。没有这条兜底，剩下的（`BangBros18`、
-		// `TeenFidelity`、`Vixen` 改名前的形态…）会掉进「无番号」被塞进
-		// 「国产无番号」，那是**错的归类**。
-		//
-		// 放在「国内」之后、「日本」之前：日式番号（`ABP-123`）与国内站
-		// （`MD-0123`）先被更具体的规则吃掉，轮不到这里。
-		//
-		// 锚定 `^` + 片商名是**纯字母**，这两条把误伤面压到零 ——
-		// 实测拿它扫用户库的 62 个「国产无番号」+ 101 个「日本AV」+ 201 个「FC2」
-		// 目录，**一个都不命中**；而 86 个「国外AV」目录命中 82 个
-		// （剩下 4 个是 Vixen/Wifey 那批，靠 includes 命中）。
-		//
-		// 不锚定、或允许片商名含数字，都会把 `1080p.x264` 这类误收进来，
-		// 而且 `BangBros18`（片商名带数字的真实站）就得靠 includes 兜。
-		Name:       "欧美日期型",
-		TargetName: "国外AV",
-		Pattern:    `^[A-Za-z]+[._-](\d{4}|\d{2})[._-]\d{2}[._-]\d{2}`,
+		Name:       "有码",
+		TargetName: "有码",
+		// 与 names.go 的 reCodeAlphaNum **同源**：那边放宽了「连字符后可选一个字母」
+		// （`MKD-S03`），这里必须跟着放，否则会出现最难查的那种不一致 ——
+		// `HasCode` 说「这是番号」（于是改名、认侧车都按番号走），
+		// 分类却一个 pattern 都命中不了，最后落进兜底的「未匹配」。
+		// 两处一起改才不会分家；改任一处时记得对一下。
+		Pattern: `^[A-Za-z]{2,6}-[A-Za-z]?\d{2,5}`,
 	},
 	{
-		Name:       "日本",
-		TargetName: "日本AV",
-		Pattern:    `^[A-Za-z]{2,6}-\d{2,5}`,
-	},
-	{
-		Name: "无番号",
 		// 都没匹配到时的兜底目录。
 		//
-		// 叫「无匹配」而不是「国产无番号」：这条规则捕获的是**规则表没命中**的东西，
+		// 叫「未匹配」而不是「国产无番号」：这条规则捕获的是**规则表没命中**的东西，
 		// 而那不等于「国产且没番号」—— 一个没写番号的欧美片也会落到这里，
-		// 放进「国产无番号」是错的归类。名字改成中性的，用户要按自己的口径
+		// 放进「国产无番号」是错的归类。名字用中性的，用户要按自己的口径
 		// 再分就在规则编辑器里改（target_name 本来就可编辑）。
-		TargetName: "无匹配",
+		Name:       "未匹配",
+		TargetName: "未匹配",
 		Nocode:     true,
 	},
 }

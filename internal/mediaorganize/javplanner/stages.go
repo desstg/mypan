@@ -52,6 +52,13 @@ type builder struct {
 	// 都读它 —— 它是「这个目录该怎么命名」的唯一依据。
 	sidecars sidecarIndex
 
+	// cnBrands 是**用户填的国产厂牌**（来自分类规则，见 javrules.CNBrandsFromRules）。
+	//
+	// 它让「设置页里加一个厂牌」这件事同时改变三个出口：认侧车、按侧车命名、
+	// 清理式改名。装在这里而不是各出口现算：一次计划要跑几千个文件，
+	// 每个都扫一遍规则表纯属浪费，而规则在这一轮里不会变。
+	cnBrands []string
+
 	protectedIDs   map[string]struct{} // 不能被改名/搬走的目录（含分类目标根及其祖先）
 	protectedNoted map[string]struct{}
 
@@ -67,6 +74,8 @@ func (b *builder) run() error {
 	if err := b.ctxErr(); err != nil {
 		return err
 	}
+	// 厂牌表要早于 loadSidecars —— 认侧车那一步就要用它（用户填的厂牌得算番号前缀）。
+	b.cnBrands = javrules.CNBrandsFromRules(b.planner.rules.ClassifyRules)
 	// 侧车先读齐：阶段 1 用它保护 json，阶段 2/3/5 用它决定名字与目录名。
 	// 只扫一次、每份只读一次。
 	b.sidecars = b.loadSidecars()
@@ -432,7 +441,7 @@ func (b *builder) stageEnsureDirAndMoveIn() {
 		// 直接从 json 自己的名字拆出纯番号的话，日期序号型会算出 `091926-001`
 		// 而视频那边算出 `091926-001-CARIB` —— 建出两个目录，json 单独进一个。
 		if b.isSidecarFile(f) {
-			number, _, ok := parseSidecarName(f.Name)
+			number, _, ok := parseSidecarName(f.Name, b.cnBrands)
 			if !ok {
 				continue
 			}

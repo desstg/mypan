@@ -69,6 +69,37 @@ function modeOf(rule: MediaOrganizeJavClassifyRule): string {
 }
 
 /**
+ * 这条规则是不是「国产」那一档。
+ *
+ * 只用来决定提示文案：国产那档的**关键词**同时还是「国产厂牌表」—— 后端的改名
+ * 与认侧车都会读它（无连字符的形态 `MD0292` 也认，会自动补成 `MD-0292`）。
+ * 判据与后端 javrules.isCNClassifyRule 一致：目标目录或规则名以「国产」开头。
+ * 两个字段都看，是因为这两个字段用户都能改 —— 只看目标目录的话，改个名这个
+ * 提示就没了。
+ */
+function isCNRule(rule: MediaOrganizeJavClassifyRule): boolean {
+  const target = (rule.target_name ?? "").trim();
+  const name = (rule.name ?? "").trim();
+  return target.startsWith("国产") || name.startsWith("国产");
+}
+
+/**
+ * 关键词那一栏的底部说明。
+ *
+ * 国产那档要多说一句：那里的词不只是分类关键词，还是**厂牌表** —— 遇到没收录的
+ * 国产厂牌，填在这里就够了，不必等发版。
+ */
+function includesHint(rule: MediaOrganizeJavClassifyRule): string {
+  const base = "名字里出现任意一个就算命中，不区分大小写。";
+  if (!isCNRule(rule)) return base;
+  return (
+    base +
+    "国产厂牌也填这里：分类、认侧车、改名都会认（无连字符的 MD0292 也认，会自动补成 MD-0292）。" +
+    "别填太短 —— 关键词是子串匹配，填 SS 会连 SSIS-001 一起命中。"
+  );
+}
+
+/**
  * 切换匹配方式**只改 mode**，不动另外两种方式的输入内容。
  *
  * 之前是「切过去就把另一种清空」，后果很糟：点一下「正则」，关键词整批消失；
@@ -202,7 +233,7 @@ function move(index: number, delta: number) {
           <label class="jav-classify__label">正则</label>
           <AppInput
             :model-value="rule.pattern ?? ''"
-            placeholder="例如 ^[A-Za-z]{2,6}-\d{2,5}"
+            placeholder="例如 ^[A-Za-z]{2,6}-[A-Za-z]?\d{2,5}"
             :disabled="disabled"
             @update:model-value="patch(index, { pattern: $event })"
           />
@@ -214,7 +245,7 @@ function move(index: number, delta: number) {
             :model-value="rule.includes ?? []"
             placeholder="输入关键词后回车"
             empty-hint="至少加一个关键词，否则这条规则永远不会命中"
-            input-hint="名字里出现任意一个就算命中，不区分大小写。"
+            :input-hint="includesHint(rule)"
             :disabled="disabled"
             @update:model-value="patch(index, { includes: $event })"
           />

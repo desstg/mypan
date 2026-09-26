@@ -41,16 +41,34 @@ type sidecarEntry struct {
 	// （CARIB / 1PON / …），只有日期序号型番号才可能非空。见 resolveStations。
 	//
 	// 为什么要有它：`091926-001` 这种番号本身不带站名，而它是唯一没有 pattern
-	// 兜底的番号形态 —— 字母番号改名后仍命中「日本」那条 `^[A-Za-z]{2,6}-\d{2,5}`，
+	// 兜底的番号形态 —— 字母番号改名后仍命中「有码」那条 `^[A-Za-z]{2,6}-[A-Za-z]?\d{2,5}`，
 	// 日期序号型则什么规则都命中不了，会**静默**留在原地（不报错、Skipped 里也没有）。
 	// 补上站名（`091926-001-CARIB`）之后，「素人」规则的 includes 就命中得了。
 	Station string
+
+	// brands 是**用户填的国产厂牌**（分类规则里来的，见 javrules.CNBrandsFromRules）。
+	//
+	// 与 Station 一样**固化在 entry 上**，而不是每个出口现算一遍：三个出口
+	// （视频名 / 目录名 / 侧车自己的去处）必须给出同一个答案，各算各的迟早走岔。
+	// 它是「无连字符的国产番号要不要补成带连字符」的依据。
+	brands []string
 }
 
 // WorkNumber 是「视频名、作品目录名与侧车名该用的番号」。
 //
 // 日期序号型且捞到站名时拼成 `091926-001-CARIB`，否则就是 Number 本身
 // （字母番号、以及没带站名的日期序号型 —— 后者保持既有行为不变）。
+//
+// **国内厂牌的番号在这里补上连字符**（`MGL0002` → `MGL-0002`）。
+//
+// 为什么放在这一层而不是 `quality.BuildJavFileName`：后者是**写侧车与整理共用**
+// 的出口，而「哪些前缀算国内厂牌」是整理侧的业务知识（那份厂牌表就住在
+// `javrules`，是为了分类规则而存在的），塞进纯命名包不合它的定位。
+//
+// 放在这一层的代价：写侧车时（`internal/jav/sidecar.go`）名字仍是 `MGL0002.json`
+// 而整理会把它改成 `MGL-0002.json` —— 多产生一条改名动作才收敛。这是可接受的：
+// 那条动作幂等（第二轮 `WorkNumber()` 已是带连字符的形态，算出来同名、不产生动作），
+// 而反过来把它放进 `quality` 会让那个包开始认识业务规则。
 //
 // **所有出口都必须读它**，不能各读各的：视频名、作品目录名、侧车自己的去处
 // 三处给出不同答案，就会出现「按 A 建目录、按 B 把目录改名」这种自相矛盾的计划
@@ -61,7 +79,11 @@ type sidecarEntry struct {
 // json 没改，下一轮就得靠猜。质量标记（-U/-C/-UC/-4K）仍由 Marks 单独缀在后面。
 func (e sidecarEntry) WorkNumber() string {
 	if e.Station == "" {
-		return e.Number
+		// 国内厂牌补连字符；其余番号（日式字母番号、FC2、日期序号型）原样返回 ——
+		// `NormalizeCNHyphenWithBrands` 只认那份厂牌表（代码里的 + 用户填的），
+		// 不匹配就原样给回来。
+		number, _ := javrules.NormalizeCNHyphenWithBrands(e.Number, e.brands)
+		return number
 	}
 	return e.Number + "-" + e.Station
 }
@@ -126,7 +148,7 @@ func (b *builder) loadSidecars() sidecarIndex {
 		if extOf(f.Name) != sidecarExt {
 			continue
 		}
-		number, marks, ok := parseSidecarName(f.Name)
+		number, marks, ok := parseSidecarName(f.Name, b.cnBrands)
 		if !ok {
 			continue
 		}
@@ -147,6 +169,7 @@ func (b *builder) loadSidecars() sidecarIndex {
 		}
 		ix.byDir[f.ParentID] = append(ix.byDir[f.ParentID], sidecarEntry{
 			FileID: f.ID, Name: f.Name, Number: number, Marks: marks,
+			brands: b.cnBrands,
 		})
 	}
 	if len(ix.dirs) > 0 {
@@ -245,7 +268,7 @@ func (b *builder) ownerFor(dirID string, f ScannedFile) (sidecarEntry, bool) {
 	if entry, ok := b.sidecars.sole(dirID); ok {
 		return entry, true
 	}
-	code := javrules.ExtractCode(f.Name)
+	code := javrules.ExtractCodeWithBrands(f.Name, b.cnBrands)
 	if strings.TrimSpace(code) == "" {
 		return sidecarEntry{}, false
 	}
@@ -281,15 +304,20 @@ func sameNumber(a, b string) bool {
 // （它们确实就是「没有标记的主名」），而网盘上顺带带着的配置 json 满地都是 ——
 // 少这道闸，一个 `readme-4K.json` 就会被当成侧车，拿 `readme` 去改视频名、建目录。
 //
-// 判据复用 javrules.HasCode 而不是在这里另写一套：那是这个项目里唯一权威的
-// 番号识别，设置页的试跑预览走的也是它。两套判据迟早分家，而分家的表现是
+// 判据复用 javrules.HasCodeWithBrands 而不是在这里另写一套：那是这个项目里唯一
+// 权威的番号识别，设置页的试跑预览走的也是它。两套判据迟早分家，而分家的表现是
 // 「同一份文件在预览里认得出、整理时不认」。
-func parseSidecarName(name string) (string, quality.Marks, bool) {
+//
+// `brands` 是用户填的国产厂牌：不带上它的话，用户在设置页新加一个国产厂牌之后，
+// **分类**按规则命中进了「国产」，而推送写出的 `ZZBRAND0001.json` 却不被当成侧车
+// ——视频不改名、json 也没有任何动作搬它，落在源目录里没人管。这就是
+// `MDCN` / `MDL` 当初漏掉的那个病。
+func parseSidecarName(name string, brands []string) (string, quality.Marks, bool) {
 	if extOf(name) != sidecarExt {
 		return "", quality.Marks{}, false
 	}
 	number, marks, ok := quality.ParseJavFileName(stemOf(name))
-	if !ok || !javrules.HasCode(number) {
+	if !ok || !javrules.HasCodeWithBrands(number, brands) {
 		return "", quality.Marks{}, false
 	}
 	return number, marks, true

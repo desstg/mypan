@@ -267,8 +267,8 @@ func TestExplainName(t *testing.T) {
 	}
 	// 分类走「原名优先、清理名兜底」：原名 `hhd800.com@ABP-123 中文字幕.mp4` 匹配不到
 	// 锚定开头的 日本 规则，但清理名 `ABP-123` 可以 —— 这是相对 115-auto 的有意增强。
-	if res.ClassifyTarget != "日本AV" {
-		t.Errorf("ClassifyTarget = %q, 期望 %q", res.ClassifyTarget, "日本AV")
+	if res.ClassifyTarget != "有码" {
+		t.Errorf("ClassifyTarget = %q, 期望 %q", res.ClassifyTarget, "有码")
 	}
 	// Steps 是设置页试跑的核心价值：告诉用户到底哪条规则生效了
 	if len(res.Steps) == 0 {
@@ -290,7 +290,7 @@ func TestExplainNameNoCode(t *testing.T) {
 	if res.Changed {
 		t.Error("无番号不该标记为已改动")
 	}
-	if res.ClassifyTarget != "无匹配" {
+	if res.ClassifyTarget != "未匹配" {
 		t.Errorf("应归到兜底分类，得到 %q", res.ClassifyTarget)
 	}
 }
