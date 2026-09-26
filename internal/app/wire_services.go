@@ -237,6 +237,11 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	javSvc.SetStartupGate(startupGate)
 	javSvc.Register(core.bus)
 
+	// 番号元数据生成要用 jav.Service 的图片代理：XOR 解码、Content-Type 判定、
+	// 域名白名单都在那边（internal/jav/image.go）。走 setter 是因为接线顺序上
+	// wireSTRM 早于 jav.New，构造期拿不到这个实例。
+	strmSvc.SetJavImageFetcher(javSvc)
+
 	// 必须在 offlineDownloadSvc 之后构造，才能订阅它的下载完成事件。
 	tgSubscribeSvc.Register(core.bus)
 	return &servicesBundle{

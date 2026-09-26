@@ -29,6 +29,8 @@ type CurrentDirectoryResult struct {
 	MetadataCreated    int64
 	MetadataUploaded   int64
 	MetadataDeleted    int64
+	// JavMetadataCreated 是番号元数据那一步新写出来的文件数（nfo + 图片）。
+	JavMetadataCreated int64
 }
 
 type CurrentDirectoryStatus struct {
@@ -38,12 +40,16 @@ type CurrentDirectoryStatus struct {
 }
 
 type currentDirWork struct {
-	task            *domain.StrmTask
-	parentID        string
-	relDirs         []string
-	outputFolder    string
-	root            string
-	scanCfg         ScanSettings
+	task         *domain.StrmTask
+	parentID     string
+	relDirs      []string
+	outputFolder string
+	root         string
+	scanCfg      ScanSettings
+	// metaExts 是（番号任务已补上 json 的）元数据扩展名集合。**必须是 prepare 那份**：
+	// 调用方那边再解析一次就会漏掉 javMetaExtensions，表现是「只有手动生成那一路
+	// 不下侧车、于是不出 nfo/图」。
+	metaExts        map[string]struct{}
 	selected        []mediaCandidate
 	metadataItems   []metadataItem
 	remoteDirNames  map[string]struct{}
@@ -182,7 +188,7 @@ func (s *Service) GenerateCurrentDirectory(ctx context.Context, accountID int64,
 			Root:         work.root,
 			OutputFolder: work.outputFolder,
 			Mode:         work.scanCfg.MetadataSyncMode,
-			Extensions:   parseExtensions(work.scanCfg.MetadataExtensions),
+			Extensions:   work.metaExts,
 			MaxSizeBytes: metadataMaxBytes(work.scanCfg.MetadataMaxSizeMB),
 			RemoteItems:  filtered,
 			Directories: map[string]metadataDirectory{
@@ -190,6 +196,8 @@ func (s *Service) GenerateCurrentDirectory(ctx context.Context, accountID int64,
 			},
 			Files:    s.files,
 			Playback: s.playback,
+
+			JavArtifactGuard: work.task.MediaKind == domain.StrmMediaKindJav,
 		})
 		if syncErr != nil {
 			return out, syncErr
@@ -199,7 +207,33 @@ func (s *Service) GenerateCurrentDirectory(ctx context.Context, accountID int64,
 		out.MetadataDeleted = syncResult.Deleted
 	}
 
+	// 番号元数据。**手动生成是批量回填的入口**：这里处理该目录里**全部** .strm，
+	// 而扫描那一路只处理本轮新增 / 更新的（老片子不会自己回头补）。
+	//
+	// 与扫描那一路同样排在 syncMetadata 之后：侧车 json 得先在本地躺好。
+	if work.task.MediaKind == domain.StrmMediaKindJav && s.javImages != nil {
+		if dirAbs := filepath.Join(work.root, outputDirRel(work.outputFolder, work.relDirs)); dirAbs != "" {
+			if names, listErr := listStrmFiles(dirAbs); listErr == nil && len(names) > 0 {
+				res := generateJavArtifacts(ctx, javArtifactRequest{
+					Root:        dirAbs,
+					StrmFiles:   names,
+					Items:       work.scanCfg.JavMetaItems,
+					Images:      s.javImages,
+					PosterQueue: s.javPosters,
+					Log:         s.log,
+				})
+				out.JavMetadataCreated = res.Written
+			}
+		}
+	}
+
 	return out, nil
+}
+
+// outputDirRel 拼出「输出目录 + 本次远端相对子目录」这一段本地相对路径。
+func outputDirRel(outputFolder string, relDirs []string) string {
+	segs := append(SafeDirSegments(outputFolder), relDirs...)
+	return filepath.Join(segs...)
 }
 
 func (s *Service) prepareCurrentDirectoryWork(ctx context.Context, accountID int64, parentID, currentPath string, items []CurrentDirectoryEntry) (*currentDirWork, error) {
@@ -226,7 +260,9 @@ func (s *Service) prepareCurrentDirectoryWork(ctx context.Context, accountID int
 	if len(exts) == 0 {
 		exts = parseExtensions(defaultExtensions)
 	}
-	metaExts := parseExtensions(scanCfg.MetadataExtensions)
+	// 与 ScanTask 同一处收口：手动「生成当前目录 STRM」也要给番号任务补上 json，
+	// 否则它在界面上看起来就是「只有手动生成那一路不出图」。
+	metaExts := javMetaExtensions(task.MediaKind, parseExtensions(scanCfg.MetadataExtensions))
 	minMediaBytes := int64(scanCfg.MinFileSizeMB) * 1024 * 1024
 	metaMaxBytes := int64(scanCfg.MetadataMaxSizeMB) * 1024 * 1024
 	if scanCfg.MetadataMaxSizeMB <= 0 {
@@ -282,6 +318,7 @@ func (s *Service) prepareCurrentDirectoryWork(ctx context.Context, accountID int
 		outputFolder:    outputFolder,
 		root:            s.strmDir,
 		scanCfg:         scanCfg,
+		metaExts:        metaExts,
 		selected:        selected,
 		metadataItems:   metadataItems,
 		remoteDirNames:  remoteDirNames,

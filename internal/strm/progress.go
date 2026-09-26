@@ -15,6 +15,9 @@ const (
 	ScanPhaseMetadata        = "syncing_metadata"
 	ScanPhaseMetadataUpload  = "uploading_metadata"
 	ScanPhaseMetadataCleanup = "cleaning_metadata"
+	// ScanPhaseMetadataJav 是番号任务独有的那一步：读本地的侧车 json，
+	// 生成 nfo 与封面 / 剧照。前端把它显示成「生成番号元数据」。
+	ScanPhaseMetadataJav = "generating_jav_metadata"
 )
 
 type ScanProgressUpdate struct {

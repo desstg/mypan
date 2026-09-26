@@ -66,16 +66,23 @@ const (
 	KeyStrmMetadataParentEnabled = "strm_metadata_parent_enabled"
 	KeyStrmMetadataSyncMode      = "strm_metadata_sync_mode"
 	KeyStrmTool115TreeEnabled    = "strm_tool_115_tree_enabled"
-	KeyLocalUploadEnabled        = "local_upload_enabled"
-	KeyLocalUploadMappings       = "local_upload_mappings"
-	KeyCoverExtractEnabled       = "cover_extract_enabled"
-	KeyCoverExtractStyle         = "cover_extract_style"
-	KeyQuarkTVEnabled            = "quark_tv_enabled"
-	KeyQuarkTVPlayMode           = "quark_tv_play_mode"
-	KeyQuarkTVClientListMode     = "quark_tv_client_list_mode"
-	KeyQuarkTVProxyClients       = "quark_tv_proxy_clients"
-	KeyStrmScrapeWriteMode       = "strm_scrape_write_mode"
-	KeyStrmScrapeScopes          = "strm_scrape_scopes"
+
+	// KeyStrmJavMetaItems 是「番号元数据」那六个开关（媒体类型选「番号影片」时生效）。
+	//
+	// 值是一个 JSON 对象（见 JavMetaItems），**不是**「;」分隔的列表 —— 全不勾时
+	// 列表会是空串，而空串在本项目里表示「没存过、回落默认值」，那个坑会让
+	// 「一个都不要」永远存不下去。理由与默认值都写在 javmeta.go。
+	KeyStrmJavMetaItems      = "strm_jav_metadata_items"
+	KeyLocalUploadEnabled    = "local_upload_enabled"
+	KeyLocalUploadMappings   = "local_upload_mappings"
+	KeyCoverExtractEnabled   = "cover_extract_enabled"
+	KeyCoverExtractStyle     = "cover_extract_style"
+	KeyQuarkTVEnabled        = "quark_tv_enabled"
+	KeyQuarkTVPlayMode       = "quark_tv_play_mode"
+	KeyQuarkTVClientListMode = "quark_tv_client_list_mode"
+	KeyQuarkTVProxyClients   = "quark_tv_proxy_clients"
+	KeyStrmScrapeWriteMode   = "strm_scrape_write_mode"
+	KeyStrmScrapeScopes      = "strm_scrape_scopes"
 
 	KeyMOTmdbAPIKey            = "mo_tmdb_api_key"
 	KeyMOTmdbLanguage          = "mo_tmdb_language"
@@ -379,6 +386,16 @@ func defaultSpecs() []Spec {
 		intSpec(KeyStrmMetadataMaxSizeMB, "strm", "元数据大小上限", "同步元数据时忽略超过该大小的文件。", "10", "MB", 1, 1024),
 		boolSpec(KeyStrmMetadataParentEnabled, "strm", "父目录元数据同步", "子目录有影片时，也同步父目录下的海报、nfo 等元数据。", "true"),
 		boolSpec(KeyStrmTool115TreeEnabled, "strm", "115 网盘 STRM 增强（目录树清单模式）", "开启后 115Open 账号的 STRM 任务改用全量清单 + 增量对账方式执行，减少逐目录递归请求；配了分支的任务维持原逻辑。", "false"),
+		// Hidden：它由「STRM 设置」页里那排复选框读写，不该在「系统设置」的通用表单里
+		// 露出一个裸 JSON 输入框。
+		{
+			Key:       KeyStrmJavMetaItems,
+			Type:      TypeString,
+			Default:   DefaultJavMetaItems().Encode(),
+			Hidden:    true,
+			normalize: normalizeJavMetaItems,
+		},
+
 		selectSpec(KeyStrmMetadataSyncMode, "strm", "元数据同步策略", "local_primary=保留本地并从云端补缺；cloud_primary=本地目录与云端保持一致；bidirectional=本地与云端互相补缺。", "local_primary", []Option{
 			{Value: "cloud_primary", Label: "网盘元数据为主"},
 			{Value: "local_primary", Label: "本地元数据补缺"},

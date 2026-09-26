@@ -42,6 +42,13 @@ type Service struct {
 	bus        *eventbus.Bus
 	log        *slog.Logger
 
+	// javImages 取番号图片（XOR 解码在 jav 那边）。用 setter 注入：接线顺序上
+	// wireSTRM 早于 jav.New，构造期拿不到 *jav.Service（见 SetJavImageFetcher）。
+	javImages JavImageFetcher
+	// javPosters 是海报裁切的低优先级队列，全局一个（所有任务共用一个单并发工作者，
+	// 多个任务并行时海报天然排队 —— 这就是「低优先级」的实现方式）。
+	javPosters *javPosterQueue
+
 	mu                       sync.Mutex
 	running                  map[int64]bool
 	runningAccounts          map[int64]struct{}
@@ -97,6 +104,7 @@ func NewService(opts ServiceOptions) *Service {
 		secret:          opts.Secret,
 		bus:             opts.Bus,
 		log:             log,
+		javPosters:      newJavPosterQueue(log),
 		running:         make(map[int64]bool),
 		runningAccounts: make(map[int64]struct{}),
 		taskCancels:     make(map[int64]context.CancelFunc),
@@ -104,6 +112,20 @@ func NewService(opts ServiceOptions) *Service {
 		pendingRun:      make(map[int64]string),
 		fileOperations:  make(map[int64]struct{}),
 	}
+}
+
+// SetJavImageFetcher 注入番号图片抓取器（*jav.Service）。
+//
+// 走 setter 而不是 ServiceOptions：接线顺序上 wireSTRM 早于 jav.New，
+// 构造期拿不到那个实例。与 SetOrganizeBusyChecker / SetStartupGate 同一个形状。
+// 没注入时番号元数据这一步整体跳过（其余行为不变）。
+func (s *Service) SetJavImageFetcher(fetcher JavImageFetcher) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.javImages = fetcher
+	s.mu.Unlock()
 }
 
 func (s *Service) SetOrganizeBusyChecker(checker RunningAccountLister) {
@@ -276,6 +298,8 @@ func (s *Service) Start(ctx context.Context) {
 	s.mu.Unlock()
 
 	go s.recoverStaleRunningTasks(ctx)
+	// 海报裁切队列随 appCtx 结束 —— 它是「扫描收工之后慢慢做」的那一步。
+	s.javPosters.Start(ctx)
 
 	go func() {
 		if !s.awaitStartup(ctx) {
@@ -497,6 +521,9 @@ func (s *Service) GetRuntimeSettings(ctx context.Context, requestBase string) (m
 		"metadata_max_size_mb":    s.settings.Int(settings.KeyStrmMetadataMaxSizeMB),
 		"metadata_parent_enabled": s.settings.Bool(settings.KeyStrmMetadataParentEnabled),
 		"metadata_sync_mode":      normalizeMetadataSyncMode(s.settings.String(settings.KeyStrmMetadataSyncMode)),
+		// 番号元数据那六个开关。给**规范字符串**（键顺序固定）：前端拿前后两个值
+		// 比就知道有没有改动，顺序不稳定会一直误报未保存。
+		"jav_metadata_items": settings.ParseJavMetaItems(s.settings.StringAllowEmpty(settings.KeyStrmJavMetaItems)).Encode(),
 	}, nil
 }
 
@@ -579,6 +606,16 @@ func (s *Service) normalizeTask(task domain.StrmTask) domain.StrmTask {
 	case domain.StrmScanModeIncrementalMissing, domain.StrmScanModeIncrementalUpdate, domain.StrmScanModeFullSync:
 	default:
 		task.ScanMode = domain.StrmScanModeIncrementalUpdate
+	}
+	// 媒体类型在这里收口，而不是只依赖建任务时前端传对：
+	// UpdateTask 与 automation 的绑定/回滚都走 `Get → 改字段 → normalizeTask → Update`，
+	// 少了这一处，一次 automation 回滚就会把一个番号任务悄悄变回 tmdb —— 而 tmdb
+	// 的表现是「什么都不生成、也不报错」，用户只会以为功能坏了。
+	task.MediaKind = strings.TrimSpace(task.MediaKind)
+	switch task.MediaKind {
+	case domain.StrmMediaKindJav:
+	default:
+		task.MediaKind = domain.StrmMediaKindTmdb
 	}
 	if task.ApiInterval < 0 {
 		task.ApiInterval = 0
@@ -674,6 +711,7 @@ func (s *Service) scanSettings() ScanSettings {
 		MetadataParentEnabled: s.settings.Bool(settings.KeyStrmMetadataParentEnabled),
 		MetadataSyncMode:      normalizeMetadataSyncMode(s.settings.String(settings.KeyStrmMetadataSyncMode)),
 		Tool115TreeEnabled:    s.settings.Bool(settings.KeyStrmTool115TreeEnabled),
+		JavMetaItems:          settings.ParseJavMetaItems(s.settings.StringAllowEmpty(settings.KeyStrmJavMetaItems)),
 	}
 }
 

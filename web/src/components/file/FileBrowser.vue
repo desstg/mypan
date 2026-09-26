@@ -435,7 +435,10 @@ async function handleGenerateCurrentDirectoryStrm() {
       (result.deleted || 0) <= 0 &&
       (result.metadata_created || 0) <= 0 &&
       (result.metadata_uploaded || 0) <= 0 &&
-      (result.metadata_deleted || 0) <= 0
+      (result.metadata_deleted || 0) <= 0 &&
+      // 番号元数据也算「有活干了」：strm 都已在、只有 nfo/剧照是新生成的时，
+      // 不加这一条会弹「没有需要同步的 STRM」，看着像什么都没做。
+      (result.jav_metadata_created || 0) <= 0
     ) {
       toast.info("当前目录没有需要同步的 STRM");
       return;
@@ -444,6 +447,7 @@ async function handleGenerateCurrentDirectoryStrm() {
     if ((result.created || 0) > 0) parts.push(`新增 ${result.created}`);
     if ((result.updated || 0) > 0) parts.push(`更新 ${result.updated}`);
     if ((result.deleted || 0) > 0) parts.push(`删除 ${result.deleted}`);
+    if ((result.jav_metadata_created || 0) > 0) parts.push(`番号元数据 ${result.jav_metadata_created}`);
     if (parts.length > 0) {
       toast.success(`STRM 同步完成：${parts.join(" · ")}`);
     } else if (

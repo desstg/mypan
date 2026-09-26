@@ -26,6 +26,7 @@ type strmTaskDTO struct {
 	ExcludeDirKeywords  string `json:"exclude_dir_keywords"`
 	ExcludeFileKeywords string `json:"exclude_file_keywords"`
 	SyncMetadata        bool   `json:"sync_metadata"`
+	MediaKind           string `json:"media_kind"`
 	BranchCheckEnabled  bool   `json:"branch_check_enabled"`
 	TimeWindowEnabled   bool   `json:"time_window_enabled"`
 	TimeStart           string `json:"time_start"`
@@ -393,6 +394,8 @@ type strmCurrentDirectoryResultDTO struct {
 	MetadataCreated    int64 `json:"metadata_created"`
 	MetadataUploaded   int64 `json:"metadata_uploaded"`
 	MetadataDeleted    int64 `json:"metadata_deleted"`
+	// JavMetadataCreated 是番号元数据那一步新写出来的文件数（nfo + 图片）。
+	JavMetadataCreated int64 `json:"jav_metadata_created"`
 }
 
 type strmDirectoryStatusDTO struct {
@@ -460,6 +463,7 @@ func (h *Handler) generateCurrentDirectoryStrm(w http.ResponseWriter, r *http.Re
 		MetadataCreated:    result.MetadataCreated,
 		MetadataUploaded:   result.MetadataUploaded,
 		MetadataDeleted:    result.MetadataDeleted,
+		JavMetadataCreated: result.JavMetadataCreated,
 	}
 	if out.MatchedTaskID <= 0 {
 		writeJSON(w, http.StatusBadRequest, Resp{
@@ -567,6 +571,7 @@ func mapStrmSettingAliases(in map[string]string) {
 		"metadata_max_size_mb":    settings.KeyStrmMetadataMaxSizeMB,
 		"metadata_parent_enabled": settings.KeyStrmMetadataParentEnabled,
 		"metadata_sync_mode":      settings.KeyStrmMetadataSyncMode,
+		"jav_metadata_items":      settings.KeyStrmJavMetaItems,
 	}
 	for k, v := range aliases {
 		if raw, ok := in[k]; ok {
@@ -592,6 +597,7 @@ func fromStrmTaskDTO(in strmTaskDTO) *domain.StrmTask {
 		ExcludeDirKeywords:  in.ExcludeDirKeywords,
 		ExcludeFileKeywords: in.ExcludeFileKeywords,
 		SyncMetadata:        in.SyncMetadata,
+		MediaKind:           in.MediaKind,
 		BranchCheckEnabled:  in.BranchCheckEnabled,
 		TimeWindowEnabled:   in.TimeWindowEnabled,
 		TimeStart:           in.TimeStart,
@@ -620,6 +626,7 @@ func toStrmTaskDTO(task *domain.StrmTask, meta strm.TaskListMeta, automationMana
 		ExcludeDirKeywords:  task.ExcludeDirKeywords,
 		ExcludeFileKeywords: task.ExcludeFileKeywords,
 		SyncMetadata:        task.SyncMetadata,
+		MediaKind:           task.MediaKind,
 		BranchCheckEnabled:  task.BranchCheckEnabled,
 		TimeWindowEnabled:   task.TimeWindowEnabled,
 		TimeStart:           task.TimeStart,

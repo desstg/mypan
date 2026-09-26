@@ -80,7 +80,7 @@ func TestCleanupMissingRemoteChildDirsCountsOnlyStrmFiles(t *testing.T) {
 
 	removed, err := cleanupMissingRemoteChildDirs(root, "任务", map[string]map[string]struct{}{
 		dirKey([]string{"电视剧"}): {},
-	}, nil, nil)
+	}, nil, nil, false)
 	if err != nil {
 		t.Fatalf("cleanupMissingRemoteChildDirs() error = %v", err)
 	}
@@ -483,5 +483,48 @@ func TestScanTaskManualAllowsLargeCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "f0000.strm")); !os.IsNotExist(err) {
 		t.Fatalf("手动执行应删除本地 STRM，stat err=%v", err)
+	}
+}
+
+// TestCleanupMissingRemoteChildDirsKeepsJavArtifacts 番号任务下，本程序生成的
+// `extrafanart/` 不能被「远端已删目录」那套清掉。
+//
+// 实测（用户真机日志）：第一轮生成完 85 个文件，第二轮的清理就把 7 个 extrafanart
+// 全删了 —— 它本地独有，网盘上永远没有对应项，所以每扫一轮删一次，用户看到的是
+// 「剧照刚生成就没了」。与文件级守卫同一个道理。
+func TestCleanupMissingRemoteChildDirsKeepsJavArtifacts(t *testing.T) {
+	root := t.TempDir()
+	localDir := filepath.Join(root, "任务", "番号", "有码", "SSIS-001")
+	if err := os.MkdirAll(filepath.Join(localDir, "extrafanart"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "SSIS-001.strm"), []byte("url"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "extrafanart", "fanart1.jpg"), []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	remoteChildren := map[string]map[string]struct{}{
+		dirKey([]string{"番号", "有码", "SSIS-001"}): {},
+	}
+
+	// 番号任务：extrafanart 留着，其它本地独有目录照常清
+	removed, err := cleanupMissingRemoteChildDirs(root, "任务", remoteChildren, nil, nil, true)
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("extrafanart 里没有 .strm，removed 应当是 0，got %d", removed)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "extrafanart", "fanart1.jpg")); err != nil {
+		t.Errorf("番号任务下 extrafanart 不该被删：%v", err)
+	}
+
+	// 非番号任务（tmdb）：照旧清理 —— 证明守卫是按任务类型生效的
+	if _, err := cleanupMissingRemoteChildDirs(root, "任务", remoteChildren, nil, nil, false); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(localDir, "extrafanart")); !os.IsNotExist(err) {
+		t.Error("非番号任务下该目录仍应被清理")
 	}
 }

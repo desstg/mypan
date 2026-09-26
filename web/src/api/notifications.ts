@@ -101,6 +101,9 @@ export function parseStrmScrapeFailures(message: string): {
 
 export function strmScanFailureKindLabel(kind: string): string {
   if (kind === "metadata") return "元数据";
+  // 番号元数据（nfo / 封面 / 剧照）读不通侧车、或素材配不上时才记这一类。
+  // 不单独列的话未知 kind 一律显示「STRM」，会让人以为是 .strm 写失败了。
+  if (kind === "jav_metadata") return "番号元数据";
   return "STRM";
 }
 

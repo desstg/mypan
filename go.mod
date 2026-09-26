@@ -6,6 +6,7 @@ require (
 	github.com/alde/go-fish v0.0.0-20260611152328-df695ecc9fbf
 	github.com/anacrolix/dht/v2 v2.24.0
 	github.com/anacrolix/torrent v1.61.0
+	github.com/esimov/pigo v1.4.6
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.11.0

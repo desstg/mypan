@@ -169,6 +169,8 @@ func (s *Service) runTaskAsync(task *domain.StrmTask) {
 			SignEnabled: s.settings.Bool(settings.KeyStrmSignatureEnabled),
 			Secret:      s.secret,
 			Settings:    s.scanSettings(),
+			JavImages:   s.javImages,
+			JavPosters:  s.javPosters,
 			Log:         s.log,
 			OnProgress:  reportProgress,
 		}, runMode)

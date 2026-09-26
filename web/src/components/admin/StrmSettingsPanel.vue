@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { getApiErrorMessage } from "@/api/client";
 import {
   CONFLICT_POLICIES,
@@ -15,6 +15,7 @@ import AppSelect from "@/components/base/AppSelect.vue";
 import InputActionField from "@/components/admin/InputActionField.vue";
 import SettingsBoolSegment from "@/components/admin/SettingsBoolSegment.vue";
 import SettingsCard from "@/components/admin/SettingsCard.vue";
+import SettingsCheckboxRow from "@/components/admin/SettingsCheckboxRow.vue";
 import SettingsHelpTooltip from "@/components/admin/SettingsHelpTooltip.vue";
 import SettingsRow from "@/components/admin/SettingsRow.vue";
 import { confirm } from "@/composables/useConfirm";
@@ -28,6 +29,23 @@ const STRM_SETTINGS_ACCENT = "#7c3aed";
 const MINUTES_PER_HOUR = 60;
 const DEFAULT_SCAN_INTERVAL_MINUTES = 6 * MINUTES_PER_HOUR;
 const metaTmdbTipOpen = ref(false);
+
+// 「番号元数据」六个开关。
+//
+// 键顺序是**契约**：必须与后端 `settings.JavMetaItems` 的字段顺序逐字一致
+// （subtitle → preview → thumb → poster → fanart → nfo）。面板要序列化出一模一样的
+// 字符串，后端回读的也是同一份 —— 顺序一变，字符串比较就会把「没改过」判成「改过」，
+// 一打开设置页就显示「已修改」。
+const JAV_META_KEYS = ["subtitle", "preview", "thumb", "poster", "fanart", "nfo"] as const;
+const DEFAULT_JAV_META_ITEMS = '{"subtitle":true,"preview":true,"thumb":true,"poster":true,"fanart":true,"nfo":true}';
+const JAV_META_OPTIONS = [
+  { key: "subtitle", label: "字幕" },
+  { key: "preview", label: "剧照" },
+  { key: "thumb", label: "thumb缩略图" },
+  { key: "poster", label: "poster海报" },
+  { key: "fanart", label: "fanart图" },
+  { key: "nfo", label: "NFO文件" },
+];
 
 type StrmSettingsForm = Pick<
   StrmSettings,
@@ -43,6 +61,7 @@ type StrmSettingsForm = Pick<
   | "metadata_max_size_mb"
   | "metadata_parent_enabled"
   | "metadata_sync_mode"
+  | "jav_metadata_items"
 >;
 
 const { loading, loaded, runLoad } = useSettingsLoad(false);
@@ -77,6 +96,7 @@ const {
     metadata_max_size_mb: 10,
     metadata_parent_enabled: true,
     metadata_sync_mode: "local_primary",
+    jav_metadata_items: DEFAULT_JAV_META_ITEMS,
   },
   {
     compareField: (key, cur, orig) => {
@@ -94,6 +114,32 @@ const metadataSyncModeOptions = [
   { value: "local_primary", label: "本地元数据补缺" },
   { value: "bidirectional", label: "本地与云端互补" },
 ];
+
+/** 解析成「键 → 是否勾选」。空串 / 坏 JSON / 缺项按**开**（与后端同一套兜底）。 */
+function parseJavMeta(raw: string): Record<string, boolean> {
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = JSON.parse(raw || "{}");
+  } catch {
+    parsed = {};
+  }
+  const out: Record<string, boolean> = {};
+  for (const key of JAV_META_KEYS) out[key] = parsed[key] !== false;
+  return out;
+}
+
+/** 序列化成固定顺序的 JSON 串（与后端 Encode 逐字一致）。 */
+function encodeJavMeta(items: Record<string, boolean>): string {
+  const ordered: Record<string, boolean> = {};
+  for (const key of JAV_META_KEYS) ordered[key] = items[key] !== false;
+  return JSON.stringify(ordered);
+}
+
+const javMetaItems = computed(() => parseJavMeta(settings.jav_metadata_items));
+
+function setJavMetaItems(next: Record<string, boolean>) {
+  settings.jav_metadata_items = encodeJavMeta(next);
+}
 
 function setNumberSetting(key: "min_file_size_mb" | "task_concurrency" | "metadata_max_size_mb", raw: string) {
   settings[key] = parseSettingNumber(raw);
@@ -121,6 +167,7 @@ function applySettings(data: Awaited<ReturnType<typeof fetchStrmSettings>>) {
     metadata_max_size_mb: parseSettingNumber(data.metadata_max_size_mb) || 10,
     metadata_parent_enabled: !!data.metadata_parent_enabled,
     metadata_sync_mode: data.metadata_sync_mode || "local_primary",
+    jav_metadata_items: data.jav_metadata_items || DEFAULT_JAV_META_ITEMS,
   });
 }
 
@@ -158,6 +205,7 @@ async function saveSettings() {
       metadata_max_size_mb: settings.metadata_max_size_mb,
       metadata_parent_enabled: settings.metadata_parent_enabled,
       metadata_sync_mode: settings.metadata_sync_mode,
+      jav_metadata_items: settings.jav_metadata_items,
     });
     applySettings(data);
     toast.success("STRM 设置已保存");
@@ -229,7 +277,19 @@ defineExpose(
             <div class="settings-row__label">
               <span>对外基址</span>
               <SettingsHelpTooltip title="对外基址说明">
-                <p>生成 .strm 内完整 URL 时使用，例如 https://pan.example.com。留空则使用当前服务地址。</p>
+                <p>
+                  每一条 <code>.strm</code> 里 URL 的站点部分。留空则用本机监听地址
+                  （回环地址，外部播放器取不到）。
+                </p>
+                <p>
+                  <b>取这个地址的是 Emby / Jellyfin 那台服务器，不是你的播放设备</b>
+                  —— 所以通常应当填<b>内网地址</b>（如 http://192.168.1.10:5211）。
+                </p>
+                <p>
+                  填成外网域名时，内网的媒体服务器要绕出去再回来（很多路由器不支持回环
+                  NAT），典型表现是「海报正常、一播放就提示没有兼容的流」。外网访问媒体
+                  服务器是另一码事，交给你的反代即可，与本项无关。
+                </p>
                 <p>右侧「一键替换」会批量改写已有 .strm 文件里的站点部分，并保存此基址。</p>
               </SettingsHelpTooltip>
             </div>
@@ -458,6 +518,34 @@ defineExpose(
           </template>
           <template #control>
             <SettingsBoolSegment v-model="settings.metadata_parent_enabled" label="父目录元数据同步" />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow :show-changed-badge="true" :changed="isSettingChanged('jav_metadata_items')">
+          <template #info>
+            <div class="settings-row__label">
+              <span>番号元数据</span>
+              <SettingsHelpTooltip title="番号元数据说明">
+                <p>
+                  媒体类型选「番号影片」、且任务开了「同步元数据」时，会在 <code>.strm</code>
+                  同层按这里的勾选生成元数据；侧车 json 会先同步到本地，读的是本地那份。
+                </p>
+                <p>
+                  <b>thumb缩略图</b> 是封面原图（横图）；<b>poster海报</b> 从它按 2:3 裁
+                  （有码取右侧，其余按人脸）；<b>fanart图</b> 是它的副本；
+                  <b>剧照</b> 放进 <code>extrafanart/</code>。
+                </p>
+                <p><b>字幕</b> 暂时是占位，勾不勾都不做事。</p>
+              </SettingsHelpTooltip>
+            </div>
+          </template>
+          <template #control>
+            <SettingsCheckboxRow
+              :model-value="javMetaItems"
+              :options="JAV_META_OPTIONS"
+              :disabled="saving"
+              @update:model-value="setJavMetaItems"
+            />
           </template>
         </SettingsRow>
       </SettingsCard>

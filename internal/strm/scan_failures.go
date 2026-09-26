@@ -14,6 +14,10 @@ type ScanFailureKind string
 const (
 	ScanFailureStrm     ScanFailureKind = "strm"
 	ScanFailureMetadata ScanFailureKind = "metadata"
+	// ScanFailureJavMetadata 只记**真问题**：侧车 json 读不通（schema 变了）、
+	// 或者素材齐了却配不上（多半是主干被改过名字）。图片 404 不记 ——
+	// 上游图挂了不是用户能修的事，记进来只会把失败清单灌满。
+	ScanFailureJavMetadata ScanFailureKind = "jav_metadata"
 )
 
 type ScanFailure struct {

@@ -56,6 +56,9 @@ type metadataSyncRequest struct {
 	Playback     metadataResolver
 	Failures     *FailureCollector
 	OnProgress   ScanProgressReporter
+
+	// JavArtifactGuard 为真时，本程序生成的番号元数据不参与解算（见 buildMetadataSyncPlan）。
+	JavArtifactGuard bool
 }
 
 type metadataSyncResult struct {
@@ -178,9 +181,32 @@ func buildMetadataSyncPlan(ctx context.Context, req metadataSyncRequest) (metada
 			}
 			return plan, err
 		}
+		// 番号任务：本程序生成的元数据**不参与解算**。
+		//
+		// 为什么必须挡：我们生成的 `<主干>.nfo` / `poster.jpg` / `thumb.jpg` /
+		// `fanart.jpg` 扩展名全在元数据表里，而且**永远不在网盘上** —— 于是
+		// cloud_primary 每一轮扫描都删一次、生成器再写一次（每轮重拉一遍全部剧照，
+		// 静默且昂贵），bidirectional 则会把海报往网盘上传，白占配额。
+		//
+		// 判据只能是**文件名**（无状态）：上一轮扫描与本轮之间进程可能已经重启，
+		// 内存里「本次生成了哪些」的集合根本不存在。而按名字判是安全的：这些文件
+		// 不在网盘上，所以守卫只可能放过「本地独有」的文件，那正是本程序生成的那些
+		// （顺手放过用户自己塞的一份，也正好是「不删用户的东西」这个更该有的行为）。
+		//
+		// 名单与生成端**共用** emby.TargetNames（见 javArtifactNames）——各写一遍的话，
+		// 命名规则一改就会出现「生成 A、守卫认 B」，表现是文件删了又生成。
+		var javArtifacts map[string]struct{}
+		if req.JavArtifactGuard {
+			javArtifacts = javArtifactNames(entries)
+		}
 		for _, entry := range entries {
 			if entry.IsDir() || !isMetadataExtension(entry.Name(), req.Extensions) {
 				continue
+			}
+			if len(javArtifacts) > 0 {
+				if _, ours := javArtifacts[strings.ToLower(entry.Name())]; ours {
+					continue
+				}
 			}
 			info, err := entry.Info()
 			if err != nil || !info.Mode().IsRegular() {

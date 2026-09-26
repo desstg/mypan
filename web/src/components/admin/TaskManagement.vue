@@ -253,6 +253,7 @@ const emptyForm = (): TaskForm => ({
   exclude_dir_keywords: "",
   exclude_file_keywords: "",
   sync_metadata: "false",
+  media_kind: "tmdb",
   branch_check_enabled: false,
   time_window_enabled: false,
   time_start: "00:00",
@@ -300,6 +301,13 @@ const drawerCanSave = drawerDirty;
 const metadataSyncOptions = [
   { value: "false", label: "关闭" },
   { value: "true", label: "开启" },
+];
+
+// 媒体类型。选「番号影片」时，STRM 生成之后会读同目录的侧车 json 补 nfo 与图片；
+// 「tmdb影片」是默认值，行为与加这个选项之前完全一样。
+const mediaKindOptions = [
+  { value: "tmdb", label: "tmdb影片" },
+  { value: "jav", label: "番号影片" },
 ];
 
 const tasksPolling = useConditionalPolling({
@@ -446,6 +454,8 @@ function scanPhasePrimaryText(task: StrmTask): string {
       return "正在上传元数据";
     case "cleaning_metadata":
       return "正在清理本地元数据";
+    case "generating_jav_metadata":
+      return "正在生成番号元数据";
     default:
       return "正在扫描并生成 STRM";
   }
@@ -631,6 +641,7 @@ function openEdit(task: StrmTask) {
   form.exclude_dir_keywords = task.exclude_dir_keywords ?? "";
   form.exclude_file_keywords = task.exclude_file_keywords ?? "";
   form.sync_metadata = task.sync_metadata ? "true" : "false";
+  form.media_kind = task.media_kind === "jav" ? "jav" : "tmdb";
   form.branch_check_enabled = !!task.branch_check_enabled;
   applyTimeWindowFromTask(form, task);
   showAdvanced.value = false;
@@ -661,6 +672,7 @@ function buildTaskPayload(): StrmTaskInput {
     exclude_dir_keywords: form.exclude_dir_keywords.trim(),
     exclude_file_keywords: form.exclude_file_keywords.trim(),
     sync_metadata: form.sync_metadata === "true",
+    media_kind: form.media_kind === "jav" ? "jav" : "tmdb",
     branch_check_enabled: form.branch_check_enabled,
     ...timeWindowPayload(form),
     schedule_mode: form.schedule_mode,
@@ -1316,6 +1328,16 @@ watch(activeTab, (tab) => {
             </FormField>
             <FormField label="排除文件关键词">
               <AppInput v-model="form.exclude_file_keywords" placeholder="例如：sample;trailer;预告" />
+            </FormField>
+          </div>
+
+          <div class="strm-form__row">
+            <FormField label="媒体类型">
+              <AppSelect
+                v-model="form.media_kind"
+                :options="mediaKindOptions"
+                placeholder="请选择媒体类型"
+              />
             </FormField>
           </div>
 

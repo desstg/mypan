@@ -27,6 +27,10 @@ Makefile   text eol=lf
 *.wasm  binary
 *.gz    binary
 *.zip   binary
+# pigo 人脸级联模型：裸二进制、**没有扩展名**，上面那行 `* text=auto eol=lf`
+# 会把它当文本做行尾转换、模型当场损坏（症状只是「检测不到脸」）。
+# 显式标 binary 是必需的，不是可选的整洁。
+internal/jav/emby/cascades/facefinder binary
 
 # 构建产物由 web 阶段重新生成，diff 里不展开
 internal/api/web/** linguist-generated=true

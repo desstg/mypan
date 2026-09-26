@@ -16,6 +16,7 @@ export interface StrmTask {
   exclude_dir_keywords: string;
   exclude_file_keywords: string;
   sync_metadata: boolean;
+  media_kind: string;
   branch_check_enabled: boolean;
   time_window_enabled: boolean;
   time_start: string;
@@ -37,7 +38,8 @@ export interface StrmTask {
     | "comparing_metadata"
     | "syncing_metadata"
     | "uploading_metadata"
-    | "cleaning_metadata";
+    | "cleaning_metadata"
+    | "generating_jav_metadata";
   current_label?: string;
   scanned_dirs?: number;
   scanned_files?: number;
@@ -77,6 +79,13 @@ export interface StrmSettings {
   metadata_max_size_mb: number;
   metadata_parent_enabled: boolean;
   metadata_sync_mode: "cloud_primary" | "local_primary" | "bidirectional";
+  /**
+   * 「番号元数据」六个开关，值是一段 JSON 字符串（后端 settings.JavMetaItems）。
+   *
+   * 前端**不要**把它拆成六个字段：键顺序是契约的一部分 —— 面板按固定顺序序列化出一模
+   * 一样的字符串，「有没有改动」才能靠字符串比较判断（顺序一变就会一直误报未保存）。
+   */
+  jav_metadata_items: string;
 }
 
 export type StrmTaskInput = Pick<
@@ -95,6 +104,7 @@ export type StrmTaskInput = Pick<
   | "exclude_dir_keywords"
   | "exclude_file_keywords"
   | "sync_metadata"
+  | "media_kind"
   | "branch_check_enabled"
   | "time_window_enabled"
   | "time_start"
@@ -205,6 +215,8 @@ export interface StrmCurrentDirectoryResult {
   deleted: number;
   media_count: number;
   metadata_created: number;
+  /** 番号元数据那一步新写出来的文件数（nfo + 图片）。 */
+  jav_metadata_created: number;
   metadata_uploaded: number;
   metadata_deleted: number;
 }
@@ -269,6 +281,7 @@ export function saveStrmSettings(body: Partial<Record<keyof StrmSettings, string
     ["metadata_max_size_mb", (v) => String(v)],
     ["metadata_parent_enabled", (v) => (v ? "true" : "false")],
     ["metadata_sync_mode", (v) => String(v)],
+    ["jav_metadata_items", (v) => String(v)],
   ];
   for (const [key, fmt] of map) {
     if (body[key] !== undefined) payload[key] = fmt(body[key]);

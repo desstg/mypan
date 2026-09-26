@@ -35,6 +35,14 @@ const StrmRunModeAuto = "auto"
 const StrmRunModeFull = "full"
 const StrmRunModeBranch = "branch"
 
+// 媒体类型：决定 STRM 生成之后要不要按番号的规矩补 nfo 与图片。
+const (
+	// StrmMediaKindTmdb 是默认值，也是「加这个字段之前的行为」。
+	StrmMediaKindTmdb = "tmdb"
+	// StrmMediaKindJav 额外把侧车 json 同步到本地，再读本地那份生成 nfo / 封面 / 剧照。
+	StrmMediaKindJav = "jav"
+)
+
 // StrmTask 是 STRM 同步任务定义。
 type StrmTask struct {
 	ID           int64
@@ -53,11 +61,15 @@ type StrmTask struct {
 	ExcludeDirKeywords  string
 	ExcludeFileKeywords string
 	SyncMetadata        bool
-	BranchCheckEnabled  bool
-	TimeWindowEnabled   bool
-	TimeStart           string
-	TimeEnd             string
-	ScheduleMode        string
+	// MediaKind 是媒体类型（StrmMediaKind*）。与 SyncMetadata 挨着放：
+	// 两者是同一件事的两半 —— 「同步元数据」决定要不要下楼盘的元数据小文件，
+	// 「媒体类型」决定番号那一路要不要顺手把 nfo 与图片生成出来。
+	MediaKind          string
+	BranchCheckEnabled bool
+	TimeWindowEnabled  bool
+	TimeStart          string
+	TimeEnd            string
+	ScheduleMode       string
 
 	Status       string
 	PausedReason string

@@ -9,6 +9,7 @@ const NotificationCategoryFuseMountWarn = "fuse_mount_warn"
 const NotificationCategoryQuarkTVWarn = "quarktv_warn"
 const NotificationCategoryTGSubscribe = "tg_subscribe"
 const NotificationCategoryTGSubscribeWarn = "tg_subscribe_warn"
+
 // NotificationCategoryJavPush 番号订阅的推送结果：定时那一轮的汇总，以及手动推送的每一次。
 const NotificationCategoryJavPush = "jav_push"
 

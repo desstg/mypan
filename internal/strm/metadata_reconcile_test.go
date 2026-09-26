@@ -207,3 +207,70 @@ func TestMetadataUploadMutationDoesNotWakeScanner(t *testing.T) {
 		t.Fatal("普通文件变更仍应唤醒扫描")
 	}
 }
+
+// TestBuildMetadataSyncPlanKeepsJavArtifacts 番号任务生成的 nfo / 图片不参与解算。
+//
+// 这条挡的是一个**静默且昂贵**的循环：我们生成的 `<主干>.nfo` / `poster.jpg` /
+// `thumb.jpg` / `fanart.jpg` 扩展名全在元数据表里、而且永远不在网盘上 ——
+// 没有守卫的话，cloud_primary 每一轮扫描都删一次、生成器再写一次
+// （每轮重拉一遍全部剧照），bidirectional 则会把海报往网盘上传。
+func TestBuildMetadataSyncPlanKeepsJavArtifacts(t *testing.T) {
+	root := t.TempDir()
+	localDir := filepath.Join(root, "任务", "电影")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 一部片 + 本程序生成的那一套
+	for _, name := range []string{"MOIL-001-UC-4K.strm", "MOIL-001-UC-4K.nfo", "poster.jpg", "thumb.jpg", "fanart.jpg"} {
+		if err := os.WriteFile(filepath.Join(localDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 用户自己塞的、网盘上也没有的元数据（该被清掉 / 上传）
+	if err := os.WriteFile(filepath.Join(localDir, "user-notes.nfo"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	planFor := func(guard bool, mode string) metadataSyncPlan {
+		t.Helper()
+		plan, err := buildMetadataSyncPlan(t.Context(), metadataSyncRequest{
+			Root:         root,
+			OutputFolder: "任务",
+			Mode:         mode,
+			Extensions:   map[string]struct{}{"nfo": {}, "jpg": {}},
+			MaxSizeBytes: 10 << 20,
+			Directories: map[string]metadataDirectory{
+				"电影": {parentID: "remote", relDirs: []string{"电影"}},
+			},
+			JavArtifactGuard: guard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	names := func(items []localMetadataItem) []string {
+		out := make([]string, 0, len(items))
+		for _, it := range items {
+			out = append(out, it.fileName)
+		}
+		return out
+	}
+
+	// 番号任务 + cloud_primary：只删用户那份，本程序生成的一个都不动
+	deletes := names(planFor(true, MetadataSyncCloudPrimary).deletes)
+	if len(deletes) != 1 || deletes[0] != "user-notes.nfo" {
+		t.Errorf("应当只删 user-notes.nfo，got %v", deletes)
+	}
+	// 番号任务 + bidirectional：同理不上传
+	uploads := names(planFor(true, MetadataSyncBidirectional).uploads)
+	if len(uploads) != 1 || uploads[0] != "user-notes.nfo" {
+		t.Errorf("应当只上传 user-notes.nfo，got %v", uploads)
+	}
+	// **没开守卫时照旧全删** —— 证明守卫是按任务类型生效的，不是无条件放行
+	// （刮削那套写进来的海报走的是这条路，那是独立的既有行为）。
+	if got := names(planFor(false, MetadataSyncCloudPrimary).deletes); len(got) != 5 {
+		t.Errorf("非番号任务应当照旧清理（5 个），got %v", got)
+	}
+}

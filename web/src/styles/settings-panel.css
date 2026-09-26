@@ -344,3 +344,35 @@
     display: none;
   }
 }
+
+/* —— 一排复选框（SettingsCheckboxRow） ——
+   横排、装不下换行；样式只改外观，行为交给真 <input type="checkbox">。 */
+.settings-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  align-items: center;
+}
+
+.settings-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.settings-check input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+.settings-check input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}

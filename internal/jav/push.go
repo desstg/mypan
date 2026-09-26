@@ -675,7 +675,7 @@ func (s *Service) deliverCandidate(ctx context.Context, sub *domain.JavSubscript
 			MovieID: movie.ID, Code: movie.Number, Status: domain.JavPushFailed,
 			Downloader: downloaderLabel(s.providerOf(sub), ""),
 			AccountID:  accountID, TargetPath: childPath, SubscriptionID: sub.ID,
-			Error: perr.Error(),
+			Error:  perr.Error(),
 			Source: cand.Source,
 		})
 		_ = s.attempts.Link(ctx, attemptID, recID, "", "")

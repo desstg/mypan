@@ -15,6 +15,7 @@ import (
 	"litepan/internal/domain"
 	"litepan/internal/file"
 	"litepan/internal/playback"
+	"litepan/internal/settings"
 )
 
 var episodeNamePattern = regexp.MustCompile(`(?i)(` +
@@ -36,6 +37,8 @@ type ScanSettings struct {
 	MetadataSyncMode      string
 	ISOFilenameEnabled    bool
 	Tool115TreeEnabled    bool
+	// JavMetaItems 是「番号元数据」六个开关（媒体类型 = 番号影片时生效）。
+	JavMetaItems settings.JavMetaItems
 }
 
 type ScanDeps struct {
@@ -49,9 +52,14 @@ type ScanDeps struct {
 	SignEnabled bool
 	Secret      []byte
 	Settings    ScanSettings
-	Log         *slog.Logger
-	OnProgress  ScanProgressReporter
-	Failures    *FailureCollector
+	// JavImages 取番号图片（XOR 解码在里面）。nil = 不生成番号元数据 ——
+	// 与 jav.Options.Folders 为空时不写侧车同形，也让老测试不必改造。
+	JavImages JavImageFetcher
+	// JavPosters 是海报裁切的低优先级队列；nil = 就地执行（测试用）。
+	JavPosters javPosterScheduler
+	Log        *slog.Logger
+	OnProgress ScanProgressReporter
+	Failures   *FailureCollector
 	// ManualCleanupConfirm 用户手动执行（全部/分支执行）时置位：视为已确认网盘状态，
 	// 允许"远端识别 0"的范围正常清理；定时自动扫描仍受空保护约束。
 	ManualCleanupConfirm bool
@@ -108,7 +116,8 @@ func ScanTask(ctx context.Context, task *domain.StrmTask, deps ScanDeps, runMode
 	if len(exts) == 0 {
 		exts = parseExtensions(defaultExtensions)
 	}
-	metaExts := parseExtensions(deps.Settings.MetadataExtensions)
+	// 番号任务额外收 json：侧车是生成本地 nfo / 图片的唯一输入，见 javMetaExtensions。
+	metaExts := javMetaExtensions(task.MediaKind, parseExtensions(deps.Settings.MetadataExtensions))
 	minMediaBytes := int64(deps.Settings.MinFileSizeMB) * 1024 * 1024
 	metaMaxBytes := int64(deps.Settings.MetadataMaxSizeMB) * 1024 * 1024
 	if deps.Settings.MetadataMaxSizeMB <= 0 {
@@ -253,6 +262,8 @@ func finalizeScan(
 	selected, _ := selectConflictWinners(candidates, deps.Settings.ConflictPolicy)
 	metadataItems = alignMetadataItems(taskRelDir, selected, metadataItems, deps.Settings.ISOFilenameEnabled)
 	seen := make(map[string]struct{})
+	// 番号任务：本轮新增 / 更新的 .strm（本地相对路径），第 ④ 步按它生成元数据。
+	var javTargets []string
 
 	for _, item := range selected {
 		result.ScannedCount++
@@ -280,6 +291,12 @@ func finalizeScan(
 			result.GeneratedCount++
 		} else if updated {
 			result.UpdatedCount++
+		}
+		// 番号元数据的驱动集合 = **本轮新增 / 更新的** .strm（用户选的「只处理新增」）。
+		// 老片子要靠手动「生成当前目录 STRM」回填，那一路走 current_dir.go。
+		// 注意 `incremental_missing` 跳过已存在的 .strm 时不会走到这里 —— 正合此意。
+		if task.MediaKind == domain.StrmMediaKindJav && (created || updated) {
+			javTargets = append(javTargets, filepath.ToSlash(relPath))
 		}
 	}
 
@@ -323,6 +340,10 @@ func finalizeScan(
 				Playback:     deps.Playback,
 				Failures:     failures,
 				OnProgress:   deps.OnProgress,
+				// 只在番号任务上开守卫（见 metadataSyncRequest.JavArtifactGuard）：
+				// 刮削那套往同一个树里写海报/nfo，有同样的问题，但那是独立的既有行为，
+				// 单独做、各自可回滚。
+				JavArtifactGuard: task.MediaKind == domain.StrmMediaKindJav,
 			})
 			if err != nil {
 				return result, err
@@ -336,12 +357,40 @@ func finalizeScan(
 			if err != nil {
 				return result, err
 			}
-			n, err := cleanupMissingRemoteChildDirs(root, taskRelDir, state.remoteChildren, failures, log)
+			n, err := cleanupMissingRemoteChildDirs(root, taskRelDir, state.remoteChildren, failures, log,
+				task.MediaKind == domain.StrmMediaKindJav)
 			if err != nil {
 				return result, err
 			}
 			result.RemovedCount += removed + n
 			deleteMissingMonitorBranches(ctx, deps, state.pendingBranchDeletes, log)
+		}
+
+		// 番号元数据：**必须排在最后一步**。两个理由：
+		//  1. 侧车 json 是上一步 syncMetadata 下到本地的，没下下来就无从解析；
+		//  2. 上面那步清理会连过期 .strm 的同名旁路（nfo/jpg）一起删 —— 先生成后清理
+		//     就是白干一轮，还会在日志里留下「生成了又删了」的噪声。
+		// 保护触发时（protectReason != ""）整块不跑：那时 syncMetadata 也没跑，
+		// 本地没有新侧车，生成器无事可做。
+		if task.MediaKind == domain.StrmMediaKindJav && deps.JavImages != nil && len(javTargets) > 0 {
+			javRes := generateJavArtifacts(ctx, javArtifactRequest{
+				Root:        root,
+				StrmFiles:   javTargets,
+				Items:       deps.Settings.JavMetaItems,
+				Images:      deps.JavImages,
+				PosterQueue: deps.JavPosters,
+				Failures:    failures,
+				OnProgress:  deps.OnProgress,
+				Log:         log,
+			})
+			result.GeneratedCount += javRes.Written
+			log.Info("strm 番号元数据生成完成",
+				"task_id", task.ID,
+				"task_name", task.Name,
+				"written", javRes.Written,
+				"skipped", javRes.Skipped,
+				"no_sidecar", javRes.NoSidecar,
+			)
 		}
 	}
 
@@ -946,17 +995,40 @@ func removeStaleStrmAndSameStemSidecars(strmPath string) error {
 		return err
 	}
 	// 任何其他文件或子目录都保留共用元数据，避免影响同目录的其他媒体。
+	// `extrafanart/`（番号元数据的剧照目录）要放行到下面那一步 —— 它也是共用元数据，
+	// 只是形态是目录；不特判的话它会变成永久孤儿（removeEmptyDirs 也救不了它，
+	// 因为它非空）。
 	for _, entry := range entries {
-		if entry.IsDir() || !isSharedMediaSidecar(entry.Name()) {
+		if !entry.IsDir() && !isSharedMediaSidecar(entry.Name()) {
+			return nil
+		}
+		if entry.IsDir() && !isSharedMediaSidecarDir(entry.Name()) {
 			return nil
 		}
 	}
 	for _, entry := range entries {
-		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !os.IsNotExist(err) {
+		path := filepath.Join(dir, entry.Name())
+		var err error
+		if entry.IsDir() {
+			// 用 RemoveAll：它是非空目录，Remove 必然失败，而失败会被当成清理错误
+			// 冒到任务上（用户看到一条「扫描部分失败」却没有真问题）。
+			err = os.RemoveAll(path)
+		} else {
+			err = os.Remove(path)
+		}
+		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
 	return nil
+}
+
+// isSharedMediaSidecarDir 报告一个子目录是不是「共用元数据目录」。
+//
+// 目前只有 `extrafanart`（Emby / Kodi 的剧照目录，番号元数据往这里放 fanartN.jpg）。
+// 它的内容属于整部片，与同主干旁路同一个归属，所以在 .strm 消失后应当跟着走。
+func isSharedMediaSidecarDir(name string) bool {
+	return strings.EqualFold(name, "extrafanart")
 }
 
 func isSharedMediaSidecar(name string) bool {
@@ -1181,7 +1253,17 @@ func cleanupProtectReason(imp cleanupImpact) string {
 	return ""
 }
 
-func cleanupMissingRemoteChildDirs(root, outputFolder string, remoteChildren map[string]map[string]struct{}, failures *FailureCollector, log *slog.Logger) (int64, error) {
+// guardJavArtifactsDir 报告「这个本地子目录是本程序生成的番号元数据目录」。
+//
+// 这些目录（目前只有 `extrafanart/`）**本地独有**，网盘上永远不会有对应项，
+// 于是「本地有、远端没有 → 删掉」那条规则每一轮都会把它们清一遍 ——
+// 实测第二轮就删了 7 个，用户看到的是「剧照刚生成就没了」。
+// 与文件级的守卫（metadataSyncRequest.JavArtifactGuard）是同一个道理。
+func guardJavArtifactsDir(guard bool, name string) bool {
+	return guard && isSharedMediaSidecarDir(name)
+}
+
+func cleanupMissingRemoteChildDirs(root, outputFolder string, remoteChildren map[string]map[string]struct{}, failures *FailureCollector, log *slog.Logger, guardJavArtifacts bool) (int64, error) {
 	if len(remoteChildren) == 0 {
 		return 0, nil
 	}
@@ -1206,6 +1288,9 @@ func cleanupMissingRemoteChildDirs(root, outputFolder string, remoteChildren map
 				continue
 			}
 			if _, ok := remoteNames[SafeName(e.Name())]; ok {
+				continue
+			}
+			if guardJavArtifactsDir(guardJavArtifacts, e.Name()) {
 				continue
 			}
 			childPath := filepath.Join(localBase, e.Name())
