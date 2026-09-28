@@ -274,3 +274,48 @@ func TestBuildMetadataSyncPlanKeepsJavArtifacts(t *testing.T) {
 		t.Errorf("非番号任务应当照旧清理（5 个），got %v", got)
 	}
 }
+
+// 下载来的字幕必须被守卫认下 —— 它的扩展名在元数据表里、又永远不在网盘上，
+// 漏掉就是「每轮扫描删一次、生成器再写一次」。
+//
+// 判据只能放宽到「主干前缀 + 字幕扩展名」：语言段（zh-CN / eng / 空）枚举不完。
+func TestBuildMetadataSyncPlanKeepsDownloadedSubtitles(t *testing.T) {
+	root := t.TempDir()
+	localDir := filepath.Join(root, "任务", "电影")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"MOIL-001-UC-4K.strm",
+		"MOIL-001-UC-4K.zh-CN.srt", // 我们下的
+		"MOIL-001-UC-4K.eng.srt",   // 我们下的（多语言各一份）
+		"MOIL-001-UC-4K.srt",       // 嗅不出语言时的那种
+		"MOIL-001-UC-4K.chs.ass",   // 用户自己塞的（前缀一样，一并放过）
+		"other-movie.zh-CN.srt",    // 别的片子的，网盘上也没有 —— 该被清掉
+	} {
+		if err := os.WriteFile(filepath.Join(localDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := buildMetadataSyncPlan(t.Context(), metadataSyncRequest{
+		Root:         root,
+		OutputFolder: "任务",
+		Mode:         MetadataSyncCloudPrimary,
+		Extensions:   map[string]struct{}{"srt": {}, "ass": {}},
+		MaxSizeBytes: 10 << 20,
+		Directories: map[string]metadataDirectory{
+			"电影": {parentID: "remote", relDirs: []string{"电影"}},
+		},
+		JavArtifactGuard: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deletes []string
+	for _, it := range plan.deletes {
+		deletes = append(deletes, it.fileName)
+	}
+	if len(deletes) != 1 || deletes[0] != "other-movie.zh-CN.srt" {
+		t.Errorf("应当只删别的片子的字幕，got %v", deletes)
+	}
+}

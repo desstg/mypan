@@ -629,7 +629,13 @@ defineExpose(
                   （有码取右侧，其余按人脸）；<b>fanart图</b> 是它的副本；
                   <b>剧照</b> 放进 <code>extrafanart/</code>。
                 </p>
-                <p><b>字幕</b> 暂时是占位，勾不勾都不做事。</p>
+                <p>
+                  <b>字幕</b> 会按番号（搜不到就用标题）去迅雷看看的字幕源找一份最优的，
+                  写成 <code>&lt;主干&gt;.zh-CN.srt</code> 这样 <b>Emby 认得出</b>的名字
+                  （语言码取自字幕正文，简繁分别写 zh-CN / zh-TW）。
+                  目录里<b>已经有字幕就不动</b> —— 你手改过的那份不会被覆盖；
+                  想换一份，用海报墙上的「重刮」。
+                </p>
               </SettingsHelpTooltip>
             </div>
           </template>

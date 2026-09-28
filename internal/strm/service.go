@@ -45,6 +45,8 @@ type Service struct {
 	// javImages 取番号图片（XOR 解码在 jav 那边）。用 setter 注入：接线顺序上
 	// wireSTRM 早于 jav.New，构造期拿不到 *jav.Service（见 SetJavImageFetcher）。
 	javImages JavImageFetcher
+	// javSubtitles 找外挂字幕。同样走 setter 注入，理由同上。
+	javSubtitles JavSubtitleFetcher
 	// javPosters 是海报裁切的低优先级队列，全局一个（所有任务共用一个单并发工作者，
 	// 多个任务并行时海报天然排队 —— 这就是「低优先级」的实现方式）。
 	javPosters *javPosterQueue
@@ -128,6 +130,20 @@ func (s *Service) SetJavImageFetcher(fetcher JavImageFetcher) {
 	}
 	s.mu.Lock()
 	s.javImages = fetcher
+	s.mu.Unlock()
+}
+
+// SetJavSubtitleFetcher 注入番号字幕抓取器（*subtitle.Client）。
+//
+// 与 SetJavImageFetcher 同一个形状与理由：接线顺序上拿不到、且 strm 这边不该知道
+// jav 模块的设置键名（代理地址由 wire 那边从全局设置里取好递进来）。
+// 没注入时只是不下载字幕，其余行为不变。
+func (s *Service) SetJavSubtitleFetcher(fetcher JavSubtitleFetcher) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.javSubtitles = fetcher
 	s.mu.Unlock()
 }
 

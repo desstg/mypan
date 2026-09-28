@@ -61,6 +61,9 @@ type ScanDeps struct {
 	// JavImages 取番号图片（XOR 解码在里面）。nil = 不生成番号元数据 ——
 	// 与 jav.Options.Folders 为空时不写侧车同形，也让老测试不必改造。
 	JavImages JavImageFetcher
+	// JavSubtitles 找外挂字幕（nil = 不下载）。是否真的下由「番号元数据」里的
+	// 「字幕」勾选决定 —— 这里只说有没有这个能力。
+	JavSubtitles JavSubtitleFetcher
 	// JavPosters 是海报裁切的低优先级队列；nil = 就地执行（测试用）。
 	JavPosters javPosterScheduler
 	Log        *slog.Logger
@@ -391,6 +394,7 @@ func finalizeScan(
 				// 重刮走 RebuildJavArtifacts，不在这条路上。
 				Overwrite:   task.ScanMode == domain.StrmScanModeFullSync,
 				Images:      deps.JavImages,
+				Subtitles:   deps.JavSubtitles,
 				PosterQueue: deps.JavPosters,
 				// 水印：`Enabled` 是总开关（默认关）；真贴哪几个图标由生成器
 				// **按各部的侧车属性**算（见 watermarkIDsForSidecar）——
@@ -410,6 +414,7 @@ func finalizeScan(
 				"written", javRes.Written,
 				"skipped", javRes.Skipped,
 				"no_sidecar", javRes.NoSidecar,
+				"subtitles", javRes.Subtitle,
 			)
 		}
 	}

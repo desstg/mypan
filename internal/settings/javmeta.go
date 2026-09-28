@@ -18,9 +18,9 @@ import "encoding/json"
 // **字段顺序即界面顺序，也是序列化顺序**。顺序稳定是必须的：前端拿前后两个字符串
 // 一比就知道「有没有改动」，顺序一变就会一直误报未保存。
 type JavMetaItems struct {
-	// Subtitle 是占位：界面上有这个复选框，但（截至本次）字幕不做任何事。
-	// 留着是因为键少了会让「存回来的 JSON 缺一项」，前端再读一次会把它当成
-	// 「用户取消勾选」—— 界面上那个勾会自己消失。
+	// Subtitle 下载外挂字幕（internal/jav/subtitle）：按番号 → 标题去迅雷看看的字幕源
+	// 找一份最优的，写成 `<主干>.<语言码>.<扩展名>`（Emby 认的命名），
+	// 与 .strm 同层。目录里已有字幕就不动（除非手动重刮）。
 	Subtitle bool `json:"subtitle"`
 	// Preview 剧照 → extrafanart/fanartN.jpg
 	Preview bool `json:"preview"`

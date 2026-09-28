@@ -1,5 +1,7 @@
 package emby
 
+import "strings"
+
 // 产出文件的名字。规则与 `internal/strmscrape/nfo.go` 的 workMetaPaths **同源** ——
 // 那是同一个媒体库目录里另一套（TMDB 那套）生成器用的判据，两处必须给出一致的答案：
 // 同一个目录里出现 `poster.jpg` 与 `<主干>-poster.jpg` 两份海报时，
@@ -55,6 +57,49 @@ func TargetNames(stem string, flat bool) Names {
 // `fanart1.jpg` / `fanart2.jpg` ……）。
 func ExtraFanartName(n int) string {
 	return "fanart" + itoa(n) + ".jpg"
+}
+
+// SubtitleExtensions 是本程序会落盘的字幕扩展名（小写、不带点）。
+//
+// 只收 Emby 认得的外部字幕格式。`.idx` 不收：它必须与同名 `.sub` 成对出现，
+// 单写一个没有意义。
+var SubtitleExtensions = []string{"srt", "ass", "ssa", "vtt", "sub"}
+
+// IsSubtitleExtension 报告扩展名（带不带点都行）是不是字幕格式。
+func IsSubtitleExtension(ext string) bool {
+	ext = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(ext), "."))
+	for _, e := range SubtitleExtensions {
+		if ext == e {
+			return true
+		}
+	}
+	return false
+}
+
+// SubtitleName 是字幕文件名：`<主干>.<语言码>.<扩展名>`，语言码为空时省略那一段
+// （退化成 `<主干>.srt`，Emby 仍会把它当成一条没有语言名的字幕轨加载 ——
+// 这比猜一个语言码写错要好）。
+//
+// # 语言码必须是 Emby 认的
+//
+// 传进来的 lang 由 `internal/jav/subtitle` 嗅探产出，只可能是 `zh-CN` / `zh-TW` /
+// `eng` / `jpn` / `kor` 或空串。Emby 的规则是「与影片同名的文件、换扩展名」，
+// 语言段用 ISO 639-2 三字母或全名，中文是文档里唯一点名的例外（`zh-CN` / `zh-TW`）。
+// 本函数**不校验** lang —— 校验在产出它的那一侧，这里再判一次只会让「上游加了一个
+// 新语言码」变成静默丢段。
+//
+// # 为什么没有 flat 分支
+//
+// 与图片三件套（TargetNames）不同：字幕名天然带主干，而 Emby 就是**按主干**配字幕的，
+// 平铺目录里几部片各配各的、不会互相覆盖。图片那边要避让是因为 `poster.jpg` 是
+// 目录级约定，一个目录只能有一份。
+func SubtitleName(stem, lang, ext string) string {
+	ext = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(ext), "."))
+	lang = strings.TrimSpace(lang)
+	if lang == "" {
+		return stem + "." + ext
+	}
+	return stem + "." + lang + "." + ext
 }
 
 // itoa 是个极小的本地实现，免得为一个数字转换去 import strconv ——

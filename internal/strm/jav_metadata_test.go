@@ -388,13 +388,25 @@ func TestJavArtifactNamesIsWhatWeGenerate(t *testing.T) {
 	}
 	names := javArtifactNames(entries)
 	for _, want := range []string{"poster.jpg", "thumb.jpg", "fanart.jpg", "ssis-001.nfo", "ssis-001-poster.jpg"} {
-		if _, ok := names[want]; !ok {
-			t.Errorf("守卫名单里缺少 %s：%v", want, names)
+		if !names.isOurs(want) {
+			t.Errorf("守卫名单里缺少 %s", want)
 		}
 	}
-	// 目录里没有 .strm 时是 nil（没有片子，孤儿图该被清理）
-	if got := javArtifactNames(nil); got != nil {
-		t.Errorf("没有 .strm 时应当返回 nil，got %v", got)
+	// 字幕：语言段无法枚举，走「主干前缀 + 字幕扩展名」。几种可能都要认。
+	for _, want := range []string{"ssis-001.zh-CN.srt", "ssis-001.zh-TW.ass", "ssis-001.eng.srt", "ssis-001.srt", "SSIS-001.chs.vtt"} {
+		if !names.isOurs(want) {
+			t.Errorf("守卫该认下字幕 %s", want)
+		}
+	}
+	// 别人的东西一个都不能放过：别的片子的字幕、非字幕扩展名。
+	for _, want := range []string{"moil-002.zh-CN.srt", "ssis-001.zh-CN.txt", "cover.jpg", "ssis-001.json"} {
+		if names.isOurs(want) {
+			t.Errorf("守卫不该认下 %s", want)
+		}
+	}
+	// 目录里没有 .strm 时是零值（没有片子，孤儿文件该被清理）
+	if got := javArtifactNames(nil); got.isOurs("poster.jpg") {
+		t.Errorf("没有 .strm 时守卫不该认下任何东西")
 	}
 }
 
@@ -474,27 +486,67 @@ func TestGenerateJavArtifactsOverwrite(t *testing.T) {
 	}
 }
 
-// TestGenerateJavArtifactsOverwriteKeepsThumb 全量扫描**不重下 thumb** ——
-// 它是任务级持久设置，会被定时扫描反复触发，每轮重下整库封面会把图床打毛。
-// 而「重刮」（RefetchImages）才重下它。
-func TestGenerateJavArtifactsOverwriteKeepsThumb(t *testing.T) {
+// TestGenerateJavArtifactsOverwriteRefetchesThumb 全量扫描**要重下 thumb**（fanart 跟着写），
+// 「重刮」同样重下。
+//
+// 2026-09-28 用户明确要求：全量 = 这一部的元数据全部重来一遍，封面也算。
+// 这条用例原先钉的是相反的行为（「全量不该打图床，免得把 JAVDB 的图床打毛」），
+// 那条判断被用户否决了 —— 所以这里连名字一起改掉，别让下一个人以为它是回归。
+func TestGenerateJavArtifactsOverwriteRefetchesThumb(t *testing.T) {
 	root, rel := newJavTaskDir(t, "SSIS-001-UC-4K.json")
 	base := javArtifactRequest{Root: root, StrmFiles: []string{rel}, Items: allOn(), Log: testLogger(t)}
 	generateJavArtifacts(context.Background(), javArtifactRequest{
 		Root: root, StrmFiles: []string{rel}, Items: allOn(), Images: newStubFetcher(), Log: testLogger(t),
 	})
 
-	// 全量：不该打图床
+	thumbPath := filepath.Join(root, "thumb.jpg")
+	fanartPath := filepath.Join(root, "fanart.jpg")
+	// 手工换掉封面，模拟「手上这张是坏的/旧的」
+	sentinel := []byte("坏掉的封面")
+	for _, path := range []string{thumbPath, fanartPath} {
+		if err := os.WriteFile(path, sentinel, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// ① 增量（不 Overwrite）：一个字节都不许动
+	incremental := base
+	incremental.Images = newStubFetcher()
+	generateJavArtifacts(context.Background(), incremental)
+	if got, _ := os.ReadFile(thumbPath); bytes.Equal(got, sentinel) == false {
+		t.Error("增量扫描不该动 thumb")
+	}
+	if incremental.Images.(*stubFetcher).callCount() != 0 {
+		t.Error("增量扫描不该打图床")
+	}
+
+	// ② 全量（Overwrite）：重下并覆盖
 	fetcher := newStubFetcher()
 	forced := base
 	forced.Overwrite = true
 	forced.Images = fetcher
 	generateJavArtifacts(context.Background(), forced)
-	if fetcher.callCount() != 0 {
-		t.Errorf("全量扫描不该重下图片，got %d 次请求", fetcher.callCount())
+	if fetcher.callCount() == 0 {
+		t.Error("全量扫描应当重下封面")
+	}
+	thumb, err := os.ReadFile(thumbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(thumb, sentinel) {
+		t.Error("全量扫描应当覆盖 thumb")
+	}
+	// fanart 必须是 thumb 的**逐字节复制**（用户定的：同一份字节写两个文件，
+	// 不另取一张图 —— 这也是它不需要自己那个开关的依据）。
+	fanart, err := os.ReadFile(fanartPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fanart, thumb) {
+		t.Error("fanart 应当是 thumb 的逐字节复制")
 	}
 
-	// 重刮：thumb / fanart / poster 都重做，封面重下一次
+	// ③ 重刮：同样重下（与全量在元数据这一层行为一致）
 	fetcher2 := newStubFetcher()
 	rebuild := base
 	rebuild.Overwrite = true

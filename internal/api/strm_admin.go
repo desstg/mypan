@@ -556,6 +556,17 @@ func (h *Handler) repairStrmAccountReferences(w http.ResponseWriter, r *http.Req
 	writeOK(w, result)
 }
 
+// mapStrmSettingAliases 把前端用的**短别名**换成 settings key。
+//
+// # 为什么循环里必须有 `k != v` 这一道
+//
+// 水印那四个键（`jav_watermark_*`）的别名**与 settings key 逐字相同** —— 它们本来
+// 就是 jav 模块的键，只是借 STRM 设置页给个入口（见 registry.go 的 KeyJavWatermark*）。
+// 对这类自指别名，`in[v] = raw` 是原地赋值，紧跟的 `delete(in, k)` 会把**刚写进去的
+// 那一项删掉**：值传到了、又被自己抹掉，这四个键根本进不了 Update。
+//
+// 表现极具误导性：开关点开、保存、界面又跳回原值，而日志里「系统设置已更新」只列
+// 真正写进去的那 14 个键（少 4 个，但没人会去数）。属于「静默变空」那一族。
 func mapStrmSettingAliases(in map[string]string) {
 	aliases := map[string]string{
 		"token":                   settings.KeyStrmToken,
@@ -573,16 +584,25 @@ func mapStrmSettingAliases(in map[string]string) {
 		"metadata_sync_mode":      settings.KeyStrmMetadataSyncMode,
 		"jav_metadata_items":      settings.KeyStrmJavMetaItems,
 		"jav_wall_hidden_dirs":    settings.KeyStrmJavWallHiddenDirs,
-		"jav_watermark_enabled":   settings.KeyJavWatermarkEnabled,
-		"jav_watermark_scale":     settings.KeyJavWatermarkScale,
-		"jav_watermark_margin":    settings.KeyJavWatermarkMargin,
-		"jav_watermark_dir":       settings.KeyJavWatermarkDir,
+		// 下面四个是**自指**的：别名 = settings key。留着是为了让这张表完整地
+		// 说明「这个面板能写哪些键」，而不是靠读者去比字符串。
+		"jav_watermark_enabled": settings.KeyJavWatermarkEnabled,
+		"jav_watermark_scale":   settings.KeyJavWatermarkScale,
+		"jav_watermark_margin":  settings.KeyJavWatermarkMargin,
+		"jav_watermark_dir":     settings.KeyJavWatermarkDir,
 	}
 	for k, v := range aliases {
-		if raw, ok := in[k]; ok {
-			in[v] = raw
-			delete(in, k)
+		raw, ok := in[k]
+		if !ok {
+			continue
 		}
+		if k == v {
+			// 自指别名：值已经在正确的键上，什么也不用做。
+			// 走到 delete 那一行就是上面注释说的那个坑。
+			continue
+		}
+		in[v] = raw
+		delete(in, k)
 	}
 }
 

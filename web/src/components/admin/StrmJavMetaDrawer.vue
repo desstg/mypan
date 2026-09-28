@@ -267,7 +267,7 @@ async function rebuild() {
     <div v-else-if="detail" class="jav-edit">
       <p v-if="detail.notice" class="jav-edit__notice">{{ detail.notice }}</p>
       <p v-if="fullSyncWipe" class="jav-edit__notice jav-edit__notice--warn">
-        本任务为「全量」扫描模式：下次扫描会按侧车 JSON 重建 nfo 与海报，这次编辑会被覆盖。
+        本任务为「全量」扫描模式：下次扫描会按侧车 JSON 重建 nfo 与海报、并重新下载封面，这次编辑会被覆盖。
       </p>
 
       <!-- 左栏裁海报、右栏表单 —— 排版照 XL_center 的 nfo 编辑器那套（两栏 + 分组标题）。 -->

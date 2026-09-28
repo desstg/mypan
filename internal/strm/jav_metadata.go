@@ -12,6 +12,7 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/jav/emby"
+	"litepan/internal/jav/subtitle"
 	"litepan/internal/settings"
 )
 
@@ -41,6 +42,18 @@ type JavImageFetcher interface {
 	FetchImage(ctx context.Context, rawURL string) ([]byte, string, error)
 }
 
+// JavSubtitleFetcher 找一份「最优」外挂字幕（见 internal/jav/subtitle）。
+//
+// 与 JavImageFetcher 同形：窄接口、nil = 不下载字幕（老测试因此不必改造）、
+// `*subtitle.Client` 天然满足它。
+//
+// **关键词是一串**（番号在前、标题在后），兜底逻辑内聚在实现里 —— 调用方只负责
+// 「我这部片有哪些能拿去搜的名字」。实测纯番号经常搜不到（SSIS-001 返回空），
+// 所以这一串的存在不是冗余，是这个功能能不能用起来的开关。
+type JavSubtitleFetcher interface {
+	BestSubtitle(ctx context.Context, keywords []string) (*subtitle.Result, error)
+}
+
 // javPosterScheduler 是海报裁切的去处。nil 表示**就地执行**（测试用）。
 //
 // 抽出接口是为了让测试拿到确定性的同步行为：不用起 goroutine、不用 sleep。
@@ -58,22 +71,37 @@ type javArtifactRequest struct {
 	// 手动「生成当前目录 STRM」传该目录全部 —— 那正是批量回填的入口。
 	StrmFiles []string
 
-	// Overwrite 决定「已存在的 nfo / poster 要不要重建」。
+	// Overwrite 决定「已存在的元数据要不要重建」。
 	//
 	// **只有全量扫描（scan_mode == full_sync）才为 true**，其余一律 false。
 	// 这不是性能开关，是**数据所有权**开关：增量模式下那些文件里可能有用户手工改过的
 	// 内容（编辑器只写 nfo 与 poster），覆盖等于把用户的活干掉；而全量扫描的语义
 	// 就是「以侧车为准重建一遍」—— 那正是用户要的「恢复自动生成」。
 	//
-	// thumb 不受它影响（见 RefetchImages）：用户改不到 thumb，恢复也不需要重下它，
-	// 而全量是**任务级持久设置**（会被定时扫描反复触发），每轮重下整库封面会把
-	// JAVDB 的图床打毛。
+	// 它管到哪几项（2026-09-28 用户明确要求把 thumb 也纳入，理由与代价如下）：
+	//
+	//   - nfo / poster：重建（一贯如此）；
+	//   - **thumb：重下**，fanart 因为是同一份字节的复制，跟着一起重写
+	//     （不会多打一次上游，封面字节这一轮只取一遍）。
+	//   - 剧照与字幕**不归它管**：剧照仍「缺哪张补哪张」，字幕仍「已有就跳过」。
+	//
+	// ⚠️ 代价：全量是**任务级持久设置**，会被定时扫描反复触发，所以每轮扫描都会
+	// 重下整库封面。改之前这里写的是「不重下 thumb，免得把图床打毛」——那条判断被
+	// 用户否决了：他要的是「全量 = 这一部的元数据全部重来一遍」。
 	Overwrite bool
 	// RefetchImages 连 thumb（以及跟着它的 fanart）一起重新下载。**只有手动「重刮」为 true。**
+	//
+	// 与 Overwrite 在元数据这一层**行为已经重合**（两者都重下 thumb）。保留两个字段，
+	// 是为了让「用户手点的一次」与「定时跑的一轮」在调用点上仍分得开 ——
+	// 将来若要给两者不同的力度（比如全量限速、重刮不限），改动点就在这儿。
 	RefetchImages bool
 
 	Items  settings.JavMetaItems
 	Images JavImageFetcher
+
+	// Subtitles 找外挂字幕（nil = 不下载）。勾选由 Items.Subtitle 控制 ——
+	// 这个字段只说「有没有这个能力」，不说「这次要不要用」。
+	Subtitles JavSubtitleFetcher
 
 	// WatermarkEnabled 是**自动**那条路的总开关（重刮 / 扫描生成海报时贴不贴）。
 	// 默认关。手动裁剪那条路不看它 —— 那由编辑页上的勾选决定。
@@ -100,6 +128,9 @@ type javArtifactResult struct {
 	// NoSidecar 是「有 .strm 但没有可用的侧车 json」的部数。绝大多数媒体库还没推送过
 	// 番号片（侧车是推送时写的），所以这是**正常状态**，只记 Debug 不记失败。
 	NoSidecar int64
+	// Subtitle 是写出字幕的部数（0 或 1/部）。单独记：它既不是「已写文件数」
+	// 那个笼统的计数，也不能从 Written 里推出来（Written 混着 nfo/图片）。
+	Subtitle int64
 }
 
 // generateJavArtifacts 在 `.strm` 同层补 nfo / thumb / fanart / extrafanart，
@@ -141,6 +172,7 @@ func generateJavArtifacts(ctx context.Context, req javArtifactRequest) javArtifa
 		result.Written += stats.Written
 		result.Skipped += stats.Skipped
 		result.NoSidecar += stats.NoSidecar
+		result.Subtitle += stats.Subtitle
 		done += len(names)
 		reportMetadataActionProgress(req.OnProgress, ScanPhaseMetadataJav, done, total, dir)
 	}
@@ -182,28 +214,44 @@ func generateJavDir(
 		// Windows 上大小写不敏感看不出问题，Linux（Docker 部署）上就是「nfo 明明在
 		// 那儿却认不出来」，不报错。
 		stem := MediaStem(strmName)
-		w, s := writeJavArtifacts(ctx, req, absDir, relDir, stem, flat, sc, log)
+		w, s, sub := writeJavArtifacts(ctx, req, absDir, relDir, entries, stem, flat, sc, log)
 		result.Written += w
 		result.Skipped += s
+		result.Subtitle += sub
 	}
 	return result
 }
 
 // writeJavArtifacts 给一部片写它那一套文件。逐文件幂等：已存在且非空的跳过。
+//
+// entries 是**这一层的一次 ReadDir 结果**（generateJavDir 已经读过，传进来复用）：
+// 字幕那一步要按目录内容判「已有字幕就跳过」，再读一次盘没有意义，而且两次读之间
+// 目录可能变了。
 func writeJavArtifacts(
 	ctx context.Context,
 	req javArtifactRequest,
-	absDir, relDir, stem string,
+	absDir, relDir string,
+	entries []os.DirEntry,
+	stem string,
 	flat bool,
 	sc localSidecar,
 	log *slog.Logger,
-) (written, skipped int64) {
+) (written, skipped, subtitles int64) {
 	names := emby.TargetNames(stem, flat)
 	// 重建的判据：全量扫描（恢复自动生成）与手动重刮都要重写 nfo 与 poster；
 	// 增量扫描一律"存在即跳过"，那是手改内容唯一的护身符。
 	force := req.Overwrite || req.RefetchImages
 
-	// ① nfo：纯本地计算，不联网
+	// ① 字幕：**排在 nfo 之前**。nfo 的 <subtitle> 要写实际落盘那份字幕的
+	//    扩展名与语言（见 emby.NFOOptions.Subtitle），所以得先知道字幕下没下下来、
+	//    下的是什么格式。顺序反了就会写出一份「nfo 说 srt、旁边是 ass」的静默不一致。
+	sub := writeJavSubtitle(ctx, req, absDir, relDir, entries, stem, sc, log)
+	if sub.Written {
+		subtitles = 1
+		written++
+	}
+
+	// ② nfo：纯本地计算，不联网
 	if req.Items.NFO {
 		path := filepath.Join(absDir, names.NFO)
 		if !req.Overwrite && artifactExists(path) {
@@ -211,6 +259,7 @@ func writeJavArtifacts(
 		} else if data, err := emby.BuildNFO(sc.doc, emby.NFOOptions{
 			Names:     names,
 			DateAdded: sc.doc.DateAdded(),
+			Subtitle:  sub.Info,
 		}); err != nil {
 			log.Warn("番号元数据：nfo 生成失败", "path", relPath(relDir, names.NFO), "err", err)
 		} else if ok, err := writeMetadataFileForced(absDir, names.NFO, data, force); err != nil {
@@ -223,9 +272,13 @@ func writeJavArtifacts(
 	// ② 图片三件套共用**一份**封面字节：thumb 与 fanart 是同一份字节写两个文件，
 	//    poster 从本地 thumb 裁。写成三次 FetchImage 是最容易犯的错 —— 那会让
 	//    每部片多两次上游请求，而 JAVDB 的图床是会被打毛的。
-	// thumb：重刮时连它一起重下（用户可能看到一张坏图/旧图）；全量与增量都不动它。
-	needThumb := req.Items.Thumb && (req.RefetchImages || !artifactExists(filepath.Join(absDir, names.Thumb)))
+	//
+	// thumb：全量扫描与手动重刮都重下（用户 2026-09-28 明确要求全量也重下）；
+	//        增量扫描不动它。
+	needThumb := req.Items.Thumb && (req.Overwrite || req.RefetchImages || !artifactExists(filepath.Join(absDir, names.Thumb)))
 	// fanart 是 thumb 的字节复制 —— thumb 要重下时它跟着重下（否则会留一张旧图）。
+	// 它**不需要自己的开关**：既然是同一份字节，判据跟着 needThumb 就是对的，
+	// 而且不会多打一次上游（封面字节这一次只取一遍）。
 	needFanart := req.Items.Fanart && (needThumb || !artifactExists(filepath.Join(absDir, names.Fanart)))
 	// poster：全量重建、重刮重下，其余跳过。
 	needPoster := req.Items.Poster && (req.Overwrite || req.RefetchImages || !artifactExists(filepath.Join(absDir, names.Poster)))
@@ -260,7 +313,186 @@ func writeJavArtifacts(
 		written += writeJavPreviews(ctx, req, absDir, relDir, names, sc, log)
 	}
 
-	return written, skipped
+	return written, skipped, subtitles
+}
+
+// javSubtitleOutcome 是字幕那一步的结果。
+type javSubtitleOutcome struct {
+	// Written 是这一轮真的写出了一份字幕。
+	Written bool
+	// Info 是**本地实际躺着的那份字幕**的属性，给 nfo 用。
+	//
+	// 注意它不只在 Written 时为非零：这一轮没下（因为已经有一份了）时，
+	// Info 仍然填着那份既有字幕的信息 —— nfo 要描述的是「旁边有什么」，
+	// 而不是「这一轮做了什么」。
+	Info emby.SubtitleInfo
+}
+
+// writeJavSubtitle 给一部片补一份外挂字幕，写进 `.strm` 同层。
+//
+// # 幂等闸门先于任何网络请求
+//
+// 目录里只要有 `<主干>.<任意>` 的字幕文件就整个跳过 —— 一次 ReadDir 的成本换掉一次
+// 上游搜索。这同时是**「绝不覆盖用户已有字幕」的护身符**：字幕比图片更该保守，
+// 用户手改过时间轴的那一份，覆盖掉是不可恢复的（图片重下还是同一张）。
+//
+// 判据是「主干 + 字幕扩展名」而不是「文件名完全等于我们要写的那个」：用户手里的
+// 字幕多半叫 `XXX.chs.srt` / `XXX.简中.srt`，而我们会写成 `XXX.zh-CN.srt`。
+// 按全等判就会**又下一份**，一个目录里躺两份同语言字幕，播放器里两条几乎一样的轨。
+//
+// # 什么时候才覆盖：只有手动「重刮」
+//
+// 闸门的例外**只看 RefetchImages**，不看 Overwrite —— 与 thumb 的判据逐字同形
+// （见 writeJavArtifacts 里 needThumb 那一行）。理由也一样：Overwrite 来自
+// `scan_mode == full_sync`，那是个**任务级持久设置**，会被定时扫描反复触发；
+// 让它覆盖字幕等于每轮扫描都把用户手改过的那份干掉。而重刮是用户手点一次，
+// 语义就是「把手上这份换掉」。
+//
+// # 落盘用的是既有字幕的信息
+//
+// 跳过时也要把那份既有字幕的 ext/lang 报出去（javSubtitleOutcome.Info），
+// 否则 nfo 里的 <subtitle> 会退回写死的 srt/zh-CN，与旁边那份文件对不上。
+func writeJavSubtitle(
+	ctx context.Context,
+	req javArtifactRequest,
+	absDir, relDir string,
+	entries []os.DirEntry,
+	stem string,
+	sc localSidecar,
+	log *slog.Logger,
+) javSubtitleOutcome {
+	if !req.Items.Subtitle || req.Subtitles == nil {
+		return javSubtitleOutcome{}
+	}
+	if existing, ok := findLocalSubtitle(entries, stem); ok && !req.RefetchImages {
+		return javSubtitleOutcome{Info: existing}
+	}
+
+	keywords := subtitleKeywords(sc.doc)
+	if len(keywords) == 0 {
+		log.Debug("番号元数据：侧车里既没有番号也没有标题，无法搜字幕", "dir", relDir, "stem", stem)
+		return javSubtitleOutcome{}
+	}
+
+	res, err := req.Subtitles.BestSubtitle(ctx, keywords)
+	if err != nil {
+		// 上游挂了不是用户能修的事 —— 记 warn 不记 failure（与封面下载同一个取向，
+		// 否则失败通知会被灌满）。任务结论不受影响：这是锦上添花的那一步。
+		log.Warn("番号元数据：字幕搜索失败", "stem", stem, "keywords", keywords, "err", err)
+		return javSubtitleOutcome{}
+	}
+	if res == nil || len(res.Data) == 0 {
+		log.Debug("番号元数据：没有搜到字幕", "stem", stem, "keywords", keywords)
+		return javSubtitleOutcome{}
+	}
+
+	name := emby.SubtitleName(stem, res.Lang, res.Ext)
+	// 重刮要覆盖、其余一律「存在即跳过」：写入侧这道闸门与上面那个"已有字幕就整个
+	// 跳过"是配套的 —— 后者挡的是网络请求，前者挡的是「下完了才发现写不下去」。
+	ok, err := writeMetadataFileForced(absDir, name, res.Data, req.RefetchImages)
+	if err != nil {
+		log.Warn("番号元数据：字幕写入失败", "path", relPath(relDir, name), "err", err)
+		return javSubtitleOutcome{}
+	}
+	info := emby.SubtitleInfo{Ext: res.Ext, Lang: res.Lang}
+	if !ok {
+		// 文件已存在（force 为假时）——没写成功但旁边确实有那份，照实报出去。
+		return javSubtitleOutcome{Info: info}
+	}
+	log.Info("番号元数据：字幕已下载",
+		"path", relPath(relDir, name),
+		"source", res.Item.Name,
+		"lang", res.Lang,
+		"duration_ms", res.Item.Duration,
+	)
+	return javSubtitleOutcome{Written: true, Info: info}
+}
+
+// findLocalSubtitle 在这一层的目录内容里找**属于这个主干**的字幕文件。
+//
+// 判据：文件名以 `<主干>.` 开头（大小写不敏感）+ 扩展名是字幕格式。
+// 中间那一段（语言码）不看 —— 理由见 writeJavSubtitle。
+//
+// 第二项返回值是那份字幕的 ext/lang（lang 用**文件名里那一段**，因为既有字幕的正文
+// 不该被我们再读一遍；它的语言码是别人写的，我们只如实转述）。
+func findLocalSubtitle(entries []os.DirEntry, stem string) (emby.SubtitleInfo, bool) {
+	prefix := strings.ToLower(stem) + "."
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		lower := strings.ToLower(e.Name())
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		ext := filepath.Ext(lower)
+		if !emby.IsSubtitleExtension(ext) {
+			continue
+		}
+		ext = strings.TrimPrefix(ext, ".")
+		// 语言段 = 主干与扩展名之间那一段。`<主干>.srt` 没有这一段，lang 为空。
+		lang := strings.TrimSuffix(lower[len(prefix):], filepath.Ext(lower))
+		// 转成 **Emby 认的代码** 再交给 nfo：既有字幕的文件名是别人起的，
+		// 可能是 `chs` / `简中` / `zh` 这些 Emby 不认的写法，直接抄进
+		// <language> 等于把 nfo 也写成 Emby 认不出的样子。认不出就留空
+		// （nfo 那边会回落到样本那套值）。
+		return emby.SubtitleInfo{Ext: ext, Lang: embyLanguageFromTag(lang)}, true
+	}
+	return emby.SubtitleInfo{}, false
+}
+
+// embyLanguageFromTag 把字幕文件名里那段语言标记转成 Emby 认的代码。
+//
+// 与 internal/jav/subtitle 的 sniffFromName 同一套映射，但**刻意不共用**：那边是
+// 「猜」（用于排序，猜错无所谓），这边是「转述一个已经存在的文件名」（会写进 nfo）。
+// 两边对「认不出」的处理也不同 —— 那边返回空串参与排序，这边返回空串让 nfo 回落。
+// 分开写反而让各自的判据能独立演进；共用一份的话，改排序规则会悄悄改掉 nfo 的内容。
+func embyLanguageFromTag(tag string) string {
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	if tag == "" {
+		return ""
+	}
+	switch tag {
+	case "zh-cn", "zh-hans", "chs", "sc", "gb", "chi", "chinese", "zh", "简", "简中", "简体":
+		return "zh-CN"
+	case "zh-tw", "zh-hk", "zh-hant", "cht", "tc", "big5", "繁", "繁中", "繁体":
+		return "zh-TW"
+	case "eng", "english", "en":
+		return "eng"
+	case "jpn", "japanese", "jp":
+		return "jpn"
+	case "kor", "korean", "kr":
+		return "kor"
+	}
+	return ""
+}
+
+// subtitleKeywords 拼出搜索词：**番号在前、标题在后**。
+//
+// 实测（2026-09-28）：纯番号经常搜不到（`SSIS-001`、`ABP-123` 都返回空列表），
+// 而中文标题搜得到（`三上悠亚` 有结果）。所以标题不是冗余，是这个功能能不能用起来的
+// 关键兜底。番号仍然排第一：它命中的字幕名字匹配度最高，标题搜出来的常常是合集。
+//
+// 去重是必须的：番号与标题相同（有些片的 title 就是番号）时会白打一次接口。
+func subtitleKeywords(doc *emby.SidecarDoc) []string {
+	if doc == nil {
+		return nil
+	}
+	out := make([]string, 0, 2)
+	seen := map[string]struct{}{}
+	for _, kw := range []string{doc.Number, doc.Title} {
+		kw = strings.TrimSpace(kw)
+		if kw == "" {
+			continue
+		}
+		key := strings.ToLower(kw)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, kw)
+	}
+	return out
 }
 
 // javCoverBytes 取封面字节：**优先读本地已有的 thumb**，没有再联网。
@@ -277,8 +509,12 @@ func javCoverBytes(
 	log *slog.Logger,
 ) ([]byte, bool) {
 	// 优先吃本地已有的 thumb（poster 常是后来才勾上的，为一张海报再打一次图床没必要）——
-	// 但**重刮要的就是从上游重下一张**，那时不能走这条近路。
-	if !needThumb && !req.RefetchImages {
+	// 但**要重下的那两条路（全量 / 重刮）不能走这条近路**，否则读回来的是本地那张旧图。
+	//
+	// 判据写成「不重下」而不是只看 needThumb：needThumb 是**调用方**算的，而这条近路
+	// 只关心「这一轮要不要从上游取一张新的」。两者现在等价，但分开写之后，将来
+	// needThumb 的判据再变一次也不会把「要重下」的意图吃掉。
+	if !needThumb && !req.RefetchImages && !req.Overwrite {
 		if data, err := os.ReadFile(filepath.Join(absDir, names.Thumb)); err == nil && len(data) > 0 {
 			return data, true
 		}
@@ -578,18 +814,21 @@ func javMetaExtensions(taskMediaKind string, metaExts map[string]struct{}) map[s
 	return metaExts
 }
 
-// javArtifactNames 从**同一次 ReadDir 的结果**里算出「本程序生成的番号元数据文件名」
-// （小写），供 `cloud_primary` 那份守卫使用。
+// javArtifactNames 从**同一次 ReadDir 的结果**里算出「本程序生成的番号元数据」守卫。
 //
 // 输入是 entries 而不是目录路径：函数不再读盘，也就不可能在两次读之间看到不一致的目录。
 //
-// 名单 = 每个本地 `.strm` 主干算出的四个名字 + **无条件并入裸名**
-// `poster.jpg` / `thumb.jpg` / `fanart.jpg`。并入裸名是为了「平铺/独占翻转」：
-// 目录里多一个 `.strm` 会让命名规则从独占翻到平铺，上一轮按独占写的裸名会因此掉出
-// 名单、被 cloud_primary 删掉。并入之后翻转无痛。
+// # 两类判据
 //
-// 目录里没有 `.strm` 时返回 nil —— 没有片子，孤儿图本来就该被清理。
-func javArtifactNames(entries []os.DirEntry) map[string]struct{} {
+//   - **精确文件名**：nfo 与图片三件套。名单 = 每个本地 `.strm` 主干算出的四个名字
+//   - **无条件并入裸名** `poster.jpg` / `thumb.jpg` / `fanart.jpg`。并入裸名是为了
+//     「平铺/独占翻转」：目录里多一个 `.strm` 会让命名规则从独占翻到平铺，上一轮按
+//     独占写的裸名会因此掉出名单、被 cloud_primary 删掉。并入之后翻转无痛。
+//   - **主干前缀 + 字幕扩展名**：字幕名里的语言段（`zh-CN` / `eng` / 空）无法枚举，
+//     精确匹配做不到。见 javArtifactGuard 的注释。
+//
+// 目录里没有 `.strm` 时返回零值（没有片子，孤儿文件本来就该被清理）。
+func javArtifactNames(entries []os.DirEntry) javArtifactGuard {
 	stems := make([]string, 0, 4)
 	for _, e := range entries {
 		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".strm") {
@@ -598,24 +837,66 @@ func javArtifactNames(entries []os.DirEntry) map[string]struct{} {
 		stems = append(stems, mediaStemKey(e.Name()))
 	}
 	if len(stems) == 0 {
-		return nil
+		return javArtifactGuard{}
 	}
-	out := map[string]struct{}{}
+	exact := map[string]struct{}{}
+	prefixes := make(map[string]struct{}, len(stems))
 	for _, stem := range stems {
+		prefixes[stem+"."] = struct{}{}
 		// **两套命名都收**：平铺与独占会因为「这一轮多/少了一个 .strm」而翻转，
 		// 只收当前那一套的话，翻转之后上一轮写的文件会掉出名单、被 cloud_primary
 		// 删掉。名单是「可能属于本程序」的超集，多收几个没有代价。
 		for _, flat := range []bool{false, true} {
 			names := emby.TargetNames(stem, flat)
 			for _, name := range []string{names.NFO, names.Poster, names.Thumb, names.Fanart} {
-				out[strings.ToLower(name)] = struct{}{}
+				exact[strings.ToLower(name)] = struct{}{}
 			}
 		}
 	}
 	for _, bare := range []string{"poster.jpg", "thumb.jpg", "fanart.jpg"} {
-		out[bare] = struct{}{}
+		exact[bare] = struct{}{}
 	}
-	return out
+	return javArtifactGuard{exact: exact, prefixes: prefixes}
+}
+
+// javArtifactGuard 是「这个本地文件是不是本程序生成的」的判据。
+//
+// # 为什么字幕必须走前缀判据
+//
+// 字幕名是 `<主干>.<语言码>.<扩展名>`，而语言码有五种可能（zh-CN / zh-TW / eng /
+// jpn / kor）**还可能没有**（嗅不出语言时退化成 `<主干>.srt`）。枚举不现实，
+// 而漏掉任何一个的后果都很具体：那份字幕会被 cloud_primary 每轮删一次、生成器再
+// 写一次 —— 每轮重下一遍字幕，静默且昂贵。
+//
+// 前缀判据（`<主干>.` + 字幕扩展名）是安全的，理由与精确判据同源：这些文件**不在
+// 网盘上**，所以守卫只可能放过「本地独有」的文件 —— 那正是本程序生成的，
+// 或者用户自己塞的（放过用户的东西是更该有的行为）。
+//
+// **判据必须与生成端共用 emby.SubtitleName / emby.IsSubtitleExtension**：
+// 各写一遍的话，命名规则一改就会出现「生成 A、守卫认 B」，表现是文件删了又生成。
+type javArtifactGuard struct {
+	exact    map[string]struct{}
+	prefixes map[string]struct{}
+}
+
+// isOurs 报告这个本地文件名是不是本程序生成的。
+func (g javArtifactGuard) isOurs(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return false
+	}
+	if _, ok := g.exact[lower]; ok {
+		return true
+	}
+	if !emby.IsSubtitleExtension(filepath.Ext(lower)) {
+		return false
+	}
+	for prefix := range g.prefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // listStrmFiles 列出目录里的 .strm 文件名（升序，便于复现）。
@@ -696,6 +977,7 @@ func (s *Service) RebuildJavArtifacts(ctx context.Context, task *domain.StrmTask
 		Overwrite:     true,
 		RefetchImages: true,
 		Images:        s.javImages,
+		Subtitles:     s.javSubtitles,
 		PosterQueue:   s.javPosters,
 		// 重刮走的是**自动**那条判据：受总开关控制，图标按侧车属性算。
 		WatermarkEnabled: s.scanSettings().JavWatermarkEnabled,

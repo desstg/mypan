@@ -219,6 +219,7 @@ func (s *Service) GenerateCurrentDirectory(ctx context.Context, accountID int64,
 					StrmFiles:   names,
 					Items:       work.scanCfg.JavMetaItems,
 					Images:      s.javImages,
+					Subtitles:   s.javSubtitles,
 					PosterQueue: s.javPosters,
 					Log:         s.log,
 				})

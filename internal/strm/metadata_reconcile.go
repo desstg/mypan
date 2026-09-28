@@ -195,7 +195,7 @@ func buildMetadataSyncPlan(ctx context.Context, req metadataSyncRequest) (metada
 		//
 		// 名单与生成端**共用** emby.TargetNames（见 javArtifactNames）——各写一遍的话，
 		// 命名规则一改就会出现「生成 A、守卫认 B」，表现是文件删了又生成。
-		var javArtifacts map[string]struct{}
+		var javArtifacts javArtifactGuard
 		if req.JavArtifactGuard {
 			javArtifacts = javArtifactNames(entries)
 		}
@@ -203,10 +203,8 @@ func buildMetadataSyncPlan(ctx context.Context, req metadataSyncRequest) (metada
 			if entry.IsDir() || !isMetadataExtension(entry.Name(), req.Extensions) {
 				continue
 			}
-			if len(javArtifacts) > 0 {
-				if _, ours := javArtifacts[strings.ToLower(entry.Name())]; ours {
-					continue
-				}
+			if javArtifacts.isOurs(entry.Name()) {
+				continue
 			}
 			info, err := entry.Info()
 			if err != nil || !info.Mode().IsRegular() {

@@ -119,9 +119,16 @@ type nfoStreamDetails struct {
 
 // nfoSubtitle 是「这片带中字」的声明。
 //
+// # 为什么 codec/language 变成了可选
+//
 // 侧车只知道「资源名字里写了中字」（quality.subtitle），不知道真正挂了几个字幕轨、
-// 什么格式 —— 所以 codec/language 是**按用户库的既有形态写死的**（样本 nfo 就是这个形状，
-// 见 JUR-019-U.nfo:54-65）。编造的细节比缺失的细节更糟：Emby 会按它去挂轨。
+// 什么格式 —— 所以在还没有外挂字幕的年代，codec/language 是**按用户库的既有形态写死的**
+// （样本 nfo 就是这个形状，见 JUR-019-U.nfo:54-65）。
+//
+// 现在本程序会真的下外挂字幕（internal/jav/subtitle），那份字幕的扩展名与语言是
+// **已知的**：此时再写死 `srt`/`zh-CN` 就会出现「nfo 说 srt、旁边躺着的是 ass」
+// 这种静默不一致。所以由调用方通过 NFOOptions.Subtitle 把真实值递进来；
+// 没递（没下字幕，只有侧车里那个中字标记）就回落到原来那套写死的值。
 type nfoSubtitle struct {
 	Codec    string `xml:"codec"`
 	Micodec  string `xml:"micodec"`
@@ -149,6 +156,20 @@ type NFOOptions struct {
 	Names Names
 	// DateAdded 是 <dateadded>。零值表示「侧车没记」，用「现在」。
 	DateAdded time.Time
+	// Subtitle 描述**实际落盘的那份外挂字幕**（扩展名 + Emby 语言码），
+	// 让 <fileinfo><streamdetails><subtitle> 里写的与旁边躺着的文件一致。
+	//
+	// 零值 = 没下字幕（只有侧车里那个中字标记），此时按样本那套写死 srt / zh-CN。
+	Subtitle SubtitleInfo
+}
+
+// SubtitleInfo 是一份外挂字幕的两个已知属性。
+//
+// 两者都可能为空 —— 语言嗅不出来时 Lang 就是空串，那时 nfo 里按空写（比编一个
+// zh-CN 好：Emby 会按它去挂轨）。
+type SubtitleInfo struct {
+	Ext  string
+	Lang string
 }
 
 // ratingName 是 <ratings> 里那条评分的来源名。与样本一致（javdb 是 5 分制，

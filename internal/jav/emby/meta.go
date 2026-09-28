@@ -68,6 +68,14 @@ type MovieMeta struct {
 	Uncensored  bool `json:"uncensored"`
 	HasSubtitle bool `json:"has_subtitle"`
 
+	// SubtitleExt / SubtitleLang 是**实际落盘那份外挂字幕**的属性，
+	// 只用来写 <fileinfo><streamdetails><subtitle> 的 codec/language。
+	//
+	// 不参与表单、不落侧车、读回来也不还原（nfo_read 只关心那个元素在不在）——
+	// 它描述的是「旁边那个字幕文件长什么样」，而那个文件本身就是事实来源。
+	SubtitleExt  string `json:"-"`
+	SubtitleLang string `json:"-"`
+
 	// —— 表单不暴露、但必须原样写回的元素 ——
 	LockData     bool   `json:"lock_data"`
 	CustomRating string `json:"custom_rating"`
@@ -107,7 +115,11 @@ func MovieMetaFromSidecar(doc *SidecarDoc, opts NFOOptions) *MovieMeta {
 		FourK:       doc.Quality.FourK,
 		Uncensored:  doc.Quality.Uncensored,
 		// 中字：侧车有两个来源（影片级的 has_cnsub、资源名里的中字），任一为真就算有。
-		HasSubtitle:  doc.HasCNSub || doc.Quality.Subtitle,
+		HasSubtitle: doc.HasCNSub || doc.Quality.Subtitle,
+		// 外挂字幕的真实属性：有就按它写 <subtitle> 的 codec/language，
+		// 没有（零值）就回落到样本那套写死的 srt / zh-CN。
+		SubtitleExt:  opts.Subtitle.Ext,
+		SubtitleLang: opts.Subtitle.Lang,
 		LockData:     false,
 		CustomRating: "JP-18+",
 		MPAA:         "JP-18+",
@@ -247,8 +259,17 @@ func BuildNFOFromMeta(meta *MovieMeta) ([]byte, error) {
 	}
 
 	if meta.HasSubtitle {
+		codec, lang := "srt", "zh-CN"
+		// 有实际落盘的字幕就用它那份属性：写死会在「nfo 说 srt、旁边是 ass」时
+		// 留下静默不一致（Emby 按 nfo 去挂轨，挂不上也不报错）。
+		if ext := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(meta.SubtitleExt), ".")); ext != "" {
+			codec = ext
+		}
+		if l := strings.TrimSpace(meta.SubtitleLang); l != "" {
+			lang = l
+		}
 		m.FileInfo = &nfoFileInfo{StreamDetails: nfoStreamDetails{Subtitle: &nfoSubtitle{
-			Codec: "srt", Micodec: "srt", Language: "zh-CN", Scantype: "progressive",
+			Codec: codec, Micodec: codec, Language: lang, Scantype: "progressive",
 			Default: false, Forced: false,
 		}}}
 	}

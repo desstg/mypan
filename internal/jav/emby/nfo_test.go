@@ -62,6 +62,8 @@ func TestBuildNFOElementMapping(t *testing.T) {
 		{"封面地址", "<cover>https://tp.spfcas.com/rhe951l4q/covers/ve/vezpEn.jpg</cover>"},
 		{"详情页", "<website>https://javdb.com/v/ZY5eq</website>"},
 		{"中字声明", "<subtitle>"},
+		{"中字编解码（没下外挂字幕时按样本写死）", "<codec>srt</codec>"},
+		{"中字语言（同上）", "<language>zh-CN</language>"},
 		{"图片文件名与生成的文件名同源", "<poster>poster.jpg</poster>"},
 		{"同上（thumb）", "<thumb>thumb.jpg</thumb>"},
 		{"同上（fanart）", "<fanart>fanart.jpg</fanart>"},
@@ -100,6 +102,41 @@ func TestBuildNFOHasUTF8BOM(t *testing.T) {
 	// BOM 必须在声明**之前**
 	if !bytes.HasPrefix(out, append([]byte{0xEF, 0xBB, 0xBF}, []byte(xml.Header)...)) {
 		t.Errorf("BOM 应当在 <?xml 之前，got %q", out[:40])
+	}
+}
+
+// TestBuildNFOSubtitleFollowsRealFile 钉住「nfo 说的字幕与实际落盘那份一致」。
+//
+// 背景：`<fileinfo><streamdetails><subtitle>` 里的 codec/language 原本是写死的
+// srt/zh-CN（照样本 nfo 的形状）。本程序现在会真的下外挂字幕，那份字幕的扩展名与
+// 语言是已知的 —— 再写死就会出现「nfo 说 srt、旁边躺着的是 ass」这种静默不一致：
+// Emby 按 nfo 去挂轨，挂不上也不报错。
+func TestBuildNFOSubtitleFollowsRealFile(t *testing.T) {
+	doc := mustParse(t, sampleJSON)
+
+	// 有实际落盘的字幕：按它写。
+	out, err := BuildNFO(doc, NFOOptions{
+		Names:    TargetNames(doc.Number, false),
+		Subtitle: SubtitleInfo{Ext: "ass", Lang: "zh-TW"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	xml := string(out)
+	if !strings.Contains(xml, "<codec>ass</codec>") || !strings.Contains(xml, "<micodec>ass</micodec>") {
+		t.Errorf("codec 该跟着实际文件走（ass）：\n%s", xml)
+	}
+	if !strings.Contains(xml, "<language>zh-TW</language>") {
+		t.Errorf("language 该跟着实际文件走（zh-TW）：\n%s", xml)
+	}
+
+	// 没下字幕（零值）：回落到样本那套写死的值。
+	out, err = BuildNFO(doc, NFOOptions{Names: TargetNames(doc.Number, false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if xml = string(out); !strings.Contains(xml, "<codec>srt</codec>") || !strings.Contains(xml, "<language>zh-CN</language>") {
+		t.Errorf("没有外挂字幕时该回落到样本的 srt/zh-CN：\n%s", xml)
 	}
 }
 

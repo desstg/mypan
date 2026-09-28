@@ -19,6 +19,7 @@ import (
 	"litepan/internal/fusemount"
 	"litepan/internal/fusereadcache"
 	"litepan/internal/jav"
+	"litepan/internal/jav/subtitle"
 	"litepan/internal/logx"
 	"litepan/internal/mediaorganize"
 	"litepan/internal/offlinedownload"
@@ -241,6 +242,13 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	// 域名白名单都在那边（internal/jav/image.go）。走 setter 是因为接线顺序上
 	// wireSTRM 早于 jav.New，构造期拿不到这个实例。
 	strmSvc.SetJavImageFetcher(javSvc)
+
+	// 外挂字幕：源是迅雷看看的私有接口（internal/jav/subtitle）。代理**由这里取好
+	// 递进去** —— 字幕客户端不该去读全局代理那几个键名（与图片那条同一个理由）。
+	// 代理在客户端里是**兜底**：直连不通才走它（见 subtitle.Client.do）。
+	strmSvc.SetJavSubtitleFetcher(subtitle.NewClient(subtitle.Options{
+		ProxyURL: settings.ProxyURL(st.settings),
+	}))
 
 	// 补到的简介要落到**本地那份侧车 json** 上，否则 nfo 里还是空（nfo 读的是本地
 	// json，不是库）。jav 不知道媒体库目录在哪 —— 那些知识在 strm 那边，

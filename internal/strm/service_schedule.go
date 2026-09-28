@@ -170,9 +170,13 @@ func (s *Service) runTaskAsync(task *domain.StrmTask) {
 			Secret:      s.secret,
 			Settings:    s.scanSettings(),
 			JavImages:   s.javImages,
-			JavPosters:  s.javPosters,
-			Log:         s.log,
-			OnProgress:  reportProgress,
+			// ⚠️ 扫描那条路（定时 / 手动执行任务）走这里，**与 current_dir 是两处**。
+			// 漏掉这一行不会报错：番号元数据照常生成，只是永远没有字幕 ——
+			// 属于「静默变空」那一族（界面上的开关开着、日志里 `subtitles: 0`）。
+			JavSubtitles: s.javSubtitles,
+			JavPosters:   s.javPosters,
+			Log:          s.log,
+			OnProgress:   reportProgress,
 		}, runMode)
 		patch := scanPatchAfterRun(err, result)
 		patch.LastScan = time.Now()
