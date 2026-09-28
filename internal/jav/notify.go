@@ -42,29 +42,48 @@ func (s *Service) notifyPush(level, title, message string, refID int64) {
 
 // notifyScheduledPush 报一轮定时推送的结果。
 //
-// 「一部都没推出去」也要报，且降级成 warning：定时推送是无人值守的，用户唯一能知道
-// 「这轮怎么没动静」的地方就是通知 —— 什么都不发的话，「没有新资源」和「整轮报错了」
-// 在界面上长得一模一样。
+// 三种结论分开报（2026-09-27 重写）：
+//
+//   - **有真失败** → warning，正文带**具体原因**（订阅名 + 网盘/上游的原话）。
+//     这才是用户需要去查的那一条。
+//   - **一部都没推出去，但也没失败** → **不发通知**。这就是「这些订阅的片都推过了」
+//     或「没有新的合格资源」—— 是正常状态。以前这里发 warning
+//     「N 条订阅本轮都没推成」，用户看到 13 条要查，实际 13 条全都无事可做。
+//   - **推出去了** → success。有失败时也会一起写进正文（不掩盖）。
 //
 // level 取 success / warning 是照通知中心那几个图标来的（AdminNotificationBell 的
-// levelIcon：success ✓、warning !、其余一律 i）。定时这一轮是用户特意等的结果，
-// 给 ✓ 比给 i 更贴合它的分量。
-func (s *Service) notifyScheduledPush(started time.Time, pushed, skipped int) {
+// levelIcon：success ✓、warning !、其余一律 i）。
+func (s *Service) notifyScheduledPush(started time.Time, pushed, skipped, failed int, failedSubs []string) {
 	at := clockOf(started)
-	// skipped 是「这一轮没推成的订阅条数」（见 pushAllSubscriptions 里对 n == 0 的计数）。
-	if pushed == 0 {
-		message := at + " 执行推送任务，没有可推送的订阅"
-		if skipped > 0 {
-			message = at + " 执行推送任务，" + strconv.Itoa(skipped) + " 条订阅本轮都没推成"
+	if failed > 0 {
+		shown := capLines(failedSubs, maxNotifyFailures)
+		message := at + " 执行推送任务，成功 " + strconv.Itoa(pushed) + " 部；" +
+			strconv.Itoa(failed) + " 条订阅推送失败：" + strings.Join(shown, "；")
+		if failed > len(shown) {
+			message += "；…等 " + strconv.Itoa(failed) + " 条"
 		}
-		s.notifyPush("warning", "番号订阅推送没推出去", message, 0)
+		s.notifyPush("warning", "番号订阅推送有失败", message, 0)
 		return
 	}
-	message := at + " 执行推送任务，成功推送 " + strconv.Itoa(pushed) + " 部"
-	if skipped > 0 {
-		message += "；另有 " + strconv.Itoa(skipped) + " 条订阅本轮没推成"
+	// 没推出去、也没失败：**静默**。「无事可做」不该打扰用户 ——
+	// 定时推送是无人值守的，而这条通知以前每轮都发，含义却被他当成「出错了」。
+	if pushed == 0 {
+		return
 	}
-	s.notifyPush("success", "番号订阅推送完成", message, 0)
+	s.notifyPush("success", "番号订阅推送完成",
+		at+" 执行推送任务，成功推送 "+strconv.Itoa(pushed)+" 部", 0)
+}
+
+// maxNotifyFailures 是通知正文里最多列几条失败（多了扫不完，剩下的用「…等 N 条」收口）。
+const maxNotifyFailures = 3
+
+// capLines 只留前 n 条（通知是要一眼扫完的，堆十几条等于没写）。
+// n 由调用方给（见 maxNotifyFailures）。
+func capLines(lines []string, n int) []string {
+	if len(lines) <= n {
+		return lines
+	}
+	return lines[:n]
 }
 
 // notifyManualPush 报一次手动推送成功。

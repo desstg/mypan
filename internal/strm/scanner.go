@@ -39,6 +39,12 @@ type ScanSettings struct {
 	Tool115TreeEnabled    bool
 	// JavMetaItems 是「番号元数据」六个开关（媒体类型 = 番号影片时生效）。
 	JavMetaItems settings.JavMetaItems
+	// 水印：开关 + 两个偏好 + 用户图标目录。开关决定**自动**那条路贴不贴
+	// （手动裁剪那条路由编辑页自己的勾选决定，与它无关）。
+	JavWatermarkEnabled bool
+	JavWatermarkScale   int
+	JavWatermarkMargin  int
+	JavWatermarkDir     string
 }
 
 type ScanDeps struct {
@@ -292,10 +298,14 @@ func finalizeScan(
 		} else if updated {
 			result.UpdatedCount++
 		}
-		// 番号元数据的驱动集合 = **本轮新增 / 更新的** .strm（用户选的「只处理新增」）。
-		// 老片子要靠手动「生成当前目录 STRM」回填，那一路走 current_dir.go。
-		// 注意 `incremental_missing` 跳过已存在的 .strm 时不会走到这里 —— 正合此意。
-		if task.MediaKind == domain.StrmMediaKindJav && (created || updated) {
+		// 番号元数据的驱动集合：
+		//   * 增量（补缺 / 更新）→ **本轮新增 / 更新的** .strm（用户选的「只处理新增」）；
+		//     老片子要靠手动「生成当前目录 STRM」回填，那一路走 current_dir.go。
+		//   * **全量 → 整棵树**。这是「恢复自动生成」那条路的入口，必须显式写在这里，
+		//     不能靠「full_sync 下 writeStrmFile 恰好总返回 updated」这个副作用 ——
+		//     哪天它加一句"内容相同就不重写"，恢复功能会静默失效。
+		if task.MediaKind == domain.StrmMediaKindJav &&
+			(created || updated || task.ScanMode == domain.StrmScanModeFullSync) {
 			javTargets = append(javTargets, filepath.ToSlash(relPath))
 		}
 	}
@@ -374,14 +384,24 @@ func finalizeScan(
 		// 本地没有新侧车，生成器无事可做。
 		if task.MediaKind == domain.StrmMediaKindJav && deps.JavImages != nil && len(javTargets) > 0 {
 			javRes := generateJavArtifacts(ctx, javArtifactRequest{
-				Root:        root,
-				StrmFiles:   javTargets,
-				Items:       deps.Settings.JavMetaItems,
+				Root:      root,
+				StrmFiles: javTargets,
+				Items:     deps.Settings.JavMetaItems,
+				// 全量扫描 = 以侧车为准重建一遍（用户的「恢复自动生成」）；
+				// 重刮走 RebuildJavArtifacts，不在这条路上。
+				Overwrite:   task.ScanMode == domain.StrmScanModeFullSync,
 				Images:      deps.JavImages,
 				PosterQueue: deps.JavPosters,
-				Failures:    failures,
-				OnProgress:  deps.OnProgress,
-				Log:         log,
+				// 水印：`Enabled` 是总开关（默认关）；真贴哪几个图标由生成器
+				// **按各部的侧车属性**算（见 watermarkIDsForSidecar）——
+				// 这一步没法在这里算，因为它是 per-movie 的。
+				WatermarkEnabled: deps.Settings.JavWatermarkEnabled,
+				WatermarkScale:   deps.Settings.JavWatermarkScale,
+				WatermarkMargin:  deps.Settings.JavWatermarkMargin,
+				watermarkDir:     deps.Settings.JavWatermarkDir,
+				Failures:         failures,
+				OnProgress:       deps.OnProgress,
+				Log:              log,
 			})
 			result.GeneratedCount += javRes.Written
 			log.Info("strm 番号元数据生成完成",

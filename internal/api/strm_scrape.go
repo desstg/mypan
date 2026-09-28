@@ -1,9 +1,9 @@
 package api
 
 import (
-	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -243,13 +243,28 @@ func (h *Handler) getStrmScrapePoster(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	f, err := os.Open(path)
+	// 一次性读出来再写，**不用 os.Open + io.Copy**：后者在整个响应期间（浏览器
+	// 慢一点就是几秒）一直占着文件句柄，而 Windows 上「覆盖一个正被打开的文件」
+	// 会失败 —— 番号海报墙那边保存海报走的正是覆盖写。图只有几十 KB，全读进来毫无代价。
+	body, err := os.ReadFile(path)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	defer f.Close()
-	w.Header().Set("Content-Type", "image/jpeg")
+	// 按扩展名给正确的类型：png/webp 也被白名单放行，一律写 jpeg 会让浏览器猜错。
+	w.Header().Set("Content-Type", imageContentTypeFor(path))
 	w.Header().Set("Cache-Control", "private, max-age=3600")
-	_, _ = io.Copy(w, f)
+	_, _ = w.Write(body)
+}
+
+// imageContentTypeFor 按扩展名判图片类型（与 jav 那边同一套口径）。
+func imageContentTypeFor(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png":
+		return "image/png"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "image/jpeg"
+	}
 }

@@ -8,16 +8,25 @@ import "strings"
 // 不依赖 internal/domain —— 和 quality / cronspec 一样的考虑：
 // 纯转换逻辑应当能被单独测试，不需要构造任何领域实体。
 type NormalizedMovie struct {
-	ID               string
-	Number           string
-	Title            string
-	OriginTitle      string
-	CoverURL         string
-	ThumbURL         string
-	Duration         int
-	ReleaseDate      string
-	Score            float64
-	Summary          string
+	ID          string
+	Number      string
+	Title       string
+	OriginTitle string
+	// TitleZH 是**别站补来的中文标题**（missav / airav 那类站给的）。JAVDB 自己
+	// 给的大面积是日文，所以这一项要么空、要么由 fillMissingFields 填上。
+	TitleZH string
+	// TitleZHSource 是这行中文标题的来源（同 SummarySource 的规矩：只有真写进去了才更新）。
+	TitleZHSource string
+	CoverURL      string
+	ThumbURL      string
+	Duration      int
+	ReleaseDate   string
+	Score         float64
+	Summary       string
+	// SummarySource 记录这段简介是哪来的（javdb / jav321 / caribbeancom）。
+	// **不是上游字段** —— 是 LitePan 补全时打上的（见 internal/jav/synopsis），
+	// 用途是审计与将来替换低质量来源。不要往 raw_json 里塞它。
+	SummarySource    string
 	Review           string
 	DirectorID       string
 	DirectorName     string

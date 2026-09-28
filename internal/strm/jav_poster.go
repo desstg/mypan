@@ -28,6 +28,18 @@ type javPosterJob struct {
 	ThumbPath  string
 	PosterPath string
 	Censored   bool
+	// Overwrite 为真时这张海报是**要重算**的（全量恢复 / 手动重刮）：绕过去重、
+	// 也绕过「已存在就跳过」。
+	Overwrite bool
+	// WatermarkIDs 是要贴上去的水印 id（空 = 不贴）。由生成侧按侧车属性算好传进来 ——
+	// 队列只负责"贴"，不负责"该不该贴"（那是业务判据，不属于队列）。
+	WatermarkIDs []string
+	// WatermarkScale / WatermarkMargin 是百分数（18 / 6），与编辑页那两个偏好同源。
+	WatermarkScale  int
+	WatermarkMargin int
+	// watermarkDir 是用户放图标的目录（空 = 用内置那套）。随作业带进来 ——
+	// 队列是个孤立的工作者，不去反查 Service 的字段。
+	watermarkDir string
 }
 
 const (
@@ -84,10 +96,15 @@ func (q *javPosterQueue) SchedulePoster(job javPosterJob) {
 	if q == nil || job.ThumbPath == "" || job.PosterPath == "" {
 		return
 	}
+	// ⚠️ 去重只在**非强制**时生效。`seen` 是一张只增不减的表（故意不清理：清了就等于
+	// 每轮重算），强制作业要是也走去重，第二次「全量恢复」就会命中第一次留下的记录、
+	// 被静默丢掉 —— 表现是「第一次恢复成功、之后再也恢复不了」。
 	q.mu.Lock()
-	if _, dup := q.seen[job.PosterPath]; dup {
-		q.mu.Unlock()
-		return
+	if !job.Overwrite {
+		if _, dup := q.seen[job.PosterPath]; dup {
+			q.mu.Unlock()
+			return
+		}
 	}
 	q.seen[job.PosterPath] = struct{}{}
 	q.mu.Unlock()
@@ -129,7 +146,7 @@ func (q *javPosterQueue) process(parent context.Context, job javPosterJob) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	if artifactExists(job.PosterPath) {
+	if !job.Overwrite && artifactExists(job.PosterPath) {
 		return
 	}
 	thumb, err := os.ReadFile(job.ThumbPath)
@@ -146,7 +163,19 @@ func (q *javPosterQueue) process(parent context.Context, job javPosterJob) {
 	if len(poster) == 0 {
 		return
 	}
-	if _, err := writeMetadataFile(filepath.Dir(job.PosterPath), filepath.Base(job.PosterPath), poster); err != nil {
+	// 水印：best-effort（贴不上就按无水印写出去），与上面裁切失败的处理一致。
+	if len(job.WatermarkIDs) > 0 {
+		marks, loadErr := emby.LoadWatermarks(job.watermarkDir, job.WatermarkIDs)
+		if loadErr != nil {
+			q.log.Warn("番号元数据：水印图标装不上", "ids", job.WatermarkIDs, "err", loadErr)
+		} else if marked, wmErr := emby.ComposePosterWithMargin(poster, marks,
+			float64(job.WatermarkScale)/100, float64(job.WatermarkMargin)/100); wmErr != nil {
+			q.log.Warn("番号元数据：水印没贴上，海报按无水印写", "poster", job.PosterPath, "err", wmErr)
+		} else {
+			poster = marked
+		}
+	}
+	if _, err := writeMetadataFileForced(filepath.Dir(job.PosterPath), filepath.Base(job.PosterPath), poster, true); err != nil {
 		q.log.Warn("番号元数据：海报写入失败", "poster", job.PosterPath, "err", err)
 	}
 }

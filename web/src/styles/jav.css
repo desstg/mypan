@@ -1845,6 +1845,9 @@
 
 /* —— 简介 —— */
 
+/* 「加载中…」那态：比正文浅一档，读起来像占位而不是内容。 */
+.jd-summary--pending { color: var(--text-muted); }
+
 .jd-summary {
   font-size: 0.85rem;
   line-height: 1.75;

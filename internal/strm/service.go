@@ -48,6 +48,9 @@ type Service struct {
 	// javPosters 是海报裁切的低优先级队列，全局一个（所有任务共用一个单并发工作者，
 	// 多个任务并行时海报天然排队 —— 这就是「低优先级」的实现方式）。
 	javPosters *javPosterQueue
+	// watermarkDirFn 返回用户放水印图标的目录（空 = 用内置那套）。
+	// 走函数而不是字符串：目录是 jav 模块的设置项，而 strm 不该去读别人的键。
+	watermarkDirFn func() string
 
 	mu                       sync.Mutex
 	running                  map[int64]bool
@@ -524,11 +527,36 @@ func (s *Service) GetRuntimeSettings(ctx context.Context, requestBase string) (m
 		// 番号元数据那六个开关。给**规范字符串**（键顺序固定）：前端拿前后两个值
 		// 比就知道有没有改动，顺序不稳定会一直误报未保存。
 		"jav_metadata_items": settings.ParseJavMetaItems(s.settings.StringAllowEmpty(settings.KeyStrmJavMetaItems)).Encode(),
+		// 番号墙「整档隐藏的目录」（勾上 = 隐藏）。与元数据那六个开关同一条理由：给
+		// **规范字符串**（排序 + 去重的 JSON 数组），前端拿前后两个值比就知道有没有改动；
+		// 空串 = 还没勾过（读侧会动态回落分类规则的兜底目录名），`[]` = 一个都不藏。
+		"jav_wall_hidden_dirs": settings.EncodeJavWallHiddenDirs(
+			mustParseJavWallHiddenDirs(s.settings.StringAllowEmpty(settings.KeyStrmJavWallHiddenDirs))),
+		// 番号海报水印总开关（重刮 / 扫描生成海报时贴不贴）。**键在 jav 那边**
+		// （jav_watermark_enabled）—— 因为它管的是"贴不贴水印"这件事本身，
+		// 与番号的大小/边距两个偏好是一套；这里只是借 STRM 设置页给它一个入口。
+		"jav_watermark_enabled": s.settings.Bool(settings.KeyJavWatermarkEnabled),
+		// 水印那三个偏好也一起给：开关在 STRM 设置页，**开着时下面直接显示这三项**，
+		// 关着时前端把它们收起来（用户要求）。键仍是 jav_ 前缀 —— 它们属于番号模块，
+		// 只是借这个入口读写，省得为了三个输入框跳去另一个弹窗。
+		"jav_watermark_dir":    s.settings.StringAllowEmpty(settings.KeyJavWatermarkDir),
+		"jav_watermark_scale":  s.watermarkPercent(settings.KeyJavWatermarkScale, defaultWatermarkScale),
+		"jav_watermark_margin": s.watermarkPercent(settings.KeyJavWatermarkMargin, defaultWatermarkMargin),
 	}, nil
 }
 
 func (s *Service) UpdateRuntimeSettings(ctx context.Context, in map[string]string) error {
 	return s.settings.Update(ctx, in)
+}
+
+// mustParseJavWallHiddenDirs 读番号墙隐藏名单，**解析不出来就当作「还没勾过」**（空列表）。
+//
+// 这里刻意不回落到「分类规则的兜底目录名」：那一层回落归 strmscrape 的读侧管
+// （javWallHiddenDirs），两处都兜一遍会让前端拿到的值（默认名）与读侧的实际行为
+// （动态跟随改名）看着不一致。空列表在这里的意思是「没存过」，前端据此显示占位说明。
+func mustParseJavWallHiddenDirs(raw string) []string {
+	dirs, _ := settings.ParseJavWallHiddenDirs(raw)
+	return dirs
 }
 
 func (s *Service) ReplaceBaseURL(ctx context.Context, newBaseURL string) (ReplaceBaseURLResult, error) {
@@ -712,6 +740,10 @@ func (s *Service) scanSettings() ScanSettings {
 		MetadataSyncMode:      normalizeMetadataSyncMode(s.settings.String(settings.KeyStrmMetadataSyncMode)),
 		Tool115TreeEnabled:    s.settings.Bool(settings.KeyStrmTool115TreeEnabled),
 		JavMetaItems:          settings.ParseJavMetaItems(s.settings.StringAllowEmpty(settings.KeyStrmJavMetaItems)),
+		JavWatermarkEnabled:   s.settings.Bool(settings.KeyJavWatermarkEnabled),
+		JavWatermarkScale:     s.watermarkPercent(settings.KeyJavWatermarkScale, defaultWatermarkScale),
+		JavWatermarkMargin:    s.watermarkPercent(settings.KeyJavWatermarkMargin, defaultWatermarkMargin),
+		JavWatermarkDir:       strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavWatermarkDir)),
 	}
 }
 
@@ -851,4 +883,74 @@ func branchRelativePath(taskPath, branchPath string) string {
 		return strings.TrimPrefix(branchPath, prefix)
 	}
 	return ""
+}
+
+// SetWatermarkDirFunc 注入「用户放水印图标的目录」。
+//
+// 与 SetJavImageFetcher 同一个理由：那个设置项属于 jav 模块，strm 这边不该知道它的键名。
+func (s *Service) SetWatermarkDirFunc(fn func() string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.watermarkDirFn = fn
+	s.mu.Unlock()
+}
+
+// watermarkDir 取用户图标目录（没注入时返回空 = 用内置那套）。
+func (s *Service) watermarkDir() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	fn := s.watermarkDirFn
+	s.mu.Unlock()
+	if fn == nil {
+		return ""
+	}
+	return strings.TrimSpace(fn())
+}
+
+// 水印那两个百分数的默认值（与 jav.WatermarkScalePercent 的默认同源）。
+const (
+	defaultWatermarkScale  = 18
+	defaultWatermarkMargin = 2
+)
+
+// watermarkPercent 读一个百分数设置并夹进 1~100；没配/越界回落默认。
+//
+// 夹一道的理由同 jav 那边：这个值直接参与图像计算（比例 × 海报宽），
+// 而设置可以被别的路径写进去（旧版本配置、直接改库）。
+func (s *Service) watermarkPercent(key string, def int) int {
+	if s == nil || s.settings == nil {
+		return def
+	}
+	v := s.settings.Int(key)
+	if v <= 0 {
+		return def
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
+}
+
+// WatermarkDir / WatermarkScalePercent / WatermarkMarginPercent 给别的模块读
+// （编辑页那条路在 strmscrape 里，它通过手上的 strm.Service 取）。
+func (s *Service) WatermarkDir() string {
+	return s.watermarkDir()
+}
+
+func (s *Service) WatermarkScalePercent() int {
+	if s == nil || s.settings == nil {
+		return defaultWatermarkScale
+	}
+	return s.watermarkPercent(settings.KeyJavWatermarkScale, defaultWatermarkScale)
+}
+
+func (s *Service) WatermarkMarginPercent() int {
+	if s == nil || s.settings == nil {
+		return defaultWatermarkMargin
+	}
+	return s.watermarkPercent(settings.KeyJavWatermarkMargin, defaultWatermarkMargin)
 }

@@ -225,6 +225,18 @@ func Defaults() Rules {
 	}
 }
 
+// FallbackTargetName 返回**默认规则表**里那条兜底规则（无番号）的目标目录名。
+//
+// 兜底规则恒定排在最后一条（顺序即优先级，见 fallbackClassifyRules 的注释）。
+// 调用方要用的是「当前规则表」里的那一条时，请自己取 `Rules.ClassifyRules` 的末条 ——
+// 这个函数只回答「出厂默认叫什么」，给「用户还没改过任何东西」那一路用。
+func FallbackTargetName() string {
+	if len(fallbackClassifyRules) == 0 {
+		return ""
+	}
+	return fallbackClassifyRules[len(fallbackClassifyRules)-1].TargetName
+}
+
 func cloneReplaceRules(in []ReplaceRule) []ReplaceRule {
 	if in == nil {
 		return nil

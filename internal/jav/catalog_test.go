@@ -11,6 +11,7 @@ import (
 	"litepan/internal/domain"
 	"litepan/internal/jav/javbus"
 	"litepan/internal/jav/javdb"
+	"litepan/internal/jav/synopsis"
 	"litepan/internal/settings"
 	"litepan/internal/store"
 )
@@ -227,6 +228,9 @@ func newCatalogFixture(t *testing.T) *catalogFixture {
 	// 客户端走注入，不发真请求。
 	svc.testJavdb = upstream
 	svc.testJavbus = scraper
+	// 补缺失字段那条路同样是走网络的（jav321/caribbeancom/javbus）——
+	// 桩 JAVDB 按用例意图返回「什么都没有」的记录，不关掉的话单测会真去打外网。
+	svc.testDisableEnrich = true
 
 	return &catalogFixture{svc: svc, st: st, db: upstream, bus: scraper, set: settingsSvc}
 }
@@ -423,15 +427,123 @@ func TestDetailExposesRelativeMovies(t *testing.T) {
 	}
 }
 
-// TestDetailRefetchesRawWithoutRelativeMovies 覆盖旧数据的补抓。
+// TestDetailLocalNeverTouchesUpstream 钉住详情页首屏的**硬约束**：
+// `DetailLocal` 一个上游请求都不能发。
 //
-// 加这个字段之前入库的 raw_json 里没有 relative_movies 这个键，不重抓一次
-// 就永远少一块 —— 而用户看到的会是「功能没做」。
-func TestDetailRefetchesRawWithoutRelativeMovies(t *testing.T) {
+// 这是 2026-09-28 那次改动的核心：详情页以前会同步跑 IngestMovie（JAVDB 详情 +
+// 两条补缺链，几秒），用户点开就是白屏等。现在首屏走 DetailLocal —— 它只查库 +
+// 组装，缺的交给后台（hydrate.go）。这条用例就是那个「不许碰上游」的守护。
+func TestDetailLocalNeverTouchesUpstream(t *testing.T) {
 	f := newCatalogFixture(t)
 	ctx := context.Background()
 
-	// 造一份「老代码写的」raw：有内容，但没有 relative_movies。
+	// 造一部「只有本地数据」的片：简介、演员、磁链、评论全都没有。
+	if err := f.st.JavMovies.Upsert(ctx, &domain.JavMovie{
+		ID: "l1", Number: "SSIS-900", Title: "本地标题", OriginTitle: "現地タイトル",
+		Duration: 120, ReleaseDate: "2026-01-01",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f.db.movieCalls = nil
+
+	detail, err := f.svc.DetailLocal(ctx, "l1")
+	if err != nil {
+		t.Fatalf("DetailLocal: %v", err)
+	}
+	// ① 上游一次都没碰
+	if len(f.db.movieCalls) != 0 {
+		t.Errorf("DetailLocal 不该打 JAVDB：%v", f.db.movieCalls)
+	}
+	// ② 本地有的要照常给出来（这正是首屏要显示的）
+	if detail.Title != "本地标题" || detail.OriginTitle != "現地タイトル" {
+		t.Errorf("本地字段应当照常返回：%+v", detail)
+	}
+	if detail.Duration != 120 || detail.ReleaseDate != "2026-01-01" {
+		t.Errorf("时长/日期应当照常返回：%+v", detail)
+	}
+	// ③ 缺的就是空的（前端据此显示「加载中…」）
+	if detail.Summary != "" {
+		t.Errorf("本地没简介就该是空的：%q", detail.Summary)
+	}
+	if len(detail.Magnets) != 0 || len(detail.CommentShares) != 0 {
+		t.Errorf("本地没磁链/评论就该是空的：%+v", detail)
+	}
+}
+
+// TestHydrateEndToEnd 走一遍**这次改动的主路径**：详情页点开 → 先看本地 →
+// 后台补 → 再拉本地时补到的东西已经在了。
+//
+// 用桩补缺源（`svc.testEnrichers`）而不是真站点：真站点这层在 synopsis 包里
+// 另有用例钉着，这里要验的是**流程**（补缺结果会落库、并出现在本地详情里）。
+func TestHydrateEndToEnd(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	f.svc.testDisableEnrich = false
+	f.svc.testEnrichers = []synopsis.Enricher{
+		stubSynopsisEnricher{patch: synopsis.FieldPatch{
+			Summary: "补来的简介", TitleZH: "补来的中文标题",
+			Filled: []string{"summary", "title_zh"},
+		}},
+	}
+
+	if err := f.st.JavMovies.Upsert(ctx, &domain.JavMovie{
+		ID: "h1", Number: "SSIS-777", Title: "日文标题", RawJSON: `{"relative_movies":[]}`,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f.db.movieResult = javdb.Movie{ID: "h1", Number: "SSIS-777", Title: "日文标题"}
+
+	// ① 首屏：本地那份，简介与中文标题都还是空（前端据此显示「加载中…」）
+	first, err := f.svc.DetailLocal(ctx, "h1")
+	if err != nil {
+		t.Fatalf("DetailLocal: %v", err)
+	}
+	if first.Summary != "" || first.TitleZH != "" {
+		t.Fatalf("本地还没补过，两项都该是空：summary=%q title_zh=%q", first.Summary, first.TitleZH)
+	}
+	if first.Title != "日文标题" {
+		t.Fatalf("本地已有的字段要照常返回：%q", first.Title)
+	}
+
+	// ② 后台补一轮（直接调消费者用的那个执行体；起 goroutine 的测试会 flaky，
+	//    而这里要验的是「补一轮之后库里有东西了」）
+	if _, err := f.svc.backfillSummary(ctx, "h1"); err != nil {
+		t.Fatalf("backfillSummary: %v", err)
+	}
+
+	// ③ 再拉本地：补到的东西已经在了，而 JAVDB 那行标题**没被动**
+	again, err := f.svc.DetailLocal(ctx, "h1")
+	if err != nil {
+		t.Fatalf("DetailLocal 第二次: %v", err)
+	}
+	if again.Summary != "补来的简介" {
+		t.Errorf("补到的简介该出现在本地详情里：%q", again.Summary)
+	}
+	if again.TitleZH != "补来的中文标题" {
+		t.Errorf("补到的中文标题该出现在本地详情里（DTO 里那个字段）：%q", again.TitleZH)
+	}
+	if again.Title != "日文标题" {
+		t.Errorf("中文标题是**另存**，不该覆盖 title：%q", again.Title)
+	}
+}
+
+// stubSynopsisEnricher 是给补缺链用的桩（真实现要打外网）。
+type stubSynopsisEnricher struct{ patch synopsis.FieldPatch }
+
+func (s stubSynopsisEnricher) Name() string { return "stub" }
+func (s stubSynopsisEnricher) Enrich(context.Context, string) (synopsis.FieldPatch, error) {
+	return s.patch, nil
+}
+
+// TestDetailNoLongerRefetchesForRelativeMovies 覆盖「旧的补抓判据已退役」。
+//
+// 以前 raw_json 里没有 `relative_movies` 键就会重抓一次（那次改字段时给旧数据补值）。
+// 实测真库只剩 5 部落在这条上，使命完成 —— 留着它的代价是「本地有数据仍跑上游」。
+// 现在的行为：**不重抓**，本地那份直接用（关联影片自然为空）。
+func TestDetailNoLongerRefetchesForRelativeMovies(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+
 	if err := f.st.JavMovies.Upsert(ctx, &domain.JavMovie{
 		ID: "m1", Number: "SSIS-001", Title: "标题",
 		RawJSON:   `{"id":"m1","number":"SSIS-001","title":"标题"}`,
@@ -439,29 +551,23 @@ func TestDetailRefetchesRawWithoutRelativeMovies(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	f.db.movieCalls = nil
 
-	f.db.movieResult = javdb.Movie{
-		ID: "m1", Number: "SSIS-001", Title: "标题",
-		RelativeMovies: []javdb.RelativeMovie{{ID: "r1", Number: "SSIS-002"}},
-	}
-	detail, err := f.svc.Detail(ctx, "m1", false)
-	if err != nil {
+	if _, err := f.svc.Detail(ctx, "m1", false); err != nil {
 		t.Fatalf("Detail: %v", err)
 	}
-	if len(f.db.movieCalls) != 1 {
-		t.Fatalf("旧 raw 应当补抓一次，got %v", f.db.movieCalls)
-	}
-	if len(detail.RelativeMovies) != 1 || detail.RelativeMovies[0].ID != "r1" {
-		t.Errorf("补抓后应当拿到关联影片: %+v", detail.RelativeMovies)
+	if len(f.db.movieCalls) != 0 {
+		t.Errorf("raw 有内容就不该再抓（那条补抓判据已退役）：%v", f.db.movieCalls)
 	}
 
-	// 补过一次就不能再抓 —— 新序列化出来的 raw 一定有这个键，哪怕是 null。
+	// 而 `refresh=1`（用户明确要等）仍然照抓。
 	f.db.movieCalls = nil
-	if _, err := f.svc.Detail(ctx, "m1", false); err != nil {
-		t.Fatalf("Detail 第二次: %v", err)
+	f.db.movieResult = javdb.Movie{ID: "m1", Number: "SSIS-001", Title: "标题"}
+	if _, err := f.svc.Detail(ctx, "m1", true); err != nil {
+		t.Fatalf("Detail(refresh): %v", err)
 	}
-	if len(f.db.movieCalls) != 0 {
-		t.Errorf("补过之后不该再抓：%v", f.db.movieCalls)
+	if len(f.db.movieCalls) == 0 {
+		t.Error("refresh=1 时应当强制重抓")
 	}
 }
 
@@ -1275,5 +1381,33 @@ func TestRankingActorDefaultsType(t *testing.T) {
 	}
 	if res.Total != 1 || len(res.Actors) != 1 {
 		t.Errorf("演员榜 total/条数不对：total=%d len=%d", res.Total, len(res.Actors))
+	}
+}
+
+// TestEnrichSkippedInTests 钉住「单测默认不打外网」这件事。
+//
+// 补缺失字段那条路会去 jav321 / caribbeancom / javbus 真发请求，而桩 JAVDB 按用例
+// 意图返回「没有简介/导演/时长」的记录 —— 不关掉的话每个用例都会顺手去打三个站，
+// 单测变慢、依赖网络、断言里还会混进线上的内容（实测就是这么发现
+// TestUserSharesSortedByReleaseDate 变慢的）。
+//
+// 需要测补全本身的用例显式 `f.svc.testDisableEnrich = false` 并注入桩 enricher。
+func TestEnrichSkippedInTests(t *testing.T) {
+	f := newCatalogFixture(t)
+	if !f.svc.testDisableEnrich {
+		t.Fatal("测试夹具应当默认关掉补全（否则单测会真发外网请求）")
+	}
+	// 关着的时候：桩给的「什么都没有」就是什么都没有，不会被线上内容填上
+	f.db.movieResult = javdb.Movie{ID: "x1", Number: "ZZZZ-999", Title: "桩数据"}
+	if _, err := f.svc.IngestMovie(context.Background(), "x1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.st.JavMovies.Get(context.Background(), "x1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Summary != "" || got.DirectorName != "" || got.Duration != 0 {
+		t.Errorf("关掉补全时不该有任何字段被填上：summary=%q director=%q duration=%d",
+			got.Summary, got.DirectorName, got.Duration)
 	}
 }

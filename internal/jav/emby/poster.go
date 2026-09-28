@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"math"
+	"sort"
 
 	// 注册解码器（jpeg 上面已经按名字引入了，顺带就注册了）：
 	// 上游图片按 URL 扩展名有 jpg / png / webp 三种（见 internal/jav/image.go 的
@@ -56,7 +58,14 @@ const jpegQuality = 90
 
 // CropRect 是裁剪窗口（像素，左上角原点）。
 type CropRect struct {
-	X, Y, W, H int
+	// json tag 是**snake 小写**：这几个结构体会直接通过 API 出给前端
+	// （海报墙编辑器的裁剪框），而前端读的是 `rect.w`。少了 tag 序列化出去是
+	// `{"X":…,"W":…}`，前端拿到 undefined、拼出来的样式是 `undefinedpx` ——
+	// 表现是**框根本不显示**，而且不报错。这一族坑在本项目里踩过好几次。
+	X int `json:"x"`
+	Y int `json:"y"`
+	W int `json:"w"`
+	H int `json:"h"`
 }
 
 // CropStrategy 是「从大图的哪一块裁出海报」。
@@ -170,18 +179,235 @@ func BuildPoster(thumb []byte, censored bool) ([]byte, error) {
 	}
 	rect := PosterCropWindow(b.Dx(), b.Dy(), CropRatioFor(b.Dx(), b.Dy()), strategy, face)
 
-	crop := image.NewRGBA(image.Rect(0, 0, rect.W, rect.H))
-	// 逐像素搬：用 draw.Draw 要 import golang.org/x/image 或 image/draw 的
-	// 子图重映射，而这里是纯粹的矩形搬运，手写循环反而更直白也更好断言。
-	for y := 0; y < rect.H; y++ {
-		for x := 0; x < rect.W; x++ {
-			crop.Set(x, y, img.At(b.Min.X+rect.X+x, b.Min.Y+rect.Y+y))
-		}
-	}
+	crop := cropImage(img, rect)
 
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, crop, &jpeg.Options{Quality: jpegQuality}); err != nil {
 		return thumb, fmt.Errorf("poster 编码失败，原样复制缩略图：%w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// cropImage 把 img 的 rect 那块逐像素搬到新图上。
+//
+// 用 draw.Draw 要 import golang.org/x/image（或自己做子图重映射），而这里是纯粹的
+// 矩形搬运，手写循环反而更直白、也更好断言。
+func cropImage(img image.Image, rect CropRect) *image.RGBA {
+	b := img.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, rect.W, rect.H))
+	for y := 0; y < rect.H; y++ {
+		for x := 0; x < rect.W; x++ {
+			dst.Set(x, y, img.At(b.Min.X+rect.X+x, b.Min.Y+rect.Y+y))
+		}
+	}
+	return dst
+}
+
+// ThumbSize 只读文件头就能拿到尺寸（不解整张图）—— 编辑器要靠它把「原生像素」
+// 与「屏幕上的比例」换算起来。
+func ThumbSize(thumb []byte) (int, int, error) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(thumb))
+	if err != nil {
+		return 0, 0, fmt.Errorf("读不出图片尺寸：%w", err)
+	}
+	return cfg.Width, cfg.Height, nil
+}
+
+// DefaultPosterRect 算「生成器会给的」那个窗口（编辑器首次打开、或反推失败时的兜底）。
+//
+// censored 由**本地侧车**给（`type == "0"`）：有码贴右、其余走人脸检测。
+func DefaultPosterRect(thumb []byte, censored bool) (CropRect, error) {
+	img, _, err := image.Decode(bytes.NewReader(thumb))
+	if err != nil {
+		return CropRect{}, fmt.Errorf("缩略图解不开：%w", err)
+	}
+	b := img.Bounds()
+	strategy := CropFace
+	if censored {
+		strategy = CropRight
+	}
+	var face FaceBox
+	if strategy == CropFace {
+		face, _ = DetectFace(img)
+	}
+	return PosterCropWindow(b.Dx(), b.Dy(), CropRatioFor(b.Dx(), b.Dy()), strategy, face), nil
+}
+
+// CropPoster 按**显式窗口**裁 poster。
+//
+// 与 BuildPoster 的分工：那个是「自己算窗口」（扫描路径，best-effort，解不开图
+// 就把原图带回来）；这个是「用户指定窗口」（编辑器路径，解不开图**必须报错** ——
+// 用户点了保存却什么都没改，比报错难查得多）。像素搬运与 JPEG 质量两边一致，
+// 免得同一张海报两种手感。
+// marks 非空时**在编码之前**把水印画到裁出来的图上：这样整条路只有**一代 JPEG**。
+//
+// 为什么不先编码再调 ComposePoster：那样要多解码一代、多编码一代。实测那一代
+// 的代价是 60.65 dB（肉眼看不出），但白多两次整图编解码（376×538 大约各 10ms），
+// 而且在"水印"这种"本来就该在像素上做"的事上多绕一圈没有意义。
+func CropPoster(thumb []byte, rect CropRect, marks []Watermark, scale, margin float64) ([]byte, error) {
+	img, _, err := image.Decode(bytes.NewReader(thumb))
+	if err != nil {
+		return nil, fmt.Errorf("缩略图解不开：%w", err)
+	}
+	b := img.Bounds()
+	rect = ClampRect(rect, b.Dx(), b.Dy())
+	if rect.W <= 0 || rect.H <= 0 {
+		return nil, fmt.Errorf("裁剪窗口超出图片范围")
+	}
+	crop := cropImage(img, rect)
+	if len(marks) > 0 {
+		if err := drawWatermarks(crop, marks, scale, margin); err != nil {
+			return nil, err
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, crop, &jpeg.Options{Quality: jpegQuality}); err != nil {
+		return nil, fmt.Errorf("poster 编码失败：%w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// ClampRect 把窗口夹进图片边界内（宽高至少 1 像素）。
+func ClampRect(rect CropRect, w, h int) CropRect {
+	if w <= 0 || h <= 0 {
+		return CropRect{}
+	}
+	if rect.W > w {
+		rect.W = w
+	}
+	if rect.H > h {
+		rect.H = h
+	}
+	if rect.W < 1 {
+		rect.W = 1
+	}
+	if rect.H < 1 {
+		rect.H = 1
+	}
+	rect.X = clamp(rect.X, 0, w-rect.W)
+	rect.Y = clamp(rect.Y, 0, h-rect.H)
+	return rect
+}
+
+// MatchPosterRect 反推「当前这张 poster 是从 thumb 的哪一块裁出来的」。
+//
+// 为什么值得做：编辑器打开时选框如果不在海报的真实位置上，用户为了改标题点保存、
+// 顺手把框留原样倒没事；但只要他碰一下框，海报就会跑到另一个位置 —— 而他以为
+// 自己在微调。框的起点必须是他看到的现状。
+//
+// 能这么算的前提是：**裁切不缩放**（poster 与 thumb 同高），所以只有横向一个自由度。
+// 算法：逐列灰度均值 → 在 [0, tw-pw] 上找平均绝对差最小的 x → 置信闸门。
+//
+// 拿不准（竖裁、缩放、图坏了、差异不够显著）就返回 false，调用方回落默认窗口。
+func MatchPosterRect(thumb, poster []byte) (CropRect, bool) {
+	tw, th, err := ThumbSize(thumb)
+	if err != nil {
+		return CropRect{}, false
+	}
+	pw, ph, err := ThumbSize(poster)
+	if err != nil {
+		return CropRect{}, false
+	}
+	// 高度对不上就**放弃** —— 这一条是刻意的，不是没做。
+	//
+	// 实测用户库里有一批 poster 是「宽度相同、高度不同」（`340x487` 配 `800x538`，
+	// 那是从更早一版 `800x487` 的封面裁的，后来上游把封面重新裁了一版）。这种关系下
+	// "当前这张 poster 对应 thumb 的哪一块"**没有唯一答案**（它甚至可能不是这段像素的
+	// 重采样），硬猜一个框出来比回落默认窗口糟得多：框看起来"就是当前位置"，
+	// 用户微调一下反而把海报裁到别处去了。
+	//
+	// 回落默认窗口之后，只要用户点一次「裁剪」，新海报就与当前 thumb 对齐了 ——
+	// 下一次打开就是 matched。
+	if ph != th || pw > tw || pw < 8 || ph < 8 {
+		return CropRect{}, false
+	}
+	tImg, _, err := image.Decode(bytes.NewReader(thumb))
+	if err != nil {
+		return CropRect{}, false
+	}
+	pImg, _, err := image.Decode(bytes.NewReader(poster))
+	if err != nil {
+		return CropRect{}, false
+	}
+	tCols := columnMeans(tImg, 64)
+	pCols := columnMeans(pImg, 64)
+	if len(tCols) < pw || len(pCols) < pw {
+		return CropRect{}, false
+	}
+
+	// 逐个候选位置算 MAD，取最优，并留一份用来判「有没有歧义」。
+	mads := make([]float64, 0, len(tCols))
+	bestX, best := 0, math.MaxFloat64
+	for x := 0; x+pw <= len(tCols); x++ {
+		mad := colsMAD(tCols, pCols, x, pw)
+		mads = append(mads, mad)
+		if mad < best {
+			best, bestX = mad, x
+		}
+	}
+
+	// 置信闸门：**最优位置要比「随便一个位置」好得多**。
+	//
+	// 拿中位数当"随便一个位置"的水位，而不是拿次优 + 一个绝对差值：绝对差值的尺度
+	// 随图片噪声变（同一张图重编码一次 best 可能只有 0.1，真封面重编码则可能到 2），
+	// 定死一个阈值不是太严就是太松。实测自己裁出来的海报 best≈0.1、中位数≈4 ——
+	// 一眼就看得出它是唯一的；而列图案重复的图（那种真歧义）best 与中位数几乎相等，
+	// 正好被挡在门外。
+	const maxMAD = 6.0 // 绝对上限：连最像的位置都差得远，就不是从这张图来的
+	if best > maxMAD {
+		return CropRect{}, false
+	}
+	sorted := append([]float64(nil), mads...)
+	sort.Float64s(sorted)
+	median := sorted[len(sorted)/2]
+	if median <= 0 || best > median*0.5 {
+		return CropRect{}, false
+	}
+	return CropRect{X: bestX, Y: 0, W: pw, H: ph}, true
+}
+
+// colsMAD 算「把 poster 的列贴在 thumb 的第 x 列」时的平均绝对差。
+func colsMAD(thumbCols, posterCols []float64, x, pw int) float64 {
+	var sum float64
+	for j := 0; j < pw; j++ {
+		sum += absFloat(thumbCols[x+j] - posterCols[j])
+	}
+	return sum / float64(pw)
+}
+
+// columnMeans 逐列算灰度均值（每列最多取 sampleRows 行，够用且快）。
+func columnMeans(img image.Image, sampleRows int) []float64 {
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	step := 1
+	if h > sampleRows && sampleRows > 0 {
+		step = h / sampleRows
+	}
+	out := make([]float64, w)
+	for y := 0; y < h; y += step {
+		for x := 0; x < w; x++ {
+			r, g, bl, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			// 0.299/0.587/0.114 的灰度权重；RGBA() 返回 16 位，>>8 回 8 位。
+			out[x] += float64((299*(r>>8)+587*(g>>8)+114*(bl>>8))/1000) / float64(h/step+1)
+		}
+	}
+	return out
+}
+
+func nearX(a, b, tol int) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d <= tol
+}
+
+func absFloat(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

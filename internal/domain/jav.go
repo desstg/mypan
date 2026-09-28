@@ -111,17 +111,29 @@ const (
 
 // JavMovie 是番号影片的元数据。
 type JavMovie struct {
-	ID               string
-	Number           string
-	Title            string
-	OriginTitle      string
-	CoverURL         string
-	ThumbURL         string
-	JavbusCover      string
-	Duration         int
-	ReleaseDate      string
-	Score            float64
-	Summary          string
+	ID          string
+	Number      string
+	Title       string
+	OriginTitle string
+	CoverURL    string
+	ThumbURL    string
+	JavbusCover string
+	Duration    int
+	ReleaseDate string
+	Score       float64
+	Summary     string
+	// TitleZH 是**别站补来的中文标题**（missav / airav 那类站给的是中文）。
+	//
+	// 为什么不覆盖 Title：Title 是 JAVDB 的口径（实测真库 8650 部里 6356 部的 title
+	// 含假名，也就是大面积是日文），覆盖了就没有回退的余地 —— 而且 JAVDB 那行往往更完整。
+	// 空 = 没补到。
+	TitleZH string
+	// TitleZHSource 是这行中文标题的来源。与 SummarySource 同一条规矩：
+	// **只有真写进去了才更新** —— 否则来源会飘在一个空标题上。
+	TitleZHSource string
+	// SummarySource 是这段简介的来源（javdb / jav321 / caribbeancom）。
+	// 空串表示上游没给、我们也还没补到。
+	SummarySource    string
 	Review           string
 	DirectorID       string
 	DirectorName     string
@@ -501,6 +513,19 @@ type JavMovieRepository interface {
 	// 给推送路径上的演员黑名单用：一次推送要判几百条候选，逐候选查
 	// jav_movie_actors 就是几百次 SQL，这里一次批量取回。
 	MoviesWithAnyActor(ctx context.Context, movieIDs, actorIDs []string) (map[string]struct{}, error)
+
+	// PendingSummaryMovieIDs 取「还没有简介」的影片 id（见 store 里那条注释）。
+	PendingSummaryMovieIDs(ctx context.Context, limit int) ([]string, error)
+	// MarkSummaryFetched 记下这部片的简介已经问过 <source>（空 source = 问过但没有）。
+	MarkSummaryFetched(ctx context.Context, movieID, source string) error
+	// MarkEnriched 记下这部片的缺失字段已经补过一轮（补到没补到都记）。
+	MarkEnriched(ctx context.Context, movieID string) error
+	// BumpSummaryAttempts 把「问过但什么都没补到」的次数 +1。
+	//
+	// 与 MarkEnriched 的分工：MarkEnriched 是**一票否决**（补到过就别再问了），
+	// BumpSummaryAttempts 记的是「还没补到、问了几次」—— 到上限才收手，
+	// 这样上游补了料 / 我们加了新源时，那批空简介还能被重新问一遍。
+	BumpSummaryAttempts(ctx context.Context, movieID string) error
 }
 
 // JavMovieFilter 是本地影库列表的筛选条件。
@@ -524,6 +549,13 @@ type JavMagnetRepository interface {
 	ListByMovie(ctx context.Context, movieID string) ([]*JavMagnet, error)
 	ListByCode(ctx context.Context, code string) ([]*JavMagnet, error)
 	CountByMovie(ctx context.Context, movieID string) (int, error)
+	// MarkSwept 记下「这部片的磁链已经问过一遍上游」。
+	//
+	// 光看磁链表分不出「这部片没有磁链」与「还没抓过」—— 两者都是零行。
+	// 后台那条扫磁链的循环靠这本账跳过已经问过的片（见 magnetSweepLoop）。
+	MarkSwept(ctx context.Context, movieID string) error
+	// PendingSweepMovieIDs 取还没问过磁链的影片 id（没磁链 + 台账里没有 / 太旧）。
+	PendingSweepMovieIDs(ctx context.Context, limit int) ([]string, error)
 }
 
 // JavReviewRepository 管理评论。

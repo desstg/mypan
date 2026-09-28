@@ -258,17 +258,53 @@ func (h *Handler) javMovieByNumber(w http.ResponseWriter, r *http.Request) {
 }
 
 // javMovieDetail 取详情。
+//
+// 两种模式（2026-09-28 拆分）：
+//
+//   - `?local=1`：**只读本地，绝不碰上游**。详情页首屏走这条，毫秒级返回，
+//     缺的字段就是空；同时把这部排进后台补缺队列（见下面的 hydrate）。
+//   - 默认（`?refresh=1` 或都不给）：老语义，该抓就抓。留给「重新获取」那种
+//     **用户明确要等**的场景。
 func (h *Handler) javMovieDetail(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {
 		return
 	}
+	id := chi.URLParam(r, "id")
+	if r.URL.Query().Get("local") == "1" {
+		detail, err := h.jav.DetailLocal(r.Context(), id)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		// 首屏读本地之后顺手把这部排进后台补缺队列 —— 用户点开就是想看这部，
+		// 补缺该在后台发生，而不是让他对着「加载中…」等。
+		//
+		// 放在这里而不是让前端多打一次 POST：**少一次往返**，而且「点开即补」
+		// 是这一条语义的一部分，不该由前端记得去做。返回 false（冷却中/已排队）
+		// 不是错误，界面照常显示本地那份。
+		h.jav.Hydrate(id)
+		writeOK(w, detail)
+		return
+	}
 	refresh := r.URL.Query().Get("refresh") == "1"
-	detail, err := h.jav.Detail(r.Context(), chi.URLParam(r, "id"), refresh)
+	detail, err := h.jav.Detail(r.Context(), id, refresh)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeOK(w, detail)
+}
+
+// javMovieHydrate 要求后台把这一部补起来（立刻返回，不等结果）。
+//
+// 详情接口在 local 模式下会自己调一次，这个端点留给「明知没补上、想再催一次」
+// 的场景（比如用户手动点刷新）。
+func (h *Handler) javMovieHydrate(w http.ResponseWriter, r *http.Request) {
+	if !h.javReady(w) {
+		return
+	}
+	queued := h.jav.Hydrate(chi.URLParam(r, "id"))
+	writeOK(w, map[string]bool{"queued": queued})
 }
 
 // javMoviePreviewURL 现取一个新鲜的预览片播放地址。
@@ -345,8 +381,25 @@ func (h *Handler) javMovieMagnets(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {
 		return
 	}
+	id := chi.URLParam(r, "id")
 	refresh := r.URL.Query().Get("refresh") == "1"
-	items, err := h.jav.Magnets(r.Context(), chi.URLParam(r, "id"), refresh)
+	// 只读本地（前端拆开的那个 tab 用）：本地一颗都没有时**不在这条同步路上抓**，
+	// 而是把这件活排进后台（高优先级），让前端轮询等它 —— 那两个站很慢，
+	// 让它拖着一个 HTTP 请求不放，用户看到的就是「点了磁链那一档，转圈半天」。
+	if r.URL.Query().Get("local") == "1" && !refresh {
+		items, err := h.jav.MagnetsLocal(r.Context(), id)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		if len(items) == 0 {
+			// 本地确实没有 —— 排进后台去抓（幂等：同一部重复排会被去重/冷却挡住）。
+			h.jav.HydrateMagnets(id)
+		}
+		writeOK(w, map[string]any{"items": items, "pending": len(items) == 0})
+		return
+	}
+	items, err := h.jav.Magnets(r.Context(), id, refresh)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -358,17 +411,31 @@ func (h *Handler) javMovieMagnets(w http.ResponseWriter, r *http.Request) {
 }
 
 // javMovieReviews 取评论。
+//
+// ⚠️ 它同时是**评论区分享那一档**的补评论入口（见 catalog.go 的 Reviews：
+// 本地一条都没有时才去上游抓）。所以响应里顺带把分享算好一起给 —— 那一档
+// 以前只在详情里拿到分享，详情首屏瘦身之后它没地方拿了。
 func (h *Handler) javMovieReviews(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {
 		return
 	}
-	items, total, err := h.jav.Reviews(r.Context(), chi.URLParam(r, "id"),
+	id := chi.URLParam(r, "id")
+	items, total, err := h.jav.Reviews(r.Context(), id,
 		queryIntDefault(r, "page", 1), queryIntDefault(r, "limit", 0))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeOK(w, map[string]any{"items": items, "total": total})
+	// 分享按**本地已有的评论**算（评论刚补过，所以这里通常就有东西了）；
+	// 失败不算错：那一档显示空列表即可。
+	shares, err := h.jav.CommentSharesLocal(r.Context(), id)
+	if err != nil {
+		shares = nil
+	}
+	if shares == nil {
+		shares = []jav.CommentShareView{}
+	}
+	writeOK(w, map[string]any{"items": items, "total": total, "shares": shares})
 }
 
 // javMovieRelatedLists 取含这部影片的清单。

@@ -14,8 +14,9 @@ import (
 
 type javMovieRepo struct{ db *DB }
 
-const javMovieColumns = `id, number, title, origin_title, cover_url, thumb_url, javbus_cover,
-       duration, release_date, score, summary, review,
+const javMovieColumns = `id, number, title, origin_title, title_zh, title_zh_source,
+       cover_url, thumb_url, javbus_cover,
+       duration, release_date, score, summary, summary_source, review,
        director_id, director_name, maker_id, maker_name, publisher_id, publisher_name,
        series_id, series_name, tags_json, preview_images_json, preview_video_url,
        magnets_count, reviews_count, has_cnsub, has_preview_images, has_preview_video,
@@ -31,21 +32,33 @@ func (r *javMovieRepo) Upsert(ctx context.Context, m *domain.JavMovie) error {
 		return domain.Errorf(domain.CodeValidation, "无效的影片")
 	}
 	_, err := r.db.write.ExecContext(ctx, `
-INSERT INTO jav_movies(id, number, title, origin_title, cover_url, thumb_url, javbus_cover,
-                       duration, release_date, score, summary, review,
+INSERT INTO jav_movies(id, number, title, origin_title, title_zh, title_zh_source, cover_url, thumb_url, javbus_cover,
+                       duration, release_date, score, summary, summary_source, review,
                        director_id, director_name, maker_id, maker_name, publisher_id, publisher_name,
                        series_id, series_name, tags_json, preview_images_json, preview_video_url,
                        magnets_count, reviews_count, has_cnsub, has_preview_images, has_preview_video,
                        can_play, type, number_letter, raw_json, fetched_at, last_viewed_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
     number=excluded.number, title=excluded.title, origin_title=excluded.origin_title,
+    -- 中文标题同 javbus_cover / summary：**只有补到了才覆盖**。JAVDB 那几条路
+    -- （榜单刷新、影库同步）根本带不出这个字段，无条件写会把它抹成空串。
+    title_zh=CASE WHEN excluded.title_zh <> '' THEN excluded.title_zh ELSE jav_movies.title_zh END,
+    title_zh_source=CASE WHEN excluded.title_zh <> '' THEN excluded.title_zh_source ELSE jav_movies.title_zh_source END,
     cover_url=excluded.cover_url, thumb_url=excluded.thumb_url,
     -- javbus_cover 只在本次带值时才覆盖：榜单刷新时上游给不出它，
     -- 无条件写会把之前 JAVBUS 抓到的干净封面抹成空串。
     javbus_cover=CASE WHEN excluded.javbus_cover <> '' THEN excluded.javbus_cover ELSE jav_movies.javbus_cover END,
     duration=excluded.duration, release_date=excluded.release_date, score=excluded.score,
-    summary=excluded.summary, review=excluded.review,
+    -- summary / review 同 javbus_cover：**只有详情接口才给得出它们**，
+    -- 榜单与影库同步那些列表入库不带这两个字段（实测列表入库时它们是空串）。
+    -- 现在库里的数据还没被冲过（三处一致），但这两列一直没这道保护 ——
+    -- 哪天那 435 部有简介的片被榜单再入库一次，就被抹掉了，而且看不出是谁干的。
+    summary=CASE WHEN excluded.summary <> '' THEN excluded.summary ELSE jav_movies.summary END,
+    -- 来源跟着简介走：只有确实写进了新简介时才更新（否则「补来的」标签会飘到一个
+    -- 空简介上，之后想重刷都挑不出该重刷的行）。
+    summary_source=CASE WHEN excluded.summary <> '' THEN excluded.summary_source ELSE jav_movies.summary_source END,
+    review=CASE WHEN excluded.review <> '' THEN excluded.review ELSE jav_movies.review END,
     director_id=excluded.director_id, director_name=excluded.director_name,
     maker_id=excluded.maker_id, maker_name=excluded.maker_name,
     publisher_id=excluded.publisher_id, publisher_name=excluded.publisher_name,
@@ -67,8 +80,8 @@ ON CONFLICT(id) DO UPDATE SET
     raw_json=CASE WHEN excluded.raw_json <> '' THEN excluded.raw_json ELSE jav_movies.raw_json END,
     fetched_at=excluded.fetched_at,
     updated_at=CURRENT_TIMESTAMP`,
-		m.ID, m.Number, m.Title, m.OriginTitle, m.CoverURL, m.ThumbURL, m.JavbusCover,
-		nullableInt(m.Duration), m.ReleaseDate, nullableFloat(m.Score), m.Summary, m.Review,
+		m.ID, m.Number, m.Title, m.OriginTitle, m.TitleZH, m.TitleZHSource, m.CoverURL, m.ThumbURL, m.JavbusCover,
+		nullableInt(m.Duration), m.ReleaseDate, nullableFloat(m.Score), m.Summary, m.SummarySource, m.Review,
 		m.DirectorID, m.DirectorName, m.MakerID, m.MakerName, m.PublisherID, m.PublisherName,
 		m.SeriesID, m.SeriesName, jsonOr(m.Tags, "[]"), jsonOr(m.PreviewImages, "[]"), m.PreviewVideoURL,
 		m.MagnetsCount, m.ReviewsCount, boolToInt(m.HasCNSub), boolToInt(m.HasPreviewImages),
@@ -533,6 +546,55 @@ func (r *javMagnetRepo) CountByMovie(ctx context.Context, movieID string) (int, 
 	return n, wrapDB(err)
 }
 
+// MarkSwept 记下「这部片的磁链已经问过一遍上游」。重复标记幂等，只刷新时间。
+func (r *javMagnetRepo) MarkSwept(ctx context.Context, movieID string) error {
+	movieID = strings.TrimSpace(movieID)
+	if movieID == "" {
+		return nil
+	}
+	_, err := r.db.write.ExecContext(ctx, `
+INSERT INTO jav_magnet_sweeps(movie_id, checked_at) VALUES (?, CURRENT_TIMESTAMP)
+ON CONFLICT(movie_id) DO UPDATE SET checked_at=CURRENT_TIMESTAMP`, movieID)
+	return wrapDB(err)
+}
+
+// magnetResweepAfter 是「没磁链的片隔多久再问一遍」。
+//
+// 比评论那个 30 天短一档：磁链是**会**长出来的（新种子发布、上游补录），
+// 而用户点开一部片最想看到的就是磁链。7 天一轮，一部片一年也就 50 来次。
+const magnetResweepAfter = "7 days"
+
+// PendingSweepMovieIDs 取还没问过磁链的影片 id，最近碰过的优先。
+//
+// 两条筛选合起来才是「该问的」：
+//   - 磁链表里一颗都没有（有磁链就不用问了）；
+//   - 没问过，或上次问已经是 magnetResweepAfter 前。
+func (r *javMagnetRepo) PendingSweepMovieIDs(ctx context.Context, limit int) ([]string, error) {
+	rows, err := r.db.read.QueryContext(ctx, `
+SELECT m.id FROM jav_movies m
+ WHERE NOT EXISTS (SELECT 1 FROM jav_magnets g WHERE g.movie_id = m.id)
+   AND NOT EXISTS (
+         SELECT 1 FROM jav_magnet_sweeps s
+          WHERE s.movie_id = m.id AND s.checked_at > datetime('now', ?)
+       )
+ ORDER BY COALESCE(NULLIF(m.last_viewed_at, ''), m.fetched_at) DESC, m.id
+ LIMIT ?`, "-"+magnetResweepAfter, clampLimit(limit, 25))
+	if err != nil {
+		return nil, wrapDB(err)
+	}
+	defer rows.Close()
+
+	out := make([]string, 0, 32)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, wrapDB(err)
+		}
+		out = append(out, id)
+	}
+	return out, wrapDB(rows.Err())
+}
+
 // ——————————————————————— jav_reviews ———————————————————————
 
 type javReviewRepo struct{ db *DB }
@@ -593,6 +655,99 @@ ORDER BY likes_count DESC, id DESC LIMIT ? OFFSET ?`,
 		out = append(out, rv)
 	}
 	return out, total, wrapDB(rows.Err())
+}
+
+// PendingSummaryMovieIDs 取「还没有简介、该去别的站补」的影片 id，最近碰过的优先。
+//
+// 排序照 PendingSweepMovieIDs 那条：先补用户最近看过/刚入库的，尾巴慢慢来。
+//
+// 两个条件同时要满足（2026-09-27 起）：
+//
+//   - `enriched_at IS NULL` —— 补到过的不会再被挑中；
+//   - `summary_attempts < summaryMaxAttempts` —— **问过几次都没结果的要收手**。
+//
+// 为什么不是「问过一次就记账」：那样上游哪天补了料、或我们加了新源，已经问过的
+// 那批也永远捞不回来（实测正是这一条让几百部空简介卡死）。用次数兜底，
+// 既会重试又有尽头。
+func (r *javMovieRepo) PendingSummaryMovieIDs(ctx context.Context, limit int) ([]string, error) {
+	rows, err := r.db.read.QueryContext(ctx, `
+SELECT id FROM jav_movies
+ WHERE enriched_at IS NULL
+   AND summary_attempts < ?
+   AND (
+        summary IS NULL OR summary = ''
+     OR title_zh IS NULL OR title_zh = ''
+     OR director_name IS NULL OR director_name = ''
+     OR duration IS NULL OR duration = 0
+     OR release_date IS NULL OR release_date = ''
+     OR number IS NULL OR number = ''
+   )
+ ORDER BY COALESCE(NULLIF(last_viewed_at, ''), fetched_at) DESC, id
+ LIMIT ?`, summaryMaxAttempts, clampLimit(limit, 100))
+	if err != nil {
+		return nil, wrapDB(err)
+	}
+	defer rows.Close()
+	out := make([]string, 0, 64)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, wrapDB(err)
+		}
+		out = append(out, id)
+	}
+	return out, wrapDB(rows.Err())
+}
+
+// summaryMaxAttempts 是「同一部最多问几轮」。
+//
+// 取 3：一轮里会把所有源都问一遍，3 轮就是「各家都给了 3 次机会」。再往上加
+// 只会让永远补不上的那批（冷门片、没被任何站收录的国产）每轮都去打上游。
+const summaryMaxAttempts = 3
+
+// MarkEnriched 记下「这部片的缺失字段已经补过一轮」。
+//
+// **补到也记、没补到也记**——那正是"下轮别再问"的意思（这站没有这部片，问一次就够）。
+// 失败不调用它（失败多半是限流，记了就再也不会试）。
+func (r *javMovieRepo) MarkEnriched(ctx context.Context, movieID string) error {
+	movieID = strings.TrimSpace(movieID)
+	if movieID == "" {
+		return nil
+	}
+	_, err := r.db.write.ExecContext(ctx,
+		`UPDATE jav_movies SET enriched_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, movieID)
+	return wrapDB(err)
+}
+
+// MarkSummaryFetched 记下「这部片的简介已经从 <source> 补过」。
+//
+// **只更新 source，不动 summary**（summary 由补到的正文单独写）—— 两者分开是为了
+// 「补不到也要记一笔」：这站没有这部片，下轮就别再问了。写空串表示「问过了、没有」。
+func (r *javMovieRepo) MarkSummaryFetched(ctx context.Context, movieID, source string) error {
+	movieID = strings.TrimSpace(movieID)
+	if movieID == "" {
+		return nil
+	}
+	_, err := r.db.write.ExecContext(ctx,
+		`UPDATE jav_movies SET summary_source=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		strings.TrimSpace(source), movieID)
+	return wrapDB(err)
+}
+
+// BumpSummaryAttempts 把「问过但什么都没补到」的次数 +1。
+//
+// 为什么要单独一列：`enriched_at` 是**一票否决**（记了就不再被挑中），而「这次没问到」
+// 和「这部永远问不到」是两件事 —— 前者该重试，后者该放弃。用次数区分：
+// 到 summaryMaxAttempts 次仍无结果，`PendingSummaryMovieIDs` 才不再挑它。
+func (r *javMovieRepo) BumpSummaryAttempts(ctx context.Context, movieID string) error {
+	movieID = strings.TrimSpace(movieID)
+	if movieID == "" {
+		return nil
+	}
+	_, err := r.db.write.ExecContext(ctx,
+		`UPDATE jav_movies SET summary_attempts = summary_attempts + 1, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		movieID)
+	return wrapDB(err)
 }
 
 // MarkSwept 记下这部片的评论已经扫过一遍（见 domain 里那条注释）。
@@ -734,8 +889,9 @@ func scanJavMovie(sc javRowScanner) (*domain.JavMovie, error) {
 		hasPrevVid int
 		canPlay    int
 	)
-	err := sc.Scan(&m.ID, &m.Number, &m.Title, &m.OriginTitle, &m.CoverURL, &m.ThumbURL, &m.JavbusCover,
-		&duration, &m.ReleaseDate, &score, &m.Summary, &m.Review,
+	err := sc.Scan(&m.ID, &m.Number, &m.Title, &m.OriginTitle, &m.TitleZH, &m.TitleZHSource,
+		&m.CoverURL, &m.ThumbURL, &m.JavbusCover,
+		&duration, &m.ReleaseDate, &score, &m.Summary, &m.SummarySource, &m.Review,
 		&m.DirectorID, &m.DirectorName, &m.MakerID, &m.MakerName, &m.PublisherID, &m.PublisherName,
 		&m.SeriesID, &m.SeriesName, &tags, &previews, &m.PreviewVideoURL,
 		&m.MagnetsCount, &m.ReviewsCount, &hasCN, &hasPrevImg, &hasPrevVid,

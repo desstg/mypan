@@ -26,6 +26,7 @@ import (
 	"litepan/internal/eventbus"
 	"litepan/internal/jav/javbus"
 	"litepan/internal/jav/javdb"
+	"litepan/internal/jav/synopsis"
 	"litepan/internal/settings"
 	"litepan/pkg/singleflight"
 )
@@ -99,6 +100,36 @@ type Service struct {
 	// 测试注入口。生产代码永远不设置它们。
 	testJavdb  JavdbClient
 	testJavbus JavbusClient
+	// testEnrichers 让单测注入桩的补缺源（真实现要打外网，用例里跑不起）。
+	testEnrichers []synopsis.Enricher
+	// testDisableEnrich 让单测把「补缺失字段」这一步关掉。
+	//
+	// 为什么需要：注入的是**桩** JAVDB，它按用例的意图返回「没有简介/导演/时长」的
+	// 记录，于是补全那条路会以为真的缺、**真的去打外网**（jav321/caribbeancom/javbus）。
+	// 后果是单测变慢、依赖网络、而且断言里会混进线上的内容。
+	// 需要测补全本身的用例显式把它设回 false 并注入桩 enricher。
+	testDisableEnrich bool
+
+	// summarySink 是「把补到的简介写进本地侧车 json」的钩子（见 SetSummarySidecarSink）。
+	summarySink SummarySidecarSink
+	// titleZHSink 是「把补到的中文标题写进本地侧车 json」的钩子（见 SetTitleZHSidecarSink）。
+	titleZHSink TitleZHSidecarSink
+
+	// synopsisSrcs 是「补剧情简介」的来源（JAVDB 大面积没给，见 synopsis 包）。
+	// nil 表示不补 —— 与「设置没配就不抓」的取向一致。
+	synopsisMu   sync.Mutex
+	synopsisSrcs []synopsis.Source
+	synopsisKey  string
+	enricherList []synopsis.Enricher
+	enricherKey  string
+	// titleEnricherList 是「补中文标题」的来源（与 enricherList 分开的理由见
+	// titleEnrichers 的注释：一个补缺、一个另存，判据完全不同）。
+	titleEnricherList []synopsis.Enricher
+
+	// hydrate 是详情页的「后台补这一部」队列（见 hydrate.go）。
+	// 用 once 惰性建：它只在 Start 之后才有人用，而单测不调 Start。
+	hydrateOnce sync.Once
+	hydrate     *hydrateQueue
 }
 
 // JavdbClient 是 JAVDB 客户端的切面，供测试注入。
@@ -367,7 +398,212 @@ func (s *Service) javdbClient() (JavdbClient, error) {
 	return client, nil
 }
 
-// javbusClient 返回 JAVBUS 客户端，设置变化时重建。
+// enrichers 返回「补字段」的来源列表（按优先级）。
+//
+// 顺序即优先级，也是「先问哪家最划算」。2026-09-27 重排过一次，依据是实测
+// （对着内网那台 MDC-NG 的字段优先级 + 自己逐站打过一遍）：
+//
+//	missav     slug 就是番号，og:description 是**一段真简介**（实测 93~136 字）；FC2/素人那批 404
+//	jav321     有码覆盖不错，但命中判定偏窄（同一部片换个体位就漏）
+//	caribbeancom 无码/素人（日期序号型）的简介
+//	javbus     前几家都没有的：导演、时长、类别、发行日期（它**没有简介**）
+//
+// ⚠️ **airav 不在这条链里**：它给的是「一行标题」不是剧情简介（详情页没有简介区块，
+// 只有 `<title>` 里那行中文标题 + 演员名）。放进简介链会把真正的简介挡掉
+// （Enrich 是首个非空胜）—— 实测就是这么把 missav 那段 136 字的简介挡成 14 字标题的。
+// 它只作为**中文标题**的来源，见 titleEnrichers()。
+//
+// ⚠️ **javbus 从第一档挪到了最后**：它是日式**有码站**的库，无码 / 欧美 / 素人
+// 那几类它基本没有 —— 排在前面会把「无码欧美补不上」变成常态（实测每部只剩它
+// 一个响应，其它全空）。而简介为空的大头恰恰是那几类。
+func (s *Service) enrichers() []synopsis.Enricher {
+	// 单测注入点：真实现要打外网，用例里换成桩（见 catalog_test.go 的 fixture）。
+	if s.testEnrichers != nil {
+		return s.testEnrichers
+	}
+	if s.settings == nil {
+		return nil
+	}
+	proxy := s.proxyURL()
+	key := strings.Join([]string{
+		strconv.Itoa(s.settings.Int(settings.KeyJavRequestGapMS)),
+		strconv.Itoa(s.settings.Int(settings.KeyJavTimeoutSec)),
+		s.settings.StringAllowEmpty(settings.KeyJavJavbusBase),
+		// 代理也要进 key：改了代理不重建客户端，就等于「设置保存了但没生效」。
+		proxy,
+	}, "|")
+	s.synopsisMu.Lock()
+	defer s.synopsisMu.Unlock()
+	if s.enricherList != nil && s.enricherKey == key {
+		return s.enricherList
+	}
+	gap := time.Duration(s.settings.Int(settings.KeyJavRequestGapMS)) * time.Millisecond
+	timeout := s.timeout()
+	// ProxyURL 传的是**兜底**：synopsis 那边的策略是「先直连，连不上才走它」
+	// （见 synopsis/conn）。所以这里给的是「万一直连不通时的出路」，不是「必须走代理」。
+	s.enricherList = []synopsis.Enricher{
+		synopsis.NewMissav(synopsis.MissavOptions{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
+		synopsis.NewJav321(synopsis.Jav321Options{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
+		synopsis.NewCaribbeancom(synopsis.CaribbeancomOptions{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
+		synopsis.NewJavbus(synopsis.JavbusOptions{
+			BaseURL:    s.settings.StringAllowEmpty(settings.KeyJavJavbusBase),
+			Timeout:    timeout,
+			RequestGap: gap,
+			ProxyURL:   proxy,
+		}),
+	}
+	s.enricherKey = key
+	return s.enricherList
+}
+
+// titleEnrichers 返回**中文标题**的来源（顺序即优先级）。
+//
+// 与 enrichers() 分开是刻意的：那边补的是「缺的字段」（JAVDB 有就不动），
+// 这边是**另存一行**（title 不动，中文标题写进 title_zh）—— 两件事的判据、
+// 落点、失败容忍都不同，塞在一条链里两边都会被对方带偏。
+//
+// 顺序按实测的产出质量：**airav 给的是干净的一行中文标题**，missav 那行带着
+// 演员名与站点尾巴（`… - 持野蓬 - M`），所以 airav 在前。
+func (s *Service) titleEnrichers() []synopsis.Enricher {
+	// 单测注入点同 enrichers()：真实现要打外网。
+	if s.testEnrichers != nil {
+		return s.testEnrichers
+	}
+	if s.settings == nil {
+		return nil
+	}
+	s.synopsisMu.Lock()
+	defer s.synopsisMu.Unlock()
+	gap := time.Duration(s.settings.Int(settings.KeyJavRequestGapMS)) * time.Millisecond
+	timeout := s.timeout()
+	proxy := s.proxyURL()
+	// 复用 enrichers() 那份缓存键：设置一样就是同一批客户端。这里单独建一份
+	// 是因为**顺序不同**（enrichers 里没有 airav）。两个列表都很小，不值得共享。
+	s.titleEnricherList = []synopsis.Enricher{
+		synopsis.NewAirav(synopsis.AiravOptions{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
+		synopsis.NewMissav(synopsis.MissavOptions{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
+	}
+	return s.titleEnricherList
+}
+
+// synopsisSources 返回「补简介」的来源列表（按优先级）。
+//
+// 顺序是有意的：**jav321 管有码**（库里的大头，也最快），**caribbeancom 管无码/素人**。
+// 两家都不接欧美与国产 —— 实测没有可用的源（见 synopsis 包的说明）。
+func (s *Service) synopsisSources() []synopsis.Source {
+	if s.settings == nil {
+		return nil
+	}
+	key := strings.Join([]string{
+		strconv.Itoa(s.settings.Int(settings.KeyJavRequestGapMS)),
+		strconv.Itoa(s.settings.Int(settings.KeyJavTimeoutSec)),
+	}, "|")
+	s.synopsisMu.Lock()
+	defer s.synopsisMu.Unlock()
+	if s.synopsisSrcs != nil && s.synopsisKey == key {
+		return s.synopsisSrcs
+	}
+	gap := time.Duration(s.settings.Int(settings.KeyJavRequestGapMS)) * time.Millisecond
+	timeout := s.timeout()
+	s.synopsisSrcs = []synopsis.Source{
+		synopsis.NewJav321(synopsis.Jav321Options{Timeout: timeout, RequestGap: gap}),
+		synopsis.NewCaribbeancom(synopsis.CaribbeancomOptions{Timeout: timeout, RequestGap: gap}),
+	}
+	s.synopsisKey = key
+	return s.synopsisSrcs
+}
+
+// fillMissingFields 在 JAVDB 没给的字段上去别的站补。**不改动已经有的值** ——
+// 那是 synopsis.Enrich 内部的规矩（按 Missing 逐项判），这里只负责算出「缺什么」。
+//
+// 只补**可补的**那几项：简介 / 发行日期 / 时长 / 导演 / 片商 / 类别。
+// 标题、番号、评分、演员不在其中：前三个别站要么没有要么口径不同；演员在别站
+// **只有名字**（javbus 的 star id 与 JAVDB 不是一套），而库里的演员是关联表、
+// 要 actor id —— 拿名字硬建关联会让详情页的头像指到别人，宁可不补。
+//
+// 失败只记 warn：补字段是锦上添花，不该让「抓详情」这件事本身失败 —— 与侧车写入同一条规矩。
+func (s *Service) fillMissingFields(ctx context.Context, n *javdb.NormalizedMovie) {
+	if n == nil || s.testDisableEnrich {
+		return
+	}
+	missing := synopsis.Missing{
+		Summary: strings.TrimSpace(n.Summary) == "",
+		// 中文标题：**没有就去要一个**（不是「补缺」而是「另存」，见 FieldPatch.TitleZH）。
+		// 库里那行 title 不动 —— 它是 JAVDB 口径，覆盖了就没有回退余地。
+		TitleZH:     strings.TrimSpace(n.TitleZH) == "",
+		ReleaseDate: strings.TrimSpace(n.ReleaseDate) == "",
+		Duration:    n.Duration <= 0,
+		Director:    strings.TrimSpace(n.DirectorName) == "",
+		Maker:       strings.TrimSpace(n.MakerName) == "",
+		Tags:        len(n.Tags) == 0,
+	}
+	if !missing.Any() {
+		return
+	}
+	srcs := s.enrichers()
+	if len(srcs) == 0 {
+		return
+	}
+	patch, err := synopsis.Enrich(ctx, n.Number, missing, srcs...)
+	if err != nil {
+		s.logWarn("补番号元数据失败", "number", n.Number, "err", err)
+	}
+	// 中文标题走**另一条链**（只有 airav / missav 两家），与简介那条并行 ——
+	// 两条链的判据不同（一个补缺、一个另存），所以分开跑（见 titleEnrichers 的注释）。
+	// ⚠️ 这一段**必须在 `patch.Empty()` 提前返回之前**：一部的简介可能早就有了
+	// （missing.Summary 为 false），但它还缺中文标题 —— 那时简介链一个字段都不取，
+	// patch 是空的，中文标题就被这条 return 吞掉了。实测就是这么漏的。
+	if missing.TitleZH {
+		tp, terr := synopsis.Enrich(ctx, n.Number, synopsis.Missing{TitleZH: true}, s.titleEnrichers()...)
+		if tp.TitleZH != "" && patch.TitleZH == "" {
+			patch.TitleZH = tp.TitleZH
+			if patch.Source == "" {
+				patch.Source = tp.Source
+			}
+			patch.Filled = append(patch.Filled, "title_zh")
+		}
+		if terr != nil {
+			s.logInfo("补中文标题失败", "number", n.Number, "err", terr)
+		}
+	}
+	if patch.Empty() {
+		return
+	}
+	if patch.TitleZH != "" {
+		n.TitleZH = patch.TitleZH
+		n.TitleZHSource = patch.Source
+		// 中文标题也要落到本地那份侧车 json 上（用户要求：推送时写进 json）。
+		// 侧车那边是**替换 `title`**（见 ApplySidecarTitleZHByNumber），
+		// 库里则另存一列，两处口径不同是有意的。
+		s.pushTitleZHToSidecar(n.Number, patch.TitleZH)
+	}
+	if patch.Summary != "" {
+		n.Summary = patch.Summary
+		n.SummarySource = patch.Source
+		// 本地那份 json 也得有简介，否则 nfo 里还是空（nfo 读的是本地 json，不是库）。
+		// 只动本地副本，不写网盘。
+		s.pushSummaryToSidecar(n.Number, patch.Summary)
+	}
+	if patch.ReleaseDate != "" {
+		n.ReleaseDate = patch.ReleaseDate
+	}
+	if patch.DurationMin > 0 {
+		n.Duration = patch.DurationMin
+	}
+	if patch.Director != "" {
+		n.DirectorName = patch.Director
+	}
+	if patch.Maker != "" {
+		n.MakerName = patch.Maker
+		n.MakerID = "" // 别站的 id 与 JAVDB 不是一套，宁可留空
+		n.PublisherName = patch.Maker
+	}
+	if len(patch.Tags) > 0 {
+		// NormalizedMovie.Tags 是 []string（规范化那一步就把 Tag 结构拍平了）
+		n.Tags = append([]string(nil), patch.Tags...)
+	}
+}
+
 func (s *Service) javbusClient() (JavbusClient, error) {
 	if s.testJavbus != nil {
 		return s.testJavbus, nil

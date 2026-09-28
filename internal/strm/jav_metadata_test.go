@@ -3,6 +3,7 @@ package strm
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"litepan/internal/jav/emby"
 	"litepan/internal/settings"
@@ -426,4 +428,280 @@ func decodeJPEGFile(t *testing.T, path string) image.Image {
 		t.Fatalf("解不开 %s：%v", path, err)
 	}
 	return img
+}
+
+// TestGenerateJavArtifactsOverwrite 全量扫描（Overwrite）覆盖手工改过的 nfo 与 poster，
+// 增量扫描（不 Overwrite）**一个字节都不动**。
+//
+// 这两半是一对：前者是用户要的「跑一遍全量 = 恢复自动生成」，后者是「手改的内容不会被
+// 定时扫描冲掉」。少任何一半，这个功能都会在某个方向上伤人。
+func TestGenerateJavArtifactsOverwrite(t *testing.T) {
+	root, rel := newJavTaskDir(t, "SSIS-001-UC-4K.json")
+	base := javArtifactRequest{Root: root, StrmFiles: []string{rel}, Items: allOn(), Images: newStubFetcher(), Log: testLogger(t)}
+	generateJavArtifacts(context.Background(), base)
+
+	// 手工改过的痕迹：nfo 与 poster 都写成哨兵内容
+	nfoPath := filepath.Join(root, "SSIS-001-UC-4K.nfo")
+	posterPath := filepath.Join(root, "poster.jpg")
+	sentinelNFO := []byte("手工改过的 nfo")
+	sentinelPoster := []byte("手工裁过的海报")
+	for path, body := range map[string][]byte{nfoPath: sentinelNFO, posterPath: sentinelPoster} {
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// ① 增量（不 Overwrite）：一个字都不许动
+	generateJavArtifacts(context.Background(), base)
+	if got, _ := os.ReadFile(nfoPath); !bytes.Equal(got, sentinelNFO) {
+		t.Error("增量扫描不该覆盖手工改过的 nfo")
+	}
+	if got, _ := os.ReadFile(posterPath); !bytes.Equal(got, sentinelPoster) {
+		t.Error("增量扫描不该覆盖手工裁的 poster")
+	}
+
+	// ② 全量（Overwrite）：两个都回到生成器版本
+	forced := base
+	forced.Overwrite = true
+	generateJavArtifacts(context.Background(), forced)
+	if got, _ := os.ReadFile(nfoPath); bytes.Equal(got, sentinelNFO) {
+		t.Error("全量扫描应当重建 nfo")
+	} else if !bytes.Contains(got, []byte("<num>SSIS-001</num>")) {
+		t.Errorf("重建出来的 nfo 不对：\n%s", got)
+	}
+	if got, _ := os.ReadFile(posterPath); bytes.Equal(got, sentinelPoster) {
+		t.Error("全量扫描应当重建 poster")
+	}
+}
+
+// TestGenerateJavArtifactsOverwriteKeepsThumb 全量扫描**不重下 thumb** ——
+// 它是任务级持久设置，会被定时扫描反复触发，每轮重下整库封面会把图床打毛。
+// 而「重刮」（RefetchImages）才重下它。
+func TestGenerateJavArtifactsOverwriteKeepsThumb(t *testing.T) {
+	root, rel := newJavTaskDir(t, "SSIS-001-UC-4K.json")
+	base := javArtifactRequest{Root: root, StrmFiles: []string{rel}, Items: allOn(), Log: testLogger(t)}
+	generateJavArtifacts(context.Background(), javArtifactRequest{
+		Root: root, StrmFiles: []string{rel}, Items: allOn(), Images: newStubFetcher(), Log: testLogger(t),
+	})
+
+	// 全量：不该打图床
+	fetcher := newStubFetcher()
+	forced := base
+	forced.Overwrite = true
+	forced.Images = fetcher
+	generateJavArtifacts(context.Background(), forced)
+	if fetcher.callCount() != 0 {
+		t.Errorf("全量扫描不该重下图片，got %d 次请求", fetcher.callCount())
+	}
+
+	// 重刮：thumb / fanart / poster 都重做，封面重下一次
+	fetcher2 := newStubFetcher()
+	rebuild := base
+	rebuild.Overwrite = true
+	rebuild.RefetchImages = true
+	rebuild.Images = fetcher2
+	generateJavArtifacts(context.Background(), rebuild)
+	if fetcher2.callCount() == 0 {
+		t.Error("重刮应当重新下载封面（剧照已在，不重复下）")
+	}
+}
+
+// TestJavPosterQueueForceBypassesDedup 强制作业必须绕过那张只增不减的去重表。
+//
+// 这条钉的是一个静默失效：`seen` 故意不清理（清了等于每轮重算），要是强制作业也走
+// 去重，第二次「全量恢复」就会命中第一次留下的记录被丢掉 —— 「第一次成功、之后再也
+// 恢复不了」，而且不报错。
+func TestJavPosterQueueForceBypassesDedup(t *testing.T) {
+	dir := t.TempDir()
+	thumb := filepath.Join(dir, "thumb.jpg")
+	poster := filepath.Join(dir, "poster.jpg")
+	if err := os.WriteFile(thumb, sampleJPEG(800, 538), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	q := newJavPosterQueue(testLogger(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q.Start(ctx)
+
+	// 第一次：普通作业裁出海报
+	q.SchedulePoster(javPosterJob{ThumbPath: thumb, PosterPath: poster, Censored: true})
+	waitFor(t, poster)
+	first, _ := os.ReadFile(poster)
+
+	// 手工改掉，再排一个**强制**作业 —— 必须真的重算（而不是被去重丢掉）
+	if err := os.WriteFile(poster, []byte("手工裁过的"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	q.SchedulePoster(javPosterJob{ThumbPath: thumb, PosterPath: poster, Censored: true, Overwrite: true})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, _ := os.ReadFile(poster); !bytes.Equal(got, []byte("手工裁过的")) {
+			return // 被重算了 ✓
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got, _ := os.ReadFile(poster); bytes.Equal(got, []byte("手工裁过的")) {
+		t.Errorf("强制作业被去重丢掉了（第一次是 %d 字节）", len(first))
+	}
+}
+
+// TestSyncLocalSidecarSummary 把新补的简介写进本地侧车 json。
+//
+// 这一条补的是「简介拿到手、nfo 里却还是空」的断点：nfo 读的是**本地那份 json**
+// （推送时写的，里面也没有简介），只更新库里的 jav_movies 到不了 nfo。
+// 规矩与之前一致：**只动本地副本，不写网盘**。
+func TestSyncLocalSidecarSummary(t *testing.T) {
+	root, _ := newJavTaskDir(t, "SSIS-001-UC-4K.json")
+	dir := root
+	// 侧车名字故意与主干不同（带质量标记）——拼名字的实现会在这里翻车
+	changed, err := SyncLocalSidecarSummary(root, "", "SSIS-001-UC-4K", "新补的剧情简介")
+	if err != nil {
+		t.Fatalf("SyncLocalSidecarSummary: %v", err)
+	}
+	if !changed {
+		t.Fatal("应当写入了")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "SSIS-001-UC-4K.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := doc["summary"].(string); got != "新补的剧情简介" {
+		t.Errorf("summary = %q", got)
+	}
+	// **其余字段一个都不能丢**（用 map 而不是读侧车结构体，就是为了这个）
+	// 夹具里有的字段，写回之后一个都不能少（用 map 而不是读侧车结构体，就是为了这个）
+	var original map[string]any
+	if err := json.Unmarshal([]byte(sampleSidecar), &original); err != nil {
+		t.Fatal(err)
+	}
+	for key := range original {
+		if _, ok := doc[key]; !ok {
+			t.Errorf("写回之后丢了字段 %q", key)
+		}
+	}
+	if len(doc) != len(original) {
+		t.Errorf("字段数变了：%d → %d（多了或少了）", len(original), len(doc))
+	}
+	// 幂等：同样的值再写一次不产生改动
+	second, err := SyncLocalSidecarSummary(root, "", "SSIS-001-UC-4K", "新补的剧情简介")
+	if err != nil || second {
+		t.Errorf("同样的值不该再写一次：changed=%v err=%v", second, err)
+	}
+	// 空简介不写
+	if changed, err := SyncLocalSidecarSummary(root, "", "SSIS-001-UC-4K", "  "); err != nil || changed {
+		t.Errorf("空简介不该写：%v %v", changed, err)
+	}
+	// 目录里**没有 json** 时静默返回 false（不是错误）
+	empty := t.TempDir()
+	if err := os.WriteFile(filepath.Join(empty, "X-1.strm"), []byte("url"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := SyncLocalSidecarSummary(empty, "", "X-1", "简介"); err != nil || changed {
+		t.Errorf("没有侧车时应当静默：changed=%v err=%v", changed, err)
+	}
+}
+
+// TestFillNFOPlotIfMissing 补简介时顺手把 nfo 的 <plot> 补上 —— 但**只在它连元素都没有时**。
+//
+// 判据为什么是「没有 `<plot>` 元素」而不是「plot 为空」：
+//   - 生成器写的 nfo：简介空时**整个元素不输出**（emby.cdata 对空串返回 nil）；
+//   - 编辑器保存的 nfo：即使简介空，元素也在（`<plot><![CDATA[]]></plot>`）。
+//
+// 所以「没有元素」= 生成器写的、当时没简介，补上**不可能覆盖用户手改**；
+// 而只要有元素（哪怕空的）就是用户编辑过的，一律不动。
+func TestFillNFOPlotIfMissing(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	// ① 生成器写的（没有 plot）→ 补上，且插在 <outline> 之前
+	sidecar := mk("A.json", `{"summary":""}`)
+	nfo := mk("A.nfo", "<?xml version=\"1.0\"?>\n<movie>\n  <outline>发行日期: 2026-01-01</outline>\n  <title>A</title>\n</movie>\n")
+	fillNFOPlotIfMissing(sidecar, "新补的剧情")
+	got, _ := os.ReadFile(nfo)
+	if !strings.Contains(string(got), "<plot><![CDATA[新补的剧情]]></plot>") {
+		t.Errorf("应当补上 plot：\n%s", got)
+	}
+	if strings.Index(string(got), "<plot>") > strings.Index(string(got), "<outline>") {
+		t.Error("plot 应当插在 outline 之前（与生成器的元素顺序一致）")
+	}
+
+	// ② **编辑器保存过的**（有 plot，哪怕是空的）→ 一个字都不动
+	edited := "<movie>\n  <plot><![CDATA[]]></plot>\n  <title>A</title>\n</movie>\n"
+	sidecar2 := mk("B.json", `{"summary":""}`)
+	nfo2 := mk("B.nfo", edited)
+	fillNFOPlotIfMissing(sidecar2, "不该被写进去")
+	got2, _ := os.ReadFile(nfo2)
+	if string(got2) != edited {
+		t.Errorf("编辑器保存过的 nfo 不该被动：\n%s", got2)
+	}
+
+	// ③ 简介里含 `]]>`（会破坏 CDATA）→ 切断后写出仍然是合法结构
+	sidecar3 := mk("C.json", `{"summary":""}`)
+	nfo3 := mk("C.nfo", "<movie>\n  <title>C</title>\n</movie>\n")
+	fillNFOPlotIfMissing(sidecar3, "前半 ]]> 后半")
+	got3, _ := os.ReadFile(nfo3)
+	if strings.Contains(string(got3), "前半 ]]> 后半") {
+		t.Error("裸的 ]]> 不能直接写进 CDATA")
+	}
+	if !strings.Contains(string(got3), "]]]]><![CDATA[>") {
+		t.Errorf("应当按 XML 的规矩切断：\n%s", got3)
+	}
+
+	// ④ 没有 nfo / 结构不认得 → 静默不动
+	sidecar4 := mk("D.json", `{"summary":""}`)
+	fillNFOPlotIfMissing(sidecar4, "x") // D.nfo 不存在，不该 panic
+	nfo5 := mk("E.nfo", "<tvshow>\n  <title>E</title>\n</tvshow>\n")
+	fillNFOPlotIfMissing(mk("E.json", `{}`), "x")
+	got5, _ := os.ReadFile(nfo5)
+	if strings.Contains(string(got5), "<plot>") {
+		t.Error("不认识的结构不该乱插元素")
+	}
+}
+
+// TestAutoWatermarkIDsFromSidecar 自动那条路该贴哪几个水印 —— 按侧车属性算。
+//
+// 判据与编辑页的自动预置是同一套（有码不贴 leak、中字贴 sub、破解贴 umr、4K 贴 4k）。
+// **8K 与「流出」推不出来**（上游把 8k 归进 4K 那一档；流出与破解是同一个标志位），
+// 所以这里断言它们**不会**被自动贴上 —— 那是一条明写的短板，不是漏做。
+func TestAutoWatermarkIDsFromSidecar(t *testing.T) {
+	req := javArtifactRequest{WatermarkEnabled: true}
+	cases := []struct {
+		label string
+		doc   *emby.SidecarDoc
+		want  string
+	}{
+		{"有码 + 破解 + 中字 + 4K",
+			&emby.SidecarDoc{Type: "0", HasCNSub: true, Quality: emby.SidecarQuality{Uncensored: true, FourK: true}},
+			"sub,umr,4k"},
+		{"无码（贴 leak）+ 中字", &emby.SidecarDoc{Type: "1", HasCNSub: true}, "leak,sub"},
+		{"type 缺失 → 当无码（与裁剪默认窗口同一条判据）", &emby.SidecarDoc{}, "leak"},
+		{"什么都没带的有码片", &emby.SidecarDoc{Type: "0"}, ""},
+	}
+	for _, c := range cases {
+		got := strings.Join(autoWatermarkIDs(req, c.doc), ",")
+		if got != c.want {
+			t.Errorf("%s：%q，期望 %q", c.label, got, c.want)
+		}
+	}
+
+	// 开关关着 → 一个都不贴（automatic 那条路的默认状态）
+	off := javArtifactRequest{WatermarkEnabled: false}
+	if ids := autoWatermarkIDs(off, &emby.SidecarDoc{Type: "1", HasCNSub: true}); len(ids) != 0 {
+		t.Errorf("开关关着时不该贴任何水印，got %v", ids)
+	}
+	// 没有侧车 → 不贴（不明真相就别动图）
+	if ids := autoWatermarkIDs(req, nil); len(ids) != 0 {
+		t.Errorf("没有侧车时不该贴，got %v", ids)
+	}
 }

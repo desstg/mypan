@@ -70,6 +70,17 @@ type ConfigView struct {
 	// （元数据侧车，见 sidecar.go）。默认开。
 	SidecarEnabled bool `json:"sidecar_enabled"`
 
+	// —— 番号海报水印（见 internal/jav/emby/watermark.go）——
+	//
+	// WatermarkEnabled 只管**自动**那条路（重刮 / 扫描生成海报）贴不贴，默认关；
+	// 编辑页手动裁剪时贴不贴由那一页上的勾选决定，与它无关。
+	//
+	// Scale / Margin 是百分数（18 = 水印宽占海报宽的 18%；6 = 边距占水印宽的 6%），
+	// 两条路都用 —— 它们是"自己的偏好"，不是"这条路的开关"。
+	WatermarkEnabled bool `json:"watermark_enabled"`
+	WatermarkScale   int  `json:"watermark_scale"`
+	WatermarkMargin  int  `json:"watermark_margin"`
+
 	// —— 推送默认目标 ——
 	DefaultAccountID    int64  `json:"default_account_id"`
 	DefaultParentID     string `json:"default_parent_id"`
@@ -117,6 +128,10 @@ type ConfigInput struct {
 	SubTimeoutSec       *int     `json:"sub_timeout_sec"`
 
 	SidecarEnabled *bool `json:"sidecar_enabled"`
+
+	WatermarkEnabled *bool `json:"watermark_enabled"`
+	WatermarkScale   *int  `json:"watermark_scale"`
+	WatermarkMargin  *int  `json:"watermark_margin"`
 
 	DefaultAccountID    *int64 `json:"default_account_id"`
 	DefaultParentID     string `json:"default_parent_id"`
@@ -187,6 +202,10 @@ func (s *Service) Config(ctx context.Context) (ConfigView, error) {
 		SubTimeoutSec:       s.settings.Int(settings.KeyJavSubTimeoutSec),
 
 		SidecarEnabled: s.sidecarEnabled(),
+
+		WatermarkEnabled: s.WatermarkEnabled(),
+		WatermarkScale:   s.WatermarkScalePercent(),
+		WatermarkMargin:  s.WatermarkMarginPercent(),
 
 		DefaultParentID:     strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavDefaultParentID)),
 		DefaultDisplayPath:  strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavDefaultPath)),
@@ -348,6 +367,15 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 	}
 	if in.SidecarEnabled != nil {
 		patch[settings.KeyJavSidecarEnabled] = boolString(*in.SidecarEnabled)
+	}
+	if in.WatermarkEnabled != nil {
+		patch[settings.KeyJavWatermarkEnabled] = boolString(*in.WatermarkEnabled)
+	}
+	if in.WatermarkScale != nil {
+		patch[settings.KeyJavWatermarkScale] = strconv.Itoa(*in.WatermarkScale)
+	}
+	if in.WatermarkMargin != nil {
+		patch[settings.KeyJavWatermarkMargin] = strconv.Itoa(*in.WatermarkMargin)
 	}
 
 	if in.DefaultAccountID != nil {
@@ -580,4 +608,59 @@ func IsNotFound(err error) bool {
 		return ae.Code == domain.CodeNotFound
 	}
 	return false
+}
+
+// WatermarkEnabled 报告「自动那条路（重刮 / 扫描）要不要贴水印」。默认关。
+func (s *Service) WatermarkEnabled() bool {
+	if s == nil || s.settings == nil {
+		return false
+	}
+	return s.settings.Bool(settings.KeyJavWatermarkEnabled)
+}
+
+// WatermarkScalePercent 是水印宽度占海报宽度的百分比（18 = 18%）。
+func (s *Service) WatermarkScalePercent() int {
+	return s.watermarkPercent(settings.KeyJavWatermarkScale, watermarkDefaultScale)
+}
+
+// WatermarkMarginPercent 是贴边距占水印宽度的百分比（6 = 6%）。
+func (s *Service) WatermarkMarginPercent() int {
+	return s.watermarkPercent(settings.KeyJavWatermarkMargin, watermarkDefaultMargin)
+}
+
+// watermarkPercent 读一个百分数设置，越界/没配时回落默认。
+//
+// 为什么在这里夹一道而不是只靠 registry 的 Min/Max：这两个值会**直接参与图像计算**
+// （比例 * 海报宽度），而设置是可以被别的路径写进去的（比如旧版本的配置项）。
+// 夹一道的代价是两行，收益是"绝不会因为一个 0 或 999 把海报贴花"。
+func (s *Service) watermarkPercent(key string, def int) int {
+	if s == nil || s.settings == nil {
+		return def
+	}
+	v := s.settings.Int(key)
+	if v <= 0 {
+		return def
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
+}
+
+const (
+	// watermarkDefaultScale / watermarkDefaultMargin 与 emby 包的默认值同源
+	// （那里是浮点比例，这里是百分数）。改一处要一起改。
+	watermarkDefaultScale  = 18
+	watermarkDefaultMargin = 2
+)
+
+// WatermarkDir 是用户自己那套水印图标放的目录（空 = 用内置）。
+//
+// 导出给接线层用（见 internal/app/wire_services.go）：strm 那边要读它去装图标，
+// 但那个包不该知道设置键名。
+func (s *Service) WatermarkDir() string {
+	if s == nil || s.settings == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavWatermarkDir))
 }

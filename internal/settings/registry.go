@@ -72,7 +72,14 @@ const (
 	// 值是一个 JSON 对象（见 JavMetaItems），**不是**「;」分隔的列表 —— 全不勾时
 	// 列表会是空串，而空串在本项目里表示「没存过、回落默认值」，那个坑会让
 	// 「一个都不要」永远存不下去。理由与默认值都写在 javmeta.go。
-	KeyStrmJavMetaItems      = "strm_jav_metadata_items"
+	KeyStrmJavMetaItems = "strm_jav_metadata_items"
+	// KeyStrmJavWallHiddenDirs 是番号海报墙上**整档隐藏**的一级目录名（JSON 数组）。
+	//
+	// Default 刻意留空串（= 「没存过」）：默认隐藏的是分类规则里那条兜底规则**当前**的
+	// 目标目录（默认叫「未匹配」），用户把它改名后隐藏的必须跟着改 —— 这是改动前写死
+	// 取末条规则那个行为。一旦用户保存过，就是他当场勾选的那份名单。
+	// 细节与「为什么不能用空串表示空列表」见 javwallhidden.go。
+	KeyStrmJavWallHiddenDirs = "strm_jav_wall_hidden_dirs"
 	KeyLocalUploadEnabled    = "local_upload_enabled"
 	KeyLocalUploadMappings   = "local_upload_mappings"
 	KeyCoverExtractEnabled   = "cover_extract_enabled"
@@ -253,6 +260,22 @@ const (
 	// 而 JAVDB 会封号。见 internal/jav/sidecar.go。
 	KeyJavSidecarEnabled = "jav_sidecar_enabled"
 
+	// 番号海报水印（见 internal/jav/emby/watermark.go）：贴不贴、贴多大、离边多远。
+	//
+	// 三个键分开是因为它们回答的是不同问题：
+	//   * Enabled 决定**自动**那条路（重刮 / 扫描生成海报）贴不贴 —— 默认关；
+	//   * Scale / Margin 是"自己的偏好"，手裁与自动两条路都用。
+	//
+	// 边距单独一个键（而不是写死 1/16）：用户要的就是微调它 ——
+	// "还要靠边一点" 这句话本身就是一次调参。
+	KeyJavWatermarkEnabled = "jav_watermark_enabled"
+	KeyJavWatermarkScale   = "jav_watermark_scale"
+	KeyJavWatermarkMargin  = "jav_watermark_margin"
+	// KeyJavWatermarkDir 是**用户自己那套图标**放哪（空 = 用内置的）。
+	// 目录里的文件必须与内置同名（4k/8k/leak/sub/umr + .png），缺的落回内置 ——
+	// 这样换其中一张不必凑齐五个。
+	KeyJavWatermarkDir = "jav_watermark_dir"
+
 	// 推送默认目标。订阅自身留空时回落到这里。
 	KeyJavDefaultAccountID    = "jav_default_account_id"
 	KeyJavDefaultParentID     = "jav_default_parent_id"
@@ -394,6 +417,15 @@ func defaultSpecs() []Spec {
 			Default:   DefaultJavMetaItems().Encode(),
 			Hidden:    true,
 			normalize: normalizeJavMetaItems,
+		},
+		// 同上：由「STRM 设置」页与番号墙页头那个「全部目录」按钮读写。
+		// Default 是空串（= 没存过），读侧动态回落分类规则的兜底目录名。
+		{
+			Key:       KeyStrmJavWallHiddenDirs,
+			Type:      TypeString,
+			Default:   "",
+			Hidden:    true,
+			normalize: normalizeJavWallHiddenDirsValue,
 		},
 
 		selectSpec(KeyStrmMetadataSyncMode, "strm", "元数据同步策略", "local_primary=保留本地并从云端补缺；cloud_primary=本地目录与云端保持一致；bidirectional=本地与云端互相补缺。", "local_primary", []Option{
@@ -654,6 +686,13 @@ func defaultSpecs() []Spec {
 		// 在推送成功之后多写一个几 KB 的 JSON，不做多余的上游请求。
 		// 不想要的人自己去「番号相关设置」里关掉。
 		{Key: KeyJavSidecarEnabled, Type: TypeBool, Default: "true", Hidden: true},
+
+		// 水印：默认**关**（自动那条路不贴），大小 18%（真图出样张定的），
+		// 边距 6%（1/16）。两个数值都是百分数，前端滑杆直接用整数。
+		{Key: KeyJavWatermarkEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyJavWatermarkScale, Type: TypeInt, Default: "18", Min: intp(5), Max: intp(50), Hidden: true},
+		{Key: KeyJavWatermarkMargin, Type: TypeInt, Default: "2", Min: intp(0), Max: intp(20), Hidden: true},
+		{Key: KeyJavWatermarkDir, Type: TypeString, Default: "", Hidden: true},
 
 		{Key: KeyJavDefaultAccountID, Type: TypeString, Default: "0", Hidden: true},
 		{Key: KeyJavDefaultParentID, Type: TypeString, Default: "", Hidden: true},

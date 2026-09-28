@@ -1,0 +1,13 @@
+-- 记「这段简介是哪来的」。
+--
+-- 起因：JAVDB 的 summary 大面积是空的（实测用户库 8574 部里只有 435 部有），
+-- 于是加了一条「去别的站补」的路（internal/jav/synopsis，两家：jav321 管有码、
+-- caribbeancom 管无码/素人，实测唯二「连得上且真的带剧情简介」的站）。
+--
+-- 有了这一列才能回答两个问题：
+--   * 库里哪些简介是补来的、从哪补的（审计）；
+--   * 哪天接了更好的源（比如带翻译的中文源），能精确地只重刷那些低质量来源的行。
+--
+-- 空串 = 还没有简介。写入沿用 summary 那条 `CASE WHEN excluded <> ''` 的规矩，
+-- 空值不覆盖已有的。
+ALTER TABLE jav_movies ADD COLUMN summary_source TEXT NOT NULL DEFAULT '';

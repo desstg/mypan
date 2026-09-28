@@ -570,3 +570,44 @@ func alignISOMetadataName(name, stem string) (string, bool) {
 	}
 	return name, false
 }
+
+// writeMetadataFileForced 是 writeMetadataFile 的「就是要覆盖」版本。
+//
+// 与那个的分工很清楚：`writeMetadataFile` 走 `os.Link`，**语义就是"存在即跳过"**
+// （扫描路径的幂等，改不掉）；这里是临时文件 + `os.Rename`，**语义就是要覆盖**
+// （手工保存、全量恢复、重刮）。
+//
+// ⚠️ Windows 上 Rename 覆盖一个**正被打开**的目标会失败（共享冲突）。本项目里最可能
+// 占着它的是我们自己的 /poster 图片处理器 —— 那边已改成一次性 os.ReadFile
+// （见 internal/api/strm_scrape.go），不再长期持有句柄。
+func writeMetadataFileForced(root, relPath string, body []byte, overwrite bool) (bool, error) {
+	if !overwrite {
+		return writeMetadataFile(root, relPath, body)
+	}
+	dest := filepath.Join(root, relPath)
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(dest)+".tmp-*")
+	if err != nil {
+		return false, err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmpPath, dest); err != nil {
+		return false, err
+	}
+	return true, nil
+}

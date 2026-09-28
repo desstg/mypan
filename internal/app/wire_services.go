@@ -242,6 +242,24 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	// wireSTRM 早于 jav.New，构造期拿不到这个实例。
 	strmSvc.SetJavImageFetcher(javSvc)
 
+	// 补到的简介要落到**本地那份侧车 json** 上，否则 nfo 里还是空（nfo 读的是本地
+	// json，不是库）。jav 不知道媒体库目录在哪 —— 那些知识在 strm 那边，
+	// 所以反过来：jav 给番号，strm 负责找文件与落盘。
+	javSvc.SetSummarySidecarSink(func(number, summary string) (bool, error) {
+		return strmSvc.ApplySidecarSummaryByNumber(context.Background(), number, summary), nil
+	})
+	// 中文标题走**同一条路**（用户要求：推送时也写进 json）。
+	// 落到 json 的 `title` 上 —— 侧车是给 nfo 生成器与 Emby 看的中间产物，
+	// 那边只认 title / origin_title 两个名字，所以中文补到了就替换 title，
+	// 日文原名留在 origin_title 里（见 ApplySidecarTitleZHByNumber 的注释）。
+	javSvc.SetTitleZHSidecarSink(func(number, titleZH string) (bool, error) {
+		return strmSvc.ApplySidecarTitleZHByNumber(context.Background(), number, titleZH), nil
+	})
+
+	// 用户自己那套水印图标放哪 —— 那是 jav 模块的设置项（jav_watermark_dir），
+	// strm 这边不该知道键名，所以走一个取值函数注入（同 SetJavImageFetcher 的理由）。
+	strmSvc.SetWatermarkDirFunc(func() string { return javSvc.WatermarkDir() })
+
 	// 必须在 offlineDownloadSvc 之后构造，才能订阅它的下载完成事件。
 	tgSubscribeSvc.Register(core.bus)
 	return &servicesBundle{

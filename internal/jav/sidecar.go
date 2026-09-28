@@ -285,7 +285,16 @@ func buildSidecar(in sidecarInput) ([]byte, string, error) {
 	)
 	if m := in.Movie; m != nil {
 		number, letter = m.Number, m.NumberLetter
-		title, originTitle = m.Title, m.OriginTitle
+		// 「标题」取中文优先、没有才回落原标题（用户 2026-09-27 要求）。
+		//
+		// ⚠️ 标题这边**只动 Title 这一路**：侧车 json 是**单向快照**（库 → json），
+		// 而 nfo 里的「标题 / 原标题」两栏是**从 json 现算**的 —— 只要 json 里那份
+		// 日文原名还在（OriginTitle 那一路），nfo 的 `<originaltitle>` 就不会丢。
+		//
+		// 所以「回写」只允许碰**库里已经标为中文**的那些（见 ApplySidecarTitleZHByNumber），
+		// 绝不能因为 json 里 title 是中文就把 origin_title 也覆盖成中文 ——
+		// 那会让下一次归档生成出两份中文标题，日文原名永久消失。
+		title, originTitle = pickTitleZH(m.TitleZH, m.Title), m.OriginTitle
 		javdbID, releaseDate = m.ID, m.ReleaseDate
 		summary, review = m.Summary, m.Review
 		previewVideo = m.PreviewVideoURL
@@ -758,4 +767,16 @@ func (s *Service) siteBase() string {
 		return ""
 	}
 	return strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavSiteBase))
+}
+
+// pickTitleZH 取「写进侧车/nfo 的标题」：**中文优先，没有才回落现有的那行**。
+//
+// 用户的要求原话：「在本地取 json 文件内容时，取标题就取中文标题，如果中文标题没有，
+// 就取原来那个日文标题」。所以这是一个**回落**，不是二选一 —— 中文标题是别站补来的，
+// 没补到（大面积的 FC2 / 素人那批补不到）就用 JAVDB 那行，不能让标题空着。
+func pickTitleZH(titleZH, fallback string) string {
+	if strings.TrimSpace(titleZH) != "" {
+		return titleZH
+	}
+	return fallback
 }

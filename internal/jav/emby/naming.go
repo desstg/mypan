@@ -16,13 +16,13 @@ const ExtraFanartDir = "extrafanart"
 type Names struct {
 	// NFO 永远是 `<主干>.nfo`：Emby 按**视频（这里是 .strm）的主干**配对，
 	// 与图片那种目录级约定不是一回事。
-	NFO    string
-	Poster string
-	Thumb  string
-	Fanart string
+	NFO    string `json:"nfo"`
+	Poster string `json:"poster"`
+	Thumb  string `json:"thumb"`
+	Fanart string `json:"fanart"`
 
 	// ExtraDir 是剧照目录名。平铺布局下为**空串**（不写剧照），见 TargetNames。
-	ExtraDir string
+	ExtraDir string `json:"extra_dir"`
 }
 
 // TargetNames 按「独占目录 / 平铺」两套规则算文件名。

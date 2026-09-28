@@ -6,6 +6,7 @@ import JavUserSharesModal from "@/components/admin/JavUserSharesModal.vue";
 import SectionTabBar from "@/components/admin/SectionTabBar.vue";
 import { getApiErrorMessage } from "@/api/client";
 import {
+  fetchJavMagnets,
   fetchJavMovie,
   fetchJavPreviewURL,
   fetchJavRelatedLists,
@@ -124,11 +125,98 @@ const relatedError = ref("");
  * 打开就是准的；关联清单那一档是点开才拉的，没拉过就不给数字。
  */
 const TABS = computed(() => [
-  { key: TAB_MAGNETS, label: "磁力链接", count: detail.value?.magnets.length ?? 0 },
-  { key: TAB_COMMENTS, label: "评论区分享", count: detail.value?.comment_shares.length ?? 0 },
+  {
+    key: TAB_MAGNETS,
+    label: "磁力链接",
+    // 还没拉到时给 `undefined`（不渲染数字）而不是 0 —— 「0」会让用户以为
+    // 这片没有磁链，而其实后台正在抓（见 magnetsPending）。
+    count: magnetsLoaded.value ? (detail.value?.magnets.length ?? 0) : undefined,
+  },
+  {
+    key: TAB_COMMENTS,
+    label: "评论区分享",
+    // 同磁链那一档：还没拉到时不给数字（显示 0 会让人以为没人分享过）。
+    count: sharesLoaded.value ? detail.value?.comment_shares.length ?? 0 : undefined,
+  },
   { key: TAB_RELATED, label: "关联清单", count: relatedLoaded.value ? relatedLists.value.length : undefined },
   { key: TAB_REVIEWS, label: "评论", count: detail.value?.comments_count ?? 0 },
 ]);
+
+/**
+ * 简介是不是「还在补」。
+ *
+ * 判据 = 轮询还在跑（说明还有空缺）且这一部确实没有简介。轮询到顶或停了之后，
+ * 就不再显示「加载中…」—— 那时已经问过一圈，没有就是没有，别一直吊着用户。
+ */
+const summaryPending = computed(() => !detail.value?.summary && pollingActive.value);
+
+/** 轮询是否在跑（模板据此显示「加载中…」而不是「暂无」）。 */
+const pollingActive = ref(false);
+
+/**
+ * 磁链那一档的状态（2026-09-28 起独立拉）。
+ *
+ * 详情首屏这次不再顺带抓磁链（那是两个境外站，很慢），所以这一档要自己：
+ *   - `magnetsPending`：本地没有、后台正在抓 —— 界面显示「获取中…」而不是「没有磁链」。
+ *     这一点很重要：显示 0 颗会让用户以为这片没有磁链。
+ *   - `magnetsLoaded`：拉过一次没有，之后显示「暂无磁链」才是诚实的。
+ */
+const magnetsPending = ref(false);
+const magnetsLoaded = ref(false);
+
+/**
+ * 「评论区分享」那一档：与评论共用一份数据（分享就是从评论里提链接出来的），
+ * 所以**切到那一档时顺带把评论拉一遍**就行（loadReviews 会把 shares 填回来）。
+ *
+ * `sharesLoaded` 用来区分「还没拉过」与「拉过了确实没有」——
+ * 前者不能显示「暂无分享」，那会让人以为这片没人贴过链接。
+ */
+const sharesLoaded = ref(false);
+
+/**
+ * 用户切到「磁力链接」那一档时调一次：那一档他正看着，没拉到就该显示「获取中…」
+ * 而不是「还没有抓到」。幂等 —— 服务端有去重与冷却，重复要不会白打上游。
+ */
+function ensureMagnetsOnTab() {
+  if (tab.value !== TAB_MAGNETS) return;
+  if (magnetsLoaded.value || magnetsPending.value) return;
+  void loadMagnets();
+}
+
+/** 要一次分享（走评论那条接口，它会把 shares 一起带回来）。 */
+async function ensureShares() {
+  if (!props.movieId) return;
+  // 已经有评论在手里时，直接算一遍本地分享（不必重打接口）。
+  if (reviews.value.length > 0 && detail.value) {
+    try {
+      const res = await fetchJavReviews(props.movieId, reviewPage.value);
+      if (detail.value && detail.value.id === props.movieId && res.shares) {
+        detail.value.comment_shares = res.shares;
+      }
+      sharesLoaded.value = true;
+      return;
+    } catch {
+      /* 落到下面再试一次完整加载 */
+    }
+  }
+  await loadReviews(1);
+}
+
+/** 本地没有磁链时去后台要（幂等，重复调用会被服务端的去重/冷却挡住）。 */
+async function loadMagnets() {
+  if (!props.movieId) return;
+  try {
+    const res = await fetchJavMagnets(props.movieId, false, true);
+    magnetsLoaded.value = true;
+    magnetsPending.value = Boolean(res.pending);
+    // 拉到了就直接换掉这一块（局部更新，不动整页）
+    if (detail.value && detail.value.id === props.movieId && res.items.length) {
+      detail.value.magnets = res.items;
+    }
+  } catch {
+    /* 静默：下一跳再试 */
+  }
+}
 
 /** 星级：四舍五入到 0-5，与源码 stars 宏一致。 */
 const starCount = computed(() => {
@@ -277,13 +365,24 @@ let hls: { destroy: () => void } | null = null;
 
 const magnetCount = computed(() => detail.value?.magnets.length ?? 0);
 
-async function load(refresh = false) {
+/**
+ * 拉一次详情。
+ *
+ * 两种模式（2026-09-28 改）：
+ *   - `local=true`（默认）：**只读本地**，毫秒级。首屏用它 —— 先显示库里已有的，
+ *     缺的（简介 / 中文标题 / 磁链 / 评论）留着，由后台补完再长出来。
+ *     服务端在 local 模式下会顺手把这部排进补缺队列，所以这里不用额外催。
+ *   - `local=false`：老的同步语义（该抓就抓，几秒），留给「重新获取」。
+ *
+ * ⚠️ **换片时不再清空 `detail`**：以前是 `loading=true` + `detail=null`，
+ * 于是整页白屏等上游 —— 那正是「打开很慢、还闪一下」的来源。现在保留上一部的
+ * 数据先渲染（标题/封面那几块先显示），本地数据毫秒级就到了，观感是「立刻打开」。
+ */
+async function load(refresh = false, local = true) {
   if (!props.movieId) return;
   const first = !detail.value || detail.value.id !== props.movieId;
   if (first) {
-    loading.value = true;
     closePlayer();
-    detail.value = null;
     tab.value = TAB_MAGNETS;
     reviews.value = [];
     reviewTotal.value = 0;
@@ -292,19 +391,112 @@ async function load(refresh = false) {
     relatedLists.value = [];
     relatedLoaded.value = false;
     relatedError.value = "";
+    // 换片时**清掉上一部那份**（不然会显示别的片的简介/磁链），但**不清成长白屏**：
+    // 本地那次是毫秒级，`loading` 只会闪这么一下。
+    //
+    // 与改动前的区别就在这里：以前是 `loading=true` + `detail=null` **等上游几秒**，
+    // 现在等的是本地库（毫秒级），体感上是「点开就开」。
+    detail.value = null;
+    loading.value = true;
+    // 磁链那一档的状态跟着换片重置（上一部的「获取中」不该带到这一部）。
+    magnetsPending.value = false;
+    magnetsLoaded.value = false;
+    sharesLoaded.value = false;
   } else {
     refreshing.value = true;
   }
   error.value = "";
   try {
-    detail.value = await fetchJavMovie(props.movieId, refresh);
+    detail.value = await fetchJavMovie(props.movieId, refresh, local);
   } catch (err) {
     error.value = getApiErrorMessage(err, "影片详情加载失败");
-    detail.value = null;
+    // 刷新失败**不清空已有内容**：显示旧数据远好过一个空白页 +
+    // 「重新获取」按钮（那条错误提示走 error 那条分支，见模板）。
+    if (first) detail.value = null;
   } finally {
     loading.value = false;
     refreshing.value = false;
     schedulePushPoll();
+    // 首屏本地数据到手之后：磁链单独去要一次（本地没有就排后台），
+    // 还缺别的就开轮询。
+    if (detail.value) {
+      if (detail.value.magnets.length > 0) {
+        // 本地就有（之前抓过）—— 直接算「已拉到」，tab 头立刻显示数字。
+        magnetsLoaded.value = true;
+      } else {
+        void loadMagnets();
+      }
+    }
+    syncDetailPoll();
+  }
+}
+
+/**
+ * 详情还在「缺东西」时，隔几秒拉一次本地详情 —— 后台补好了哪块，哪块自己长出来。
+ *
+ * 判据是「抽屉开着 + 还有空缺」，齐了就停（不做无限轮询）。
+ * 直接给 `detail.value` 赋新值、**不碰 `loading`/`refreshing`**（照下面
+ * schedulePushPoll 那套写法）—— 那两个标志翻了，界面会闪。
+ */
+const DETAIL_POLL_MS = 3000;
+// 用 number（`window.setTimeout` 的返回类型）而不是 `ReturnType<typeof setTimeout>`：
+// 这个项目里同时装了 @types/node，全局那个 setTimeout 返回的是 NodeJS.Timeout。
+let detailPollTimer: number | null = null;
+
+function detailStillMissing(): boolean {
+  const d = detail.value;
+  if (!d) return false;
+  // 还没拉过、且本地没有 → 还得等（后台在抓）
+  if (!magnetsLoaded.value && d.magnets.length === 0) return true;
+  // 这几项都补到了就停：简介、中文标题、评论。
+  // （关联影片只在 raw_json 里有，走的是「一次抓全」那条，不单独轮询。）
+  return !d.summary || !d.title_zh || d.comments_count === 0;
+}
+
+/** 轮询上限（次）。缺的东西（比如这片本来就没有磁链）补不上时不能无限轮下去。 */
+const DETAIL_POLL_MAX = 20;
+
+function syncDetailPoll(round = 0) {
+  if (detailPollTimer !== null) {
+    clearTimeout(detailPollTimer);
+    detailPollTimer = null;
+  }
+  if (!props.open || !props.movieId || !detailStillMissing()) {
+    pollingActive.value = false;
+    return;
+  }
+  if (round >= DETAIL_POLL_MAX) {
+    // 到顶就停：已经问过一圈，缺的就是真缺（比如这片本来没有磁链），
+    // 别再显示「加载中…」吊着用户。
+    pollingActive.value = false;
+    return;
+  }
+  pollingActive.value = true;
+  detailPollTimer = window.setTimeout(async () => {
+    detailPollTimer = null;
+    if (!props.open || !props.movieId) return;
+    try {
+      // 磁链是**独立那一档**（首屏不带它），所以这里一起拉一下 ——
+      // 本地还没有的话服务端已经把它排进后台高优先级队列了。
+      if (detail.value && detail.value.magnets.length === 0) {
+        void loadMagnets();
+      }
+      const next = await fetchJavMovie(props.movieId, false, true);
+      // 只在还是同一部时才写回（用户可能已经翻到别的片了）。
+      if (next.id === detail.value?.id) detail.value = next;
+    } catch {
+      /* 轮询失败静默：下一跳再试，不打扰用户 */
+    }
+    schedulePushPoll();
+    syncDetailPoll(round + 1);
+  }, DETAIL_POLL_MS);
+}
+
+function stopDetailPoll() {
+  pollingActive.value = false;
+  if (detailPollTimer !== null) {
+    clearTimeout(detailPollTimer);
+    detailPollTimer = null;
   }
 }
 
@@ -355,6 +547,12 @@ async function loadReviews(page = 1) {
     reviews.value = res.items ?? [];
     reviewTotal.value = res.total ?? 0;
     reviewPage.value = page;
+    // **这一跳顺带把「评论区分享」也补上**：分享就是从评论正文里提链接出来的，
+    // 同一个接口已经算好了。详情首屏瘦身之后，那一档没别的地方拿分享。
+    if (detail.value && detail.value.id === props.movieId && res.shares) {
+      detail.value.comment_shares = res.shares;
+      sharesLoaded.value = true;
+    }
   } catch (err) {
     toast.error(getApiErrorMessage(err, "评论加载失败"));
     reviews.value = [];
@@ -366,6 +564,14 @@ async function loadReviews(page = 1) {
 
 function onTabChange(key: string) {
   tab.value = key;
+  // 磁链那一档：详情首屏这次不再顺带抓它（两个境外站，很慢），所以切过来时确认一下 ——
+  // 没拉到就去要（服务端会排进后台高优先级队列），界面显示「获取中…」而不是「没有」。
+  ensureMagnetsOnTab();
+  // 评论区分享：分享是从评论正文里提出来的，所以拉评论就等于拉分享
+  // （loadReviews 会把 shares 一起填回来）。
+  if (key === TAB_COMMENTS && !sharesLoaded.value && !reviewsLoading.value) {
+    void ensureShares();
+  }
   // 评论按需加载：多数人点开详情只看磁链，为了一次点击先把评论拉回来不值。
   if (key === TAB_REVIEWS && reviews.value.length === 0 && !reviewsLoading.value) {
     void loadReviews(1);
@@ -401,7 +607,8 @@ async function reingest() {
   refreshing.value = true;
   try {
     await ingestJavMovie(props.movieId);
-    await load(true);
+    // 「重新获取」是**用户明确要等**的动作：走完整语义（该抓就抓），不是本地模式。
+    await load(true, false);
     toast.success("已重新获取");
   } catch (err) {
     toast.error(getApiErrorMessage(err, "重新获取失败"));
@@ -550,17 +757,23 @@ watch(
   () => [props.open, props.movieId],
   ([open]) => {
     if (open && props.movieId) {
-      void load(false);
+      // 首屏走**本地模式**：毫秒级返回，缺的由后台补（服务端会顺手把这部排进
+      // 补缺队列），隔几秒再拉一次本地详情，哪块补好了哪块自己长出来。
+      void load(false, true);
     } else {
       closePlayer();
       // 抽屉关了就停轮询：在后台每 30 秒打一次本地库没有意义。
       stopPushPoll();
+      stopDetailPoll();
     }
   },
   { immediate: true },
 );
 
-onUnmounted(stopPushPoll);
+onUnmounted(() => {
+  stopPushPoll();
+  stopDetailPoll();
+});
 </script>
 
 <template>
@@ -583,7 +796,11 @@ onUnmounted(stopPushPoll);
     </div>
 
     <div v-else-if="detail">
-      <h1 class="jd-title">{{ detail.title || detail.origin_title || "（无标题）" }}</h1>
+      <!-- 标题取**中文优先、没有才回落**（用户要求）：别站补来的中文标题在 title_zh
+           （JAVDB 那行大面积是日文），两栏各有各的语义，服务端不替我们选。 -->
+      <h1 class="jd-title">
+        {{ detail.title_zh || detail.title || detail.origin_title || "（无标题）" }}
+      </h1>
 
       <!-- 信息条：左=番号/角标/日期/时长/入库，右=重新获取/订阅 -->
       <div class="jd-meta">
@@ -732,9 +949,19 @@ onUnmounted(stopPushPoll);
         <div v-else class="jd-empty-hint">暂无演员。</div>
       </div>
 
-      <div v-if="detail.summary" class="jd-card" style="margin-top: 14px">
-        <div class="jd-card__title"><i class="fas fa-circle-info" /> 简介</div>
-        <div class="jd-summary">{{ detail.summary }}</div>
+      <!-- 剧情简介：在演员与预览图之间。
+           表头用「剧情简介」与墙上编辑页（StrmJavMetaDrawer）的那一块同名，同一份东西两处别叫两个名字。
+           没简介时**也显示这一块**并给一句空提示 —— 与上面的「演员」「标签」同一套观感。
+           原来这里是 `v-if="detail.summary"`，空简介整块就没了：用户看到「别人有、自己没有」
+           只会以为详情抓漏了，而不是知道「这部确实没有」。 -->
+      <div class="jd-card" style="margin-top: 14px">
+        <div class="jd-card__title"><i class="fas fa-circle-info" /> 剧情简介</div>
+        <!-- 三态：有就显示；还在补（后台刚跑完这部的补缺链之前）显示「加载中…」；
+             补过之后确认没有，才说「暂无简介」。第二态是这次改动加的 —— 用户点开
+             看到的是「正在长出来」而不是「这部没有简介」。 -->
+        <div v-if="detail.summary" class="jd-summary">{{ detail.summary }}</div>
+        <div v-else-if="summaryPending" class="jd-summary jd-summary--pending">加载中…</div>
+        <div v-else class="jd-empty-hint">暂无简介。</div>
       </div>
 
       <div v-if="detail.preview_images.length" class="jd-card" style="margin-top: 14px">
@@ -794,7 +1021,12 @@ onUnmounted(stopPushPoll);
             </button>
           </div>
 
-          <div v-if="magnetCount === 0" class="jd-empty-hint">这部影片还没有抓到磁链。</div>
+          <!-- 三态很重要：本地为空**不代表没有磁链** —— 后台可能正在抓。
+               显示「0 颗 / 还没有抓到」会让用户以为这片没有资源，而其实只是还在路上。 -->
+          <div v-if="magnetCount === 0 && magnetsPending" class="jd-empty-hint">
+            <i class="fas fa-spinner fa-spin" /> 正在获取磁链…（本地还没有，已在后台抓取）
+          </div>
+          <div v-else-if="magnetCount === 0" class="jd-empty-hint">这部影片还没有抓到磁链。</div>
 
           <div v-for="mg in detail.magnets" :key="mg.btih || mg.magnet" class="jav-magnet">
             <div class="jav-magnet__top">
@@ -840,7 +1072,12 @@ onUnmounted(stopPushPoll);
              （同一个 .jav-magnet 骨架、同一套角标），只多一行「分享者 + 原评论」——
              两个 tab 摆的是同一种东西，样式不该长得不一样。 -->
         <div v-show="tab === TAB_COMMENTS">
-          <div v-if="!detail.comment_shares.length" class="jd-empty-hint">
+          <!-- 三态：拉到之前不能显示"暂无"——那会让人以为这片没人贴过链接，
+               而其实只是还没去抓（评论抓取有 45 秒预算，是后台在跑）。 -->
+          <div v-if="!sharesLoaded" class="jd-empty-hint">
+            <i class="fas fa-spinner fa-spin" /> 正在获取评论区的分享…（需要先抓一遍评论）
+          </div>
+          <div v-else-if="!detail.comment_shares.length" class="jd-empty-hint">
             评论区暂无用户分享的磁链 / ED2K 链接。
           </div>
           <template v-else>

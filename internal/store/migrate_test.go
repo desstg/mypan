@@ -192,8 +192,10 @@ func newTestDB(t *testing.T) *DB {
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
+	// 只删「数据迁移」的版本号（它们幂等，重跑安全）；DDL 那几条（如 0040 的
+	// ALTER TABLE ADD COLUMN）**不能**删 —— 重跑会报 duplicate column name。
 	if _, err := db.write.ExecContext(context.Background(),
-		`DELETE FROM schema_migrations WHERE version IN (36, 37, 38, 39)`); err != nil {
+		`DELETE FROM schema_migrations WHERE version IN (36, 37, 38, 39, 41)`); err != nil {
 		t.Fatalf("reset migrations: %v", err)
 	}
 	return db
@@ -403,4 +405,352 @@ func TestMigrationAddsMoreChineseBrands(t *testing.T) {
 			t.Errorf("锚点对不上就不该动：\n前 %s\n后 %s", before, after)
 		}
 	})
+}
+
+// TestMigrationBackfillsJavMovieText 0041：把「列空、raw_json 里却有值」的
+// summary / review 补回来。
+//
+// 这道迁移有个必须写对的细节：真库里有一批行的 raw_json 是空串或半截 JSON
+// （实测 6670 行），**不判 json_valid 直接 json_extract 会让整条语句报
+// "malformed JSON" 而一条都不更新** —— 静默失效，正是这一族坑的老面孔。
+func TestMigrationBackfillsJavMovieText(t *testing.T) {
+	seed := func(t *testing.T) *DB {
+		t.Helper()
+		db := newTestDB(t)
+		rows := []struct{ id, number, raw string }{
+			// 列空、raw 里有 → 应当被补
+			{"m1", "NIMA-086", `{"id":"m1","summary":"剧情一","review":"简评一"}`},
+			// 列已有值 → 不动（别把用户/详情抓来的覆盖掉）
+			{"m2", "SSIS-444", `{"id":"m2","summary":"剧情二","review":"简评二"}`},
+			// raw 里也是空值 → 不动
+			{"m3", "MD0313", `{"id":"m3","summary":"","review":""}`},
+			// raw 压根不是合法 JSON → **不能**让整条语句炸掉
+			{"m4", "BAD-001", ``},
+			{"m5", "BAD-002", `{"id":"m5"`},
+		}
+		for _, r := range rows {
+			if _, err := db.write.ExecContext(context.Background(),
+				`INSERT INTO jav_movies(id, number, title, summary, review, raw_json) VALUES (?,?,?,?,?,?)`,
+				r.id, r.number, r.number, "", "", r.raw); err != nil {
+				t.Fatalf("seed %s: %v", r.id, err)
+			}
+		}
+		if _, err := db.write.ExecContext(context.Background(),
+			`UPDATE jav_movies SET summary='已有剧情' WHERE id='m2'`); err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	summaryOf := func(t *testing.T, db *DB, id string) string {
+		t.Helper()
+		var s string
+		if err := db.read.QueryRowContext(context.Background(),
+			`SELECT summary FROM jav_movies WHERE id=?`, id).Scan(&s); err != nil {
+			t.Fatalf("读 %s: %v", id, err)
+		}
+		return s
+	}
+
+	t.Run("补回来且不误伤", func(t *testing.T) {
+		db := seed(t)
+		if err := db.Migrate(context.Background()); err != nil {
+			t.Fatalf("Migrate: %v", err)
+		}
+		if got := summaryOf(t, db, "m1"); got != "剧情一" {
+			t.Errorf("m1 的简介应当被补回来，got %q", got)
+		}
+		if got := summaryOf(t, db, "m2"); got != "已有剧情" {
+			t.Errorf("m2 已有值，不该被覆盖，got %q", got)
+		}
+		if got := summaryOf(t, db, "m3"); got != "" {
+			t.Errorf("m3 的 raw_json 里也是空值，不该凭空填东西，got %q", got)
+		}
+	})
+
+	t.Run("幂等", func(t *testing.T) {
+		db := seed(t)
+		if err := db.Migrate(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		first := summaryOf(t, db, "m1")
+		// 再跑一次：迁移框架按版本号跳过，值不该变
+		if err := db.Migrate(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := summaryOf(t, db, "m1"); got != first {
+			t.Errorf("第二次跑把值改动了：%q → %q", first, got)
+		}
+	})
+}
+
+// TestMigrationAddsSummarySource 0042：给 jav_movies 加 summary_source 列。
+//
+// 这一列本身不改任何数据，所以用例只钉两件事：列真的存在（老库升级后能插能读）、
+// 以及默认值是空串（不是 NULL —— 代码里到处拿它跟 ” 比）。
+func TestMigrationAddsSummarySource(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if _, err := db.write.ExecContext(context.Background(),
+		`INSERT INTO jav_movies(id, number, title) VALUES ('m1','X-1','标题')`); err != nil {
+		t.Fatalf("插入（说明列缺失）: %v", err)
+	}
+	var src string
+	if err := db.read.QueryRowContext(context.Background(),
+		`SELECT summary_source FROM jav_movies WHERE id='m1'`).Scan(&src); err != nil {
+		t.Fatalf("读取 summary_source: %v", err)
+	}
+	if src != "" {
+		t.Errorf("默认值应当是空串，got %q", src)
+	}
+	// 写进去再读回来
+	if _, err := db.write.ExecContext(context.Background(),
+		`UPDATE jav_movies SET summary='剧情', summary_source='jav321' WHERE id='m1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.read.QueryRowContext(context.Background(),
+		`SELECT summary_source FROM jav_movies WHERE id='m1'`).Scan(&src); err != nil {
+		t.Fatal(err)
+	}
+	if src != "jav321" {
+		t.Errorf("回读 = %q", src)
+	}
+}
+
+// TestMigrationAddsEnrichedAt 0043：加 enriched_at（一轮补全的记账）。
+func TestMigrationAddsEnrichedAt(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if _, err := db.write.ExecContext(context.Background(),
+		`INSERT INTO jav_movies(id, number, title, summary, director_name, duration, release_date)
+		 VALUES ('e1','X-1','有简介有导演','剧情','导演',120,'2026-01-01'),
+		        ('e2','X-2','什么都没有','','',0,'')`); err != nil {
+		t.Fatalf("插入: %v", err)
+	}
+	// 新行默认未补全
+	rows, err := db.read.QueryContext(context.Background(),
+		`SELECT id FROM jav_movies WHERE enriched_at IS NULL ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		_ = rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	if len(ids) != 2 {
+		t.Errorf("两行都该是「未补全」，got %v", ids)
+	}
+	// 标记之后就不再是待补
+	if _, err := db.write.ExecContext(context.Background(),
+		`UPDATE jav_movies SET enriched_at=CURRENT_TIMESTAMP WHERE id='e1'`); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.read.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM jav_movies WHERE enriched_at IS NULL`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("标记之后待补数 = %d，期望 1", n)
+	}
+}
+
+// TestMigrationAddsSummaryAttemptsAndResets 0044：加 summary_attempts，
+// 并把「问过但什么都没补到」的记账清掉（让加了新源之后还能重问一遍）。
+//
+// 这条迁移**同时是 DDL 与数据迁移**：所以只删版本号不够（ALTER 不能重跑），
+// 这里改成「手动把列建出来 + 手动跑那条 UPDATE」，验的是 SQL 的**语义**而不是
+// 迁移框架有没有调用它（框架那部分由 Migrate 自己保证）。
+func TestMigrationAddsSummaryAttemptsAndResets(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	// 列存在（空表时查这个列会得到 0 行而不是报错，报错即「列不存在」）
+	var hasCol int
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('jav_movies') WHERE name='summary_attempts'`).Scan(&hasCol); err != nil {
+		t.Fatalf("查列失败: %v", err)
+	}
+	if hasCol != 1 {
+		t.Fatal("summary_attempts 列没有加上")
+	}
+
+	if _, err := db.write.ExecContext(ctx,
+		`INSERT INTO jav_movies(id, number, title, summary, summary_source, enriched_at, summary_attempts)
+		 VALUES ('r1','X-1','问过没结果','','',CURRENT_TIMESTAMP,2),
+		        ('r2','X-2','已补到简介','有剧情','airav',CURRENT_TIMESTAMP,0),
+		        ('r3','X-3','从没问过','','',NULL,0)`); err != nil {
+		t.Fatalf("插入: %v", err)
+	}
+	// 迁移里的那条 UPDATE（原样抄一份，验语义）
+	if _, err := db.write.ExecContext(ctx, `
+UPDATE jav_movies
+   SET enriched_at = NULL, summary_source = '', summary_attempts = 0, updated_at = CURRENT_TIMESTAMP
+ WHERE enriched_at IS NOT NULL
+   AND (summary IS NULL OR summary = '')
+   AND (summary_source IS NULL OR summary_source = '')`); err != nil {
+		t.Fatalf("重置: %v", err)
+	}
+
+	var attempts int
+	var enrichedNull bool
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT summary_attempts, enriched_at IS NULL FROM jav_movies WHERE id='r1'`).
+		Scan(&attempts, &enrichedNull); err != nil {
+		t.Fatal(err)
+	}
+	if !enrichedNull || attempts != 0 {
+		t.Errorf("「问过没结果」那行应当被重置（enriched_at=NULL、attempts=0），got null=%v attempts=%d", enrichedNull, attempts)
+	}
+	// **已补到的那行不许被碰**（它是这条 SQL 存在的理由：别把好数据一起冲掉）
+	var src string
+	var stillEnriched bool
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT summary_source, enriched_at IS NOT NULL FROM jav_movies WHERE id='r2'`).
+		Scan(&src, &stillEnriched); err != nil {
+		t.Fatal(err)
+	}
+	if src != "airav" || !stillEnriched {
+		t.Errorf("已补到的那行不该被重置：source=%q enriched=%v", src, stillEnriched)
+	}
+	// 从没问过的也不动
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT enriched_at IS NULL FROM jav_movies WHERE id='r3'`).Scan(&enrichedNull); err != nil {
+		t.Fatal(err)
+	}
+	if !enrichedNull {
+		t.Error("从没问过的那行本来就该是 NULL，不该被这条 SQL 影响")
+	}
+}
+
+// TestMigrationAddsTitleZH 0045：加中文标题两列（title_zh / title_zh_source）。
+//
+// 这两列是给「以后生成 nfo 时直接取中文标题」用的：JAVDB 给的大面积是日文标题
+// （实测真库 8650 部里 6356 部含假名），中文标题只能从别站补，所以单独存一列、
+// **不覆盖 title**。默认空串（= 没补到），与 summary_source 同一套规矩。
+func TestMigrationAddsTitleZH(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	for _, col := range []string{"title_zh", "title_zh_source"} {
+		var n int
+		if err := db.read.QueryRowContext(ctx,
+			`SELECT count(*) FROM pragma_table_info('jav_movies') WHERE name=?`, col).Scan(&n); err != nil {
+			t.Fatalf("查列失败: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("%s 列没有加上", col)
+		}
+	}
+	// 默认空串（不是 NULL）：空串 = 「没补到」，读侧据此判要不要去补
+	if _, err := db.write.ExecContext(ctx,
+		`INSERT INTO jav_movies(id, number, title) VALUES ('z1','X-1','日文标题')`); err != nil {
+		t.Fatal(err)
+	}
+	var zh, src string
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT title_zh, title_zh_source FROM jav_movies WHERE id='z1'`).Scan(&zh, &src); err != nil {
+		t.Fatal(err)
+	}
+	if zh != "" || src != "" {
+		t.Errorf("新行两列都该是空串，got %q / %q", zh, src)
+	}
+}
+
+// TestMigrationClearsTitleAsSummary 0046：把被 airav 的「标题」冒充过的简介清掉。
+//
+// 这条迁移来自一次真实的错：airav 给的是一行中文标题（14~32 字），我把它当简介
+// 写进了 summary，而它排在简介链第一位 → 「首个非空胜」把 missav 那段 136 字的
+// 真简介挡掉了。代码侧已改（airav 撤出简介链），这条清的是库里已写进去的那批。
+//
+// 两个判据：来源是 airav（目标明确），或简介短得明显不像简介（兜底）。
+// 阈值 40 是按真库量的：正经简介最短 60 字，airav 那批最长 32 字，中间有安全距离。
+func TestMigrationClearsTitleAsSummary(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if _, err := db.write.ExecContext(ctx,
+		`INSERT INTO jav_movies(id, number, title, summary, summary_source, enriched_at)
+		 VALUES ('s1','X-1','被标题冒充','多层次传销之女：case69','airav',CURRENT_TIMESTAMP),
+		        ('s2','X-2','短得可疑','一段很短的东西','jav321',CURRENT_TIMESTAMP),
+		        ('s3','X-3','正经简介','这是一段足够长的正经剧情简介，来自 jav321，长度远超四十个字符，绝不该被清掉。','jav321',CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatalf("插入: %v", err)
+	}
+	if _, err := db.write.ExecContext(ctx, `
+UPDATE jav_movies
+   SET summary='', summary_source='', enriched_at=NULL, summary_attempts=0, updated_at=CURRENT_TIMESTAMP
+ WHERE (summary_source='airav' OR (summary <> '' AND length(summary) < 40))
+   AND summary IS NOT NULL`); err != nil {
+		t.Fatalf("清理: %v", err)
+	}
+
+	check := func(id string, wantEmpty bool) {
+		t.Helper()
+		var summary string
+		var enrichedNull bool
+		if err := db.read.QueryRowContext(ctx,
+			`SELECT summary, enriched_at IS NULL FROM jav_movies WHERE id=?`, id).Scan(&summary, &enrichedNull); err != nil {
+			t.Fatal(err)
+		}
+		if wantEmpty && (summary != "" || !enrichedNull) {
+			t.Errorf("%s 应当被清掉（并重新变成待补），got summary=%q null=%v", id, summary, enrichedNull)
+		}
+		if !wantEmpty && (summary == "" || enrichedNull) {
+			t.Errorf("%s **不该**被碰，got summary=%q null=%v", id, summary, enrichedNull)
+		}
+	}
+	check("s1", true)  // 来源是 airav
+	check("s2", true)  // 兜底：短得不像简介
+	check("s3", false) // 正经简介：一个字都不能动
+}
+
+// TestMigrationAddsMagnetSweeps 0047：磁链的「问过没有」台账。
+//
+// 与 0030 的 jav_review_sweeps 同一个理由：**「这部确实没有磁链」与「还没问过」
+// 在库里长得一模一样**（jav_magnets 里都是零行）。不记一笔，那 6454 部没磁链的片
+// 每天都会被重新问一遍。
+func TestMigrationAddsMagnetSweeps(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	var n int
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='jav_magnet_sweeps'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("jav_magnet_sweeps 表没有建出来")
+	}
+	// 幂等：同一部重复记账只刷新时间，不报错、不重复行
+	if _, err := db.write.ExecContext(ctx,
+		`INSERT INTO jav_magnet_sweeps(movie_id) VALUES ('m1')
+		 ON CONFLICT(movie_id) DO UPDATE SET checked_at=CURRENT_TIMESTAMP`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.write.ExecContext(ctx,
+		`INSERT INTO jav_magnet_sweeps(movie_id) VALUES ('m1')
+		 ON CONFLICT(movie_id) DO UPDATE SET checked_at=CURRENT_TIMESTAMP`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT count(*) FROM jav_magnet_sweeps WHERE movie_id='m1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("重复记账应当只有一行，got %d", n)
+	}
 }

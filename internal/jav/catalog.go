@@ -390,12 +390,15 @@ func (s *Service) domainMovie(n javdb.NormalizedMovie, rawJSON string) *domain.J
 		Number:           n.Number,
 		Title:            n.Title,
 		OriginTitle:      n.OriginTitle,
+		TitleZH:          n.TitleZH,
+		TitleZHSource:    n.TitleZHSource,
 		CoverURL:         n.CoverURL,
 		ThumbURL:         n.ThumbURL,
 		Duration:         n.Duration,
 		ReleaseDate:      n.ReleaseDate,
 		Score:            n.Score,
 		Summary:          n.Summary,
+		SummarySource:    strings.TrimSpace(n.SummarySource),
 		Review:           n.Review,
 		DirectorID:       n.DirectorID,
 		DirectorName:     n.DirectorName,
@@ -595,9 +598,14 @@ func (s *Service) rankCards(ctx context.Context, movies []javdb.Movie) []MovieCa
 
 // ————————————————————— 详情 —————————————————————
 
-// Detail 取影片详情。
+// Detail 取影片详情（**可能打上游**）。
 //
 // refresh=true 时强制重新抓上游；否则本地有完整记录就直接用。
+//
+// ⚠️ 2026-09-28 起，**详情页不再走这条路** —— 它要「立刻显示本地已有的」，
+// 而这里的 needFetch 会让绝大多数点开都同步等好几秒（真库 8760 部里 6842 部
+// raw_json 是空的）。详情页走 DetailLocal()，上游补缺交给后台（见 hydrate.go）。
+// 这条路保留给「重新获取」那种**用户明确要等**的场景。
 func (s *Service) Detail(ctx context.Context, id string, refresh bool) (*MovieDetail, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -605,8 +613,10 @@ func (s *Service) Detail(ctx context.Context, id string, refresh bool) (*MovieDe
 	}
 
 	movie, err := s.movies.Get(ctx, id)
-	needFetch := refresh || err != nil || strings.TrimSpace(movie.RawJSON) == "" ||
-		!rawHasRelativeMovies(movie.RawJSON)
+	// ⚠️ 2026-09-28 去掉了 `!rawHasRelativeMovies(...)` 那一条：它当初是给旧数据
+	// 补 `relative_movies` 字段用的，实测真库只剩 5 部落在这条上，使命已经完成。
+	// 留着它的代价是「本地明明有数据、还是要跑一趟上游」。
+	needFetch := refresh || err != nil || strings.TrimSpace(movie.RawJSON) == ""
 	if needFetch {
 		fetched, ferr := s.IngestMovie(ctx, id)
 		if ferr != nil {
@@ -622,6 +632,28 @@ func (s *Service) Detail(ctx context.Context, id string, refresh bool) (*MovieDe
 	}
 
 	return s.buildDetail(ctx, movie, refresh)
+}
+
+// DetailLocal 取影片详情，**只读本地，绝不碰上游**。
+//
+// 详情页首屏用它：查库 + 组装，毫秒级返回。缺的字段（简介 / 中文标题 /
+// 关联影片）就是空 —— 那正是首屏要的，补缺交给后台（见 Service.Hydrate）。
+//
+// 与 Detail 的三点差别，都是「不碰上游」的直接推论：
+//   - 不调 IngestMovie（那是几秒的活）；
+//   - 磁链只读本地（本地 0 颗就返回空，**不回落去抓**）—— 详情页那头两块
+//     改由各自的惰性端点拉（/magnets、/reviews）；
+//   - 评论只读本地（不调 ensureReviews，那有 45 秒预算）。
+func (s *Service) DetailLocal(ctx context.Context, id string) (*MovieDetail, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, domain.Errorf(domain.CodeValidation, "影片 id 为空")
+	}
+	movie, err := s.movies.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.buildDetailLocal(ctx, movie)
 }
 
 // FreshPreviewVideoURL 现取一份**新鲜**的预览片播放地址。
@@ -679,6 +711,14 @@ func (s *Service) IngestMovie(ctx context.Context, id string) (*domain.JavMovie,
 	n := javdb.NormalizeMovie(raw)
 	if n.ID == "" {
 		return nil, domain.Errorf(domain.CodeNotFound, "上游没有返回这部影片")
+	}
+	// JAVDB 大面积不给简介（实测用户库 8574 部里只有 435 部有），去别的站补一段。
+	// 只在这条路上补：详情页、搜索、订阅检查**全都走 IngestMovie**，一处覆盖全部。
+	s.fillMissingFields(ctx, &n)
+	if strings.TrimSpace(n.SummarySource) != "" {
+		// 补到了（来源非空才推）：本地那份 json 也得有，否则 nfo 里还是空
+		// （nfo 读的是本地 json，不是库）。写失败只记 warn，不影响入库。
+		s.pushSummaryToSidecar(n.Number, n.Summary)
 	}
 
 	// raw_json 存原始响应：上游字段随时会变，全量留一份保证「当时收到了什么」
@@ -772,7 +812,28 @@ func normalizeNumber(v string) string {
 //
 // refresh 会传给评论区那一档（强制重抓评论）；关联清单每次都现场拉，
 // 与源码一样不缓存。
+// buildDetailLocal 是 buildDetail 的「只读本地」版本：磁链与评论不回落到上游。
+func (s *Service) buildDetailLocal(ctx context.Context, m *domain.JavMovie) (*MovieDetail, error) {
+	return s.assembleDetail(ctx, m, detailOptions{})
+}
+
 func (s *Service) buildDetail(ctx context.Context, m *domain.JavMovie, refresh bool) (*MovieDetail, error) {
+	return s.assembleDetail(ctx, m, detailOptions{upstream: true, refresh: refresh})
+}
+
+// detailOptions 决定组装详情时碰不碰上游。
+//
+// 分成两个开关而不是一个：磁链与评论是**两条独立的上游通道**（各自有惰性端点），
+// 以后想只放开其中一条不必再改签名。
+type detailOptions struct {
+	// upstream 为假 = **一个上游都不碰**（详情页首屏走这条，见 DetailLocal）。
+	upstream bool
+	// refresh 只在 upstream 为真时有意义（强刷评论）。
+	refresh bool
+}
+
+// assembleDetail 组装详情。
+func (s *Service) assembleDetail(ctx context.Context, m *domain.JavMovie, opt detailOptions) (*MovieDetail, error) {
 	inLibrary, _ := s.libraryCodes(ctx)
 	_, hit := inLibrary[m.Number]
 
@@ -792,19 +853,42 @@ func (s *Service) buildDetail(ctx context.Context, m *domain.JavMovie, refresh b
 	//
 	// 单独点「刷新磁链」时（/movies/{id}/magnets）错误照常抛出 ——
 	// 那是用户明确要求的一件事，失败了必须告诉他。
-	magnets, err := s.Magnets(ctx, m.ID, false)
-	if err != nil {
-		s.logWarn("jav magnets unavailable for detail", "id", m.ID, "err", err)
-		magnets = []MagnetView{}
+	var magnets []MagnetView
+	if opt.upstream {
+		var merr error
+		magnets, merr = s.Magnets(ctx, m.ID, false)
+		if merr != nil {
+			s.logWarn("jav magnets unavailable for detail", "id", m.ID, "err", merr)
+			magnets = []MagnetView{}
+		}
+	} else {
+		// 只读本地：本地一颗都没有就返回空，**不去抓**（那要打两个境外站）。
+		stored, merr := s.magnets.ListByMovie(ctx, m.ID)
+		if merr != nil {
+			s.logWarn("jav local magnets unavailable for detail", "id", m.ID, "err", merr)
+		}
+		magnets = localMagnetViews(ctx, s, stored)
 	}
 
 	// 评论区分享：顺带把评论抓齐（本地一条都没有时才真去上游，见 ensureReviews）。
 	// 放在详情里一起返回而不是单开一个惰性端点 —— 表头上的「分享 N / 评论 N」
 	// 要在抽屉打开的那一刻就是准的，惰性加载做不到（数字会先显示 0 再跳）。
-	shares, err := s.CommentShares(ctx, m.ID, refresh)
-	if err != nil {
-		s.logWarn("jav comment shares unavailable for detail", "id", m.ID, "err", err)
-		shares = []CommentShareView{}
+	var shares []CommentShareView
+	if opt.upstream {
+		var serr error
+		shares, serr = s.CommentShares(ctx, m.ID, opt.refresh)
+		if serr != nil {
+			s.logWarn("jav comment shares unavailable for detail", "id", m.ID, "err", serr)
+			shares = []CommentShareView{}
+		}
+	} else {
+		// 只读本地：不调 ensureReviews（那有 45 秒预算）。分享档改由
+		// /movies/{id}/reviews 那条惰性路拉（它自己会补评论，见 catalog.go 的 CommentShares）。
+		local, serr := s.commentSharesLocal(ctx, m.ID)
+		if serr != nil {
+			s.logWarn("jav local comment shares unavailable for detail", "id", m.ID, "err", serr)
+		}
+		shares = local
 	}
 	commentsCount := 0
 	if _, total, err := s.reviews.ListByMovie(ctx, m.ID, 1, 0); err == nil {
@@ -909,6 +993,39 @@ func (s *Service) Magnets(ctx context.Context, movieID string, refresh bool) ([]
 		views = append(views, toMagnetView(m, push[magnetPushKey(m.Btih, m.Magnet, m.Name)]))
 	}
 	return views, nil
+}
+
+// localMagnetViews 把本地已存的磁链转成视图（**不碰上游**），供详情首屏用。
+//
+// 与 Magnets 尾部那段是同一套：排序键要 quality.RankKey、角标要上游的 HasHD/HasSub，
+// 所以不能只靠 toMagnetView 拼。抽出来是为了两处不会各写一套。
+func localMagnetViews(ctx context.Context, s *Service, stored []*domain.JavMagnet) []MagnetView {
+	if len(stored) == 0 {
+		return []MagnetView{}
+	}
+	var code string
+	if mv, err := s.movies.Get(ctx, stored[0].MovieID); err == nil && mv != nil {
+		code = mv.Number
+	}
+	push := s.magnetPushStates(ctx, code)
+	sortMagnets(stored)
+	views := make([]MagnetView, 0, len(stored))
+	for _, m := range stored {
+		views = append(views, toMagnetView(m, push[magnetPushKey(m.Btih, m.Magnet, m.Name)]))
+	}
+	return views
+}
+
+// MagnetsLocal 只读本地磁链（**绝不碰上游**）。
+//
+// 给「磁力链接」那一档用：它要立刻返回（本地有就显示、没有就转圈等后台），
+// 而完整版 Magnets 在本地为空时会同步去 JAVDB + JAVBUS 抓，那两个站很慢。
+func (s *Service) MagnetsLocal(ctx context.Context, movieID string) ([]MagnetView, error) {
+	stored, err := s.magnets.ListByMovie(ctx, movieID)
+	if err != nil {
+		return nil, err
+	}
+	return localMagnetViews(ctx, s, stored), nil
 }
 
 // magnetPushStates 取出某个番号下**哪几颗磁链推送过**，按资源指纹索引。
@@ -1075,16 +1192,31 @@ func (s *Service) ingestMagnets(ctx context.Context, movie *domain.JavMovie) err
 
 	switch {
 	case saved > 0:
+		// 问过上游、也拿到了东西 —— 记账，后台那条扫磁链的循环才不会再来问一遍。
+		s.markMagnetSwept(ctx, movie.ID)
 		return nil
 	case fetched > 0:
 		// 抓到了但一颗都没写进去 —— 这是真的出问题了（数据库层），要说出来。
 		return domain.Errorf(domain.CodeDriverError, "磁链全部入库失败")
 	case lastErr != nil:
+		// 有来源连不上：**不记账**，下一轮还会来问（与评论那本账同一条规矩 ——
+		// 失败多半是限流，记了就真的再也不问了）。
 		return lastErr
 	default:
-		// 两个来源都正常回了、但都是空。番号可能为空（只有 id 的片子），
-		// 那时用 id 当名字，别给出一句「没有找到  的磁链」。
+		// 两个来源都正常回了、但都是空 —— 「这部确实没有磁链」是**有效结论**，
+		// 要记账，否则那 6454 部没磁链的片每天都会被重新问一遍。
+		s.markMagnetSwept(ctx, movie.ID)
+		// 番号可能为空（只有 id 的片子），那时用 id 当名字，别给出一句
+		// 「没有找到  的磁链」。
 		return domain.Errorf(domain.CodeNotFound, "没有找到 %s 的磁链", orDefault(code, id))
+	}
+}
+
+// markMagnetSwept 记一笔「这部片的磁链问过了」。失败只记 warn ——
+// 记账是优化（省得反复问），不是正确性依赖。
+func (s *Service) markMagnetSwept(ctx context.Context, movieID string) {
+	if err := s.magnets.MarkSwept(ctx, movieID); err != nil {
+		s.logWarn("jav mark magnet swept failed", "id", movieID, "err", err)
 	}
 }
 
@@ -1255,4 +1387,66 @@ func shortErr(err error) string {
 		msg = msg[:80] + "…"
 	}
 	return msg
+}
+
+// SetSummarySidecarSink 注入「把补到的简介写进本地侧车 json」的那个钩子。
+//
+// 为什么要这样一个钩子：补简介发生在 jav 模块（拿到库里的番号 → 去别的站取），
+// 而本地那份 json 在 strm 模块的媒体库目录里 —— 两边互不认识，硬要在 jav 里
+// 知道 strmDir、任务边界、SafeName 那一套只会把职责搅在一起。
+//
+// 不注入时**什么都不做**（补到的简介仍然进库、界面上看得到），与
+// `Options.Folders` 为空时不写侧车同一条取向：缺一个可选件不该让主流程出错。
+func (s *Service) SetSummarySidecarSink(fn SummarySidecarSink) {
+	s.mu.Lock()
+	s.summarySink = fn
+	s.mu.Unlock()
+}
+
+// SummarySidecarSink 把一部片的简介写进它在本地媒体库里那份侧车 json。
+// 返回是否真的改了（没改就不刷 mtime）。
+type SummarySidecarSink func(number, summary string) (bool, error)
+
+// TitleZHSidecarSink 把**中文标题**写进本地那份侧车 json 的 `title`。
+//
+// 与简介那条并行的第二条通道（用户要求：推送时中文标题也要写进 json）。
+// 分开而不是扩展 SummarySidecarSink 的签名：两条路的触发时机、失败容忍、
+// 以及「库里要不要动」都不一样（简介只动 json；中文标题在库里另存 title_zh 一列）。
+type TitleZHSidecarSink func(number, titleZH string) (bool, error)
+
+// SetTitleZHSidecarSink 注入中文标题的侧车通道（与 SetSummarySidecarSink 同一个理由：
+// 媒体库目录在哪只有 strm 那边知道）。
+func (s *Service) SetTitleZHSidecarSink(fn TitleZHSidecarSink) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.titleZHSink = fn
+}
+
+// pushTitleZHToSidecar 把中文标题推给侧车（best-effort，同简介那条）。
+func (s *Service) pushTitleZHToSidecar(number, titleZH string) {
+	if strings.TrimSpace(number) == "" || strings.TrimSpace(titleZH) == "" {
+		return
+	}
+	s.mu.Lock()
+	sink := s.titleZHSink
+	s.mu.Unlock()
+	if sink == nil {
+		return
+	}
+	if _, err := sink(number, titleZH); err != nil {
+		s.logWarn("写本地侧车中文标题失败", "number", number, "err", err)
+	}
+}
+
+// pushSummaryToSidecar 把简介推给侧车（best-effort，失败只记 warn）。
+func (s *Service) pushSummaryToSidecar(number, summary string) {
+	s.mu.Lock()
+	sink := s.summarySink
+	s.mu.Unlock()
+	if sink == nil {
+		return
+	}
+	if _, err := sink(number, summary); err != nil {
+		s.logWarn("写本地侧车简介失败", "number", number, "err", err)
+	}
 }

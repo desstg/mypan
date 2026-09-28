@@ -1,0 +1,265 @@
+package strmscrape
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"litepan/internal/domain"
+	"litepan/internal/jav/emby"
+	"litepan/internal/strm"
+)
+
+// 番号海报墙的**单品**：定位（路径安全）、读（编辑器要的数据）、写（nfo / poster）。
+
+// javMediaKind 与 domain.StrmMediaKindJav 同值；这里再写一次是为了让本包不依赖
+// domain 的那个常量名（拼错的代价由参数校验那条用例兜着）。
+const javMediaKind = "jav"
+
+var (
+	errNotJavTask = domain.Errorf(domain.CodeValidation, "该任务不是番号影片任务，请在海报墙上切换任务")
+	errBadJavPath = domain.Errorf(domain.CodeValidation, "非法路径")
+)
+
+// javTitleEntry 是 nfo 标题的内存缓存条目（键 = nfo 绝对路径）。
+type javTitleEntry struct {
+	mod    time.Time
+	size   int64
+	title  string
+	number string
+}
+
+// javItemRef 是把 (rel_dir, stem) 收敛成的一组绝对路径。
+type javItemRef struct {
+	Task     *domain.StrmTask
+	Root     string
+	AbsDir   string
+	RelDir   string // 规范化后的相对目录（"/" 分隔，可为空）
+	Stem     string // **磁盘上的**原样主干
+	StrmName string // 磁盘上的 .strm 文件名
+	Flat     bool   // 现算，绝不采信客户端
+	Names    emby.Names
+}
+
+// resolveJavItem 定位一部片。三层闸门，缺一不可：
+//
+//  1. relDir / stem 不接受绝对路径、分隔符、`..`（stem 允许首尾空格 —— 生成器的
+//     SafeStem 刻意保留它）；
+//  2. `isInside(root, absDir)` —— 与 ResolvePosterFile 同一条判据；
+//  3. **锚点**：`<absDir>/<主干>.strm` 必须真的存在。没有这一条，stem 就是任意文件名；
+//     有了它，能寻址的文件永不出现在「番号生成器会写的那一套」之外。
+//
+// ⚠️ 返回的 Stem 是**磁盘上的那一份**（忽略大小写比对后取磁盘名）：Windows 上
+// `ssis-001` 能配到 `SSIS-001.strm`，照请求写就会多出一个 `ssis-001.nfo`；
+// Linux 部署上那就是两份文件。
+func (s *Service) resolveJavItem(ctx context.Context, taskID int64, relDir, stem string) (javItemRef, error) {
+	var ref javItemRef
+	task, root, err := s.resolveTask(ctx, taskID)
+	if err != nil {
+		return ref, err
+	}
+	if task.MediaKind != javMediaKind {
+		return ref, errNotJavTask
+	}
+	rel := normalizeJavRelDir(relDir)
+	if rel == "" && strings.TrimSpace(relDir) != "" {
+		return ref, errBadJavPath
+	}
+	stem = strings.TrimSpace(stem)
+	if stem == "" || strings.ContainsAny(stem, `/\`) || stem == "." || stem == ".." {
+		return ref, errBadJavPath
+	}
+
+	absDir := root
+	if rel != "" {
+		absDir = filepath.Join(root, filepath.FromSlash(rel))
+	}
+	if !isInside(root, absDir) {
+		return ref, errBadJavPath
+	}
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		return ref, domain.Errorf(domain.CodeNotFound, "目录不存在：%s", rel)
+	}
+
+	// 锚点 + 取磁盘上的真实主干。
+	strmName := ""
+	flat := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".strm") {
+			continue
+		}
+		flat++
+		if strings.EqualFold(strm.MediaStem(e.Name()), stem) {
+			strmName = e.Name()
+		}
+	}
+	if strmName == "" {
+		return ref, domain.Errorf(domain.CodeNotFound, "这一层没有名为 %s 的 .strm", stem)
+	}
+	ref = javItemRef{
+		Task:     task,
+		Root:     root,
+		AbsDir:   absDir,
+		RelDir:   rel,
+		Stem:     strm.MediaStem(strmName),
+		StrmName: strmName,
+		Flat:     flat > 1,
+	}
+	ref.Names = emby.TargetNames(ref.Stem, ref.Flat)
+	return ref, nil
+}
+
+// normalizeJavRelDir 归一化相对目录：统一成 `/`、拒绝 `..` 与绝对路径。
+// 返回空串表示"根目录"；返回空串但原文非空表示非法。
+func normalizeJavRelDir(relDir string) string {
+	rel := strings.TrimSpace(strings.ReplaceAll(relDir, `\`, "/"))
+	rel = strings.Trim(rel, "/")
+	if rel == "" {
+		return ""
+	}
+	if strings.HasPrefix(rel, ":") {
+		return ""
+	}
+	parts := strings.Split(rel, "/")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p == "" || p == "." {
+			continue
+		}
+		if p == ".." {
+			return ""
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, "/")
+}
+
+func joinRel(dir, name string) string {
+	if dir == "" {
+		return name
+	}
+	return dir + "/" + name
+}
+
+// javWallImageURL 拼图片地址（走既有的 /poster 端点：它已经有路径安全与扩展名白名单）。
+//
+// **末尾那个 `&v=<mtime>` 是必须的**：那个响应带 `Cache-Control: private, max-age=3600`，
+// 而保存裁剪**只改内容、不改路径** —— 不换 URL 的话浏览器会一直端出缓存里那张旧图，
+// 用户看到的是「提示保存成功了、图还是旧的」，像极了没生效。实测撞见过。
+func javWallImageURL(taskID int64, relDir, fileName, rev string) string {
+	url := posterURLFromRel(taskID, joinRel(relDir, fileName))
+	if rev == "" {
+		return url
+	}
+	return url + "&v=" + rev
+}
+
+// cachedJavTitle 只在缓存命中且文件没变时返回。
+func (s *Service) cachedJavTitle(absPath string) (javTitleEntry, bool) {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return javTitleEntry{}, false
+	}
+	s.javTitleMu.Lock()
+	defer s.javTitleMu.Unlock()
+	e, ok := s.javTitleCache[absPath]
+	if !ok || !e.mod.Equal(info.ModTime()) || e.size != info.Size() {
+		return javTitleEntry{}, false
+	}
+	return e, true
+}
+
+// javTitleOf 读一份 nfo 的标题与番号（带缓存）。
+func (s *Service) javTitleOf(absPath string) (title, number string) {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return "", ""
+	}
+	s.javTitleMu.Lock()
+	if e, ok := s.javTitleCache[absPath]; ok && e.mod.Equal(info.ModTime()) && e.size == info.Size() {
+		s.javTitleMu.Unlock()
+		return e.title, e.number
+	}
+	s.javTitleMu.Unlock()
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", ""
+	}
+	title, number, err = emby.TitleAndNumber(data)
+	if err != nil {
+		return "", ""
+	}
+	s.javTitleMu.Lock()
+	s.javTitleCache[absPath] = javTitleEntry{mod: info.ModTime(), size: info.Size(), title: title, number: number}
+	s.javTitleMu.Unlock()
+	return title, number
+}
+
+// javTitleLookup 是给列表用的「读标题」函数（带缓存 + 并发）。
+type javTitleLookup func(row javWallRow) (title, number string)
+
+// newJavTitleLookup 返回一个带并发预热的标题读取器：先把这一页要用的都读出来
+// （8 个 worker），再逐行取。冷启动几千份 nfo 时差别明显。
+//
+// nfo 名与生成器同源（`emby.TargetNames`）：**不要**在这里另拼一个名字，
+// 平铺/独占翻转时那会指向一个不存在的文件（卡片上的标题全变成主干）。
+func (s *Service) newJavTitleLookup(rows []javWallRow) javTitleLookup {
+	var (
+		mu     sync.Mutex
+		loaded = map[string][2]string{}
+		wg     sync.WaitGroup
+	)
+	sem := make(chan struct{}, 8)
+	pathOf := func(row javWallRow) string {
+		return filepath.Join(row.absDir, emby.TargetNames(row.item.Stem, row.item.Flat).NFO)
+	}
+	for _, row := range rows {
+		path := pathOf(row)
+		if _, ok := s.cachedJavTitle(path); ok {
+			continue // 缓存里已有，不必占一个 worker
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(p string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			title, number := s.javTitleOf(p)
+			mu.Lock()
+			loaded[p] = [2]string{title, number}
+			mu.Unlock()
+		}(path)
+	}
+	wg.Wait()
+	return func(row javWallRow) (string, string) {
+		path := pathOf(row)
+		mu.Lock()
+		if v, ok := loaded[path]; ok {
+			mu.Unlock()
+			return v[0], v[1]
+		}
+		mu.Unlock()
+		return s.javTitleOf(path)
+	}
+}
+
+// stripJavNumberPrefix 与 emby 的读侧同一套：只剥「番号 + 空格」那个前缀。
+func stripJavNumberPrefix(number, title string) string {
+	number = strings.TrimSpace(number)
+	title = strings.TrimSpace(title)
+	if number == "" {
+		return title
+	}
+	prefix := number + " "
+	if len(title) > len(prefix) && strings.EqualFold(title[:len(prefix)], prefix) {
+		return title[len(prefix):]
+	}
+	return title
+}
+
+func strconvI64(v int64) string { return strconv.FormatInt(v, 10) }

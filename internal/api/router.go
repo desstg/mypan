@@ -425,6 +425,20 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/rescrape", h.rescrapeStrmScrapeItem)
 					r.Post("/mark-normal", h.markStrmScrapeNormal)
 					r.Get("/poster", h.getStrmScrapePoster)
+
+					// 番号影片的海报墙（媒体类型 = 番号影片的任务）。与上面那套共用页面与
+					// 服务，但数据源是本地媒体库目录，不碰 TMDB。
+					r.Get("/jav-wall/items", h.listJavWallItems)
+					r.Post("/jav-wall/refresh", h.refreshJavWall)
+					// 「整档隐藏哪些一级目录」是**全局设置**，但入口在墙上（页头那个「全部目录」
+					// 按钮），所以读写挂在这里；strm_task_id 只决定候选清单按哪个任务扫盘（0 = 不扫）。
+					r.Get("/jav-wall/hidden-dirs", h.listJavWallHiddenDirs)
+					r.Put("/jav-wall/hidden-dirs", h.updateJavWallHiddenDirs)
+					r.Get("/jav-wall/item", h.getJavWallItem)
+					r.Put("/jav-wall/item/meta", h.saveJavWallMeta)
+					r.Post("/jav-wall/item/poster", h.saveJavWallPoster)
+					r.Post("/jav-wall/item/rebuild", h.rebuildJavWallItem)
+					r.Post("/jav-wall/item/refresh", h.refreshJavWallItem)
 				})
 				r.Route("/automation", func(r chi.Router) {
 					r.Get("/rules", h.listAutomationRules)

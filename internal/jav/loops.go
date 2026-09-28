@@ -2,10 +2,14 @@ package jav
 
 import (
 	"context"
+	"errors"
 	"math/rand"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"litepan/internal/jav/synopsis"
 
 	"litepan/internal/domain"
 	"litepan/internal/jav/cronspec"
@@ -38,9 +42,17 @@ const (
 	// reviewSweepBatch 是一批铺几部。一批大约十几秒（走 500ms 限流），
 	// 批是连续跑的 —— 反正每个请求之间已经被限流拉开了。
 	reviewSweepBatch = 20
+
+	// 「给影库里没磁链的片补磁链」那一轮的节奏（见 magnetSweepLoop）。
+	//
+	// 与铺评论同一套规矩（一天一轮、只在空闲时跑、用户一活跃就收手），
+	// 只把批调小：磁链要打**两个**境外站（JAVDB + JAVBUS），一批比评论贵。
+	magnetSweepBatch = 10
+	// magnetSweepInterval 是两条循环之间的错开量，见 magnetSweepOffset。
+	magnetSweepOffset = 3 * time.Hour
 )
 
-// startLoops 启动三个后台循环。
+// startLoops 启动后台循环。
 func (s *Service) startLoops(ctx context.Context) {
 	if s.settings == nil {
 		return
@@ -50,6 +62,118 @@ func (s *Service) startLoops(ctx context.Context) {
 	go s.subscriptionLoop(ctx, gate)
 	go s.attemptSweeperLoop(ctx, gate)
 	go s.reviewSweepLoop(ctx, gate)
+	go s.summaryBackfillLoop(ctx, gate)
+	// 详情页点开就调 Hydrate 把这部排进来，消费者是这一个 goroutine（见 hydrate.go）。
+	go s.hydrateLoop(ctx)
+	// 给影库里**没有磁链**的片后台补磁链（见 magnetSweepLoop）。
+	go s.magnetSweepLoop(ctx, gate)
+}
+
+// magnetSweepLoop 给影库里**一颗磁链都没有**的片去上游问一遍，**一天一轮、只在空闲时跑**。
+//
+// 为什么要它：详情页现在「先显示本地、缺的后台补」，而磁链那档在本地为空时
+// 只能排一件活去抓 —— 打开的每一部都要等一趟上游。实测真库 8770 部里
+// **6454 部没有磁链**，等用户一部部点开太慢；这里提前把它铺上，点开时本地就有。
+//
+// 四条规矩（前三条与 reviewSweepLoop 逐字同源，那一套是被真实使用打磨过的）：
+//
+//  1. **一天最多开始一轮**（下面那个 24 小时判断）；
+//  2. **只在空闲时跑**：上游 30 秒内被请求过就整轮跳过；跑的中途用户来了立刻收手；
+//  3. **把结论记进台账**（jav_magnet_sweeps）—— **「这部确实没有磁链」也是结论**，
+//     不记的话那 6454 部每天都会被重新问一遍；失败/连不上**不记**，下一轮还会来；
+//  4. **与铺评论错开**（magnetSweepOffset）：两条循环都一天一轮、都抢同一条上游
+//     限流通道，同时开工只会互相拖慢。隔几小时再跑，各自都能跑满。
+//
+// **只补空的**：候选条件是「磁链表里零行」，本地已经有磁链的一律不碰
+// （用户明确要求：不为空的不抓）。
+func (s *Service) magnetSweepLoop(ctx context.Context, gate <-chan struct{}) {
+	if !startupwait.Ready(ctx, gate) {
+		return
+	}
+	if !startupwait.Delay(ctx, startupDelayAfterAuth) {
+		return
+	}
+
+	// ⚠️ 两条循环都是「启动后第一个 tick 就开工」，不刻意错开的话会**同时**开跑，
+	// 一起抢同一条上游限流通道，谁都跑不快（见常量里那段）。
+	// 所以第一轮**额外等 magnetSweepOffset** 才开始，之后照 24 小时一轮。
+	started := time.Now()
+	var lastRun time.Time
+	ticker := time.NewTicker(reviewSweepTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		if !s.Enabled() {
+			continue
+		}
+		if lastRun.IsZero() {
+			if time.Since(started) < magnetSweepOffset {
+				continue // 第一轮等到错开窗口之后再开
+			}
+		} else if time.Since(lastRun) < reviewSweepInterval {
+			continue
+		}
+		client, err := s.javdbClient()
+		if err != nil {
+			continue
+		}
+		if time.Since(client.LastUsedAt()) < reviewSweepIdle {
+			continue
+		}
+		lastRun = time.Now()
+
+		var mine time.Time
+		total := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			ids, err := s.magnets.PendingSweepMovieIDs(ctx, magnetSweepBatch)
+			if err != nil {
+				s.logWarn("jav pending magnet sweep failed", "err", err)
+				break
+			}
+			if len(ids) == 0 {
+				break // 铺完了
+			}
+			for _, id := range ids {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				if used := client.LastUsedAt(); used.After(mine) && time.Since(used) < reviewSweepIdle {
+					s.logInfo("jav magnet sweep paused (user active)", "done", total)
+					return
+				}
+				// Magnets 内部「本地一颗都没有才去上游抓」，而候选本来就是零行的，
+				// 所以这里一定会真的问一趟；问完记账走 ingestMagnets 那条路。
+				if _, err := s.Magnets(ctx, id, false); err != nil {
+					var ae *domain.AppError
+					if errors.As(err, &ae) && ae.Code == domain.CodeNotFound {
+						// 上游说「这部没有磁链」—— 正常结论，记账走过了，不是失败。
+						total++
+						mine = client.LastUsedAt()
+						continue
+					}
+					s.logWarn("jav magnet sweep failed", "id", id, "err", err)
+				} else {
+					total++
+				}
+				mine = client.LastUsedAt()
+			}
+		}
+		if total > 0 {
+			s.logInfo("jav magnet sweep done", "movies", total)
+		}
+	}
 }
 
 // ————————————————————— 评论铺底 —————————————————————
@@ -350,6 +474,9 @@ func (s *Service) pushAllSubscriptions(ctx context.Context) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var pushed, skipped, failed int
+	// failedSubs 是**真失败**的那几条（订阅名 + 原因），给通知正文用。
+	// 只留前几条：通知是要一眼扫完的，十几条堆进去等于没写。
+	var failedSubs []string
 
 	for _, sub := range subs {
 		if ctx.Err() != nil {
@@ -362,15 +489,23 @@ func (s *Service) pushAllSubscriptions(ctx context.Context) {
 			defer func() { <-sem }()
 
 			// 一轮里连着推 batch 部（提交之间自带随机停顿，见 pushBatch）。
-			n, msg := s.pushBatch(ctx, sub, batch)
+			out := s.pushBatch(ctx, sub, batch)
 			mu.Lock()
 			defer mu.Unlock()
-			pushed += n
-			if n == 0 {
+			pushed += out.Pushed
+			// 三种结论分开数（判断顺序不能反）：**有真失败就按失败算**，
+			// 哪怕这一轮也推出去过几部；都没推出去且没失败才是「无事可做」。
+			// 这三者的区别就是通知里那行字的区别，混了用户就得去猜。
+			switch {
+			case out.Failed:
+				failed++
+				failedSubs = append(failedSubs, failedNote(sub, out.Reason))
+			case out.Pushed == 0:
 				skipped++
-				if msg != "" {
-					s.logInfo("jav auto push skipped", "sub", sub.ID, "reason", msg)
-				}
+			}
+			if out.Reason != "" {
+				s.logInfo("jav auto push skipped", "sub", sub.ID, "reason", out.Reason,
+					"pushed", out.Pushed, "idle", !out.Failed && out.Pushed == 0, "failed", out.Failed)
 			}
 		}(sub)
 
@@ -389,7 +524,23 @@ func (s *Service) pushAllSubscriptions(ctx context.Context) {
 	}
 	s.logInfo("jav scheduled push done", "pushed", pushed, "skipped", skipped, "failed", failed)
 	// 无人值守的一轮，结果要发到通知中心 —— 界面上没人盯着它跑完。
-	s.notifyScheduledPush(started, pushed, skipped)
+	s.notifyScheduledPush(started, pushed, skipped, failed, failedSubs)
+}
+
+// failedNote 把一条失败的订阅写成通知正文里的一行（太长就截断）。
+func failedNote(sub *domain.JavSubscription, reason string) string {
+	name := strings.TrimSpace(sub.TargetName)
+	if name == "" {
+		name = "订阅 #" + strconv.FormatInt(sub.ID, 10)
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "未知原因"
+	}
+	if r := []rune(reason); len(r) > 40 {
+		reason = string(r[:40]) + "…"
+	}
+	return name + "： " + reason
 }
 
 // paceSleep 在两次推送之间睡一段随机时长。
@@ -500,5 +651,264 @@ func (s *Service) markSyncStatus(status, message string) {
 		settings.KeyJavLibrarySyncMessage: message,
 	}); err != nil {
 		s.logWarn("jav mark sync status failed", "err", err)
+	}
+}
+
+// ————————————————————— 剧情简介后台回填 —————————————————————
+
+const (
+	// summaryBackfillInterval 一天一轮：这是个慢慢长起来的后台活，
+	// 而两家源都有反爬（jav321 连打会 301），抢着跑只会两头不讨好。
+	summaryBackfillInterval = 24 * time.Hour
+	// summaryBackfillBatch 每批几部。一部的开销是 1~2 次请求（jav321 是搜索 + 详情），
+	// 加上同站 defaultGap(1.2s)，一批 40 部大概两三分钟 —— 够长但不至于占满一整天的窗口。
+	summaryBackfillBatch = 40
+	// summaryBackfillTick 醒来看看够不够一轮的间隔。与评论铺开同一个节奏。
+	summaryBackfillTick = 10 * time.Minute
+	// summaryBackfillIdle 上游在这个时间内被请求过就不开工（与评论铺开同一条规矩）：
+	// 后台绝不跟用户抢同一条限流通道。
+	summaryBackfillIdle = 30 * time.Second
+)
+
+// summaryBackfillLoop 给影库里**还没有简介**的片去别的站补一段。
+//
+// 为什么需要它：JAVDB 的 summary 大面积是空的（实测用户库 8574 部里只有 435 部有），
+// 而这批片的 nfo 里「剧情简介」就永远空着。`IngestMovie` 里已经挂了一处补缺
+// （以后每次抓详情都会顺手补），但**存量那几千部不会自己再被详情过一次** ——
+// 这个循环专门扫尾巴。
+//
+// 三条规矩照抄评论铺开那一套（那一套是被真实使用打磨过的）：
+//
+//  1. **一天最多开始一轮**；
+//  2. **只在空闲时跑**：上游 30 秒内被请求过就整轮跳过，一轮跑到一半用户来了立刻收手；
+//  3. **成功才记账**：补到了写 `summary_source`，问过但没有也写（空串表示"问过"）——
+//     两者都不会再被挑中。**失败不记账**：失败多半是限流，记了就再也不会试。
+//
+// 与 `javdb.Client.LastUsedAt()` 的关系同评论：那是**共享的**上游节流通道，
+// 这里借它判"现在闲不闲"。
+func (s *Service) summaryBackfillLoop(ctx context.Context, gate <-chan struct{}) {
+	if !startupwait.Ready(ctx, gate) {
+		return
+	}
+	if !startupwait.Delay(ctx, startupDelayAfterAuth) {
+		return
+	}
+
+	var lastRun time.Time
+	ticker := time.NewTicker(summaryBackfillTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		if !s.Enabled() || s.movies == nil {
+			continue
+		}
+		if !lastRun.IsZero() && time.Since(lastRun) < summaryBackfillInterval {
+			continue
+		}
+		client, err := s.javdbClient()
+		if err != nil {
+			continue
+		}
+		if time.Since(client.LastUsedAt()) < summaryBackfillIdle {
+			continue
+		}
+		if len(s.enrichers()) == 0 {
+			continue
+		}
+		lastRun = time.Now()
+
+		var mine time.Time
+		total, hit := 0, 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			ids, err := s.movies.PendingSummaryMovieIDs(ctx, summaryBackfillBatch)
+			if err != nil {
+				s.logWarn("jav pending summary backfill failed", "err", err)
+				break
+			}
+			if len(ids) == 0 {
+				break // 都问过一遍了
+			}
+			for _, id := range ids {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				// 用户来了立刻收手，这一批剩下的明天再说。
+				if used := client.LastUsedAt(); used.After(mine) && time.Since(used) < summaryBackfillIdle {
+					s.logInfo("jav summary backfill paused (user active)", "done", total)
+					return
+				}
+				found, err := s.backfillSummary(ctx, id)
+				mine = client.LastUsedAt()
+				if err != nil {
+					// 不记账 → 下轮还从它开始。
+					s.logWarn("jav summary backfill failed", "id", id, "err", err)
+					continue
+				}
+				total++
+				if found {
+					hit++
+				}
+			}
+		}
+		if total > 0 {
+			s.logInfo("jav summary backfill done", "checked", total, "filled", hit)
+		}
+	}
+}
+
+// backfillSummary 给一部片补简介。返回是否真的补到了。
+//
+// 番号从**库里那行**取（`number` 字段），不解析标题 —— 影库里 title 可能被用户改过。
+func (s *Service) backfillSummary(ctx context.Context, movieID string) (bool, error) {
+	movie, err := s.movies.Get(ctx, movieID)
+	if err != nil {
+		return false, err
+	}
+	if movie == nil || strings.TrimSpace(movie.Number) == "" {
+		// 连番号都没有，问也没用：记一笔"问过"，免得每轮都挑它出来。
+		_ = s.movies.MarkEnriched(ctx, movieID)
+		return false, nil
+	}
+	linked, lerr := s.movies.ListActors(ctx, movieID)
+	if lerr != nil {
+		return false, lerr
+	}
+	missing := missingForMovie(movie, len(linked) > 0)
+	if !missing.Any() {
+		_ = s.movies.MarkEnriched(ctx, movieID)
+		return false, nil
+	}
+	patch, err := synopsis.Enrich(ctx, movie.Number, missing, s.enrichers()...)
+	// 中文标题是**另一条链**（只有 airav / missav 那两家，且判据是「另存」不是「补缺」，
+	// 见 titleEnrichers 的注释）。这条链**不看 missing**：库里没有中文标题就去要一个。
+	// 两段补丁合起来用 —— 同一次回填一次把简介与中文标题都办了，不额外多跑一轮。
+	if s.settings != nil && strings.TrimSpace(movie.TitleZH) == "" {
+		if tp, terr := synopsis.Enrich(ctx, movie.Number,
+			synopsis.Missing{TitleZH: true}, s.titleEnrichers()...); tp.TitleZH != "" {
+			patch.TitleZH = tp.TitleZH
+			if patch.Source == "" {
+				patch.Source = tp.Source
+			}
+			patch.Filled = append(patch.Filled, "title_zh")
+		} else if terr != nil {
+			s.logInfo("jav title zh backfill failed", "id", movieID, "number", movie.Number, "err", terr)
+		}
+	}
+	// ⚠️ `Enrich` **不会因为某家失败就中断** —— 它把最后一家的错误当返回值带回来，
+	// 但只要有任何一家给了东西，patch 就是有内容的。所以这里的判据是
+	// **先看 patch 有没有东西，再看 err**，不能像原来那样 err != nil 就直接 return：
+	// 那会让「airav 超时、但我们排在后面的 javbus 补到了导演/发行日期」这一轮的
+	// 成果被整份丢掉（实测踩过：一部片明明拿到了发行日期，库里还是空的）。
+	if patch.Empty() {
+		if err != nil {
+			// 全都失败（多半是网络/限流）。**不记 attempts** —— 那不是「这家没有」，
+			// 是「这轮没问到」，记了就少吃一次机会。
+			s.logInfo("jav summary backfill failed", "id", movieID, "number", movie.Number, "err", err)
+			return false, nil
+		}
+		// 真的问过、一家都没给。**这一笔不记 MarkEnriched**（2026-09-27 改的）：
+		// 记了就等于「这部再也不问了」，而各家的覆盖率是会变的（上游补了料、我们加了源、
+		// 那天恰好在限流）—— 实测正是这条规则让「简介为空」的那批几百部**永远补不上**，
+		// 加了新源也救不回来。
+		//
+		// 但也不能无限问下去：`summary_attempts` 记次数，问够 summaryMaxAttempts
+		// 次仍无结果才收手（见 PendingSummaryMovieIDs 的候选条件）。
+		s.logInfo("jav summary backfill empty", "id", movieID, "number", movie.Number)
+		if err := s.movies.BumpSummaryAttempts(ctx, movieID); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	applyPatch(movie, patch, linked)
+	// 用 Upsert 而不是逐列 UPDATE：那条 SQL 已经全是「空值不覆盖」的 CASE，
+	// 语义正好，且与详情抓取走同一条路（不会出现两套写法）。
+	if err := s.movies.Upsert(ctx, movie); err != nil {
+		return false, err
+	}
+	// 简介还要落到**本地那份侧车 json** 上，否则 nfo 里还是空
+	// （nfo 读的是本地 json，不是库）。只动本地副本，不写网盘。
+	if patch.Summary != "" {
+		s.pushSummaryToSidecar(movie.Number, patch.Summary)
+	}
+	if patch.TitleZH != "" {
+		s.pushTitleZHToSidecar(movie.Number, patch.TitleZH)
+	}
+	if err := s.movies.MarkEnriched(ctx, movieID); err != nil {
+		return false, err
+	}
+	s.logInfo("jav movie enriched", "number", movie.Number, "source", patch.Source,
+		"fields", strings.Join(patch.Filled, ","))
+	return true, nil
+}
+
+// missingForMovie 看这部片缺哪些**可补**的字段。
+//
+// 时长与导演只有 javbus 有，简介两家有 —— 缺什么都不影响这一次查找，
+// 能补到几项就补几项。
+func missingForMovie(m *domain.JavMovie, hasActors bool) synopsis.Missing {
+	return synopsis.Missing{
+		Summary: strings.TrimSpace(m.Summary) == "",
+		// 中文标题：库里还没有就去要一个（与「补缺」的其它项不同，它**另存一列**，
+		// 不动现有的 title —— 见 synopsis.FieldPatch.TitleZH）。
+		TitleZH:     strings.TrimSpace(m.TitleZH) == "",
+		ReleaseDate: strings.TrimSpace(m.ReleaseDate) == "",
+		Duration:    m.Duration <= 0,
+		Director:    strings.TrimSpace(m.DirectorName) == "",
+		Maker:       strings.TrimSpace(m.MakerName) == "",
+		// 演员只在**一个都没有**时才补（不是合并两边的演员表：同名不同人、
+		// 顺序也会乱，那是另一件事，这一版不做）。
+		Actors: !hasActors,
+		Tags:   len(m.Tags) == 0,
+	}
+}
+
+// applyPatch 把补到的字段写进影片记录。**只动 patch 里真有的那几项**，
+// 其余保持库里原样（那正是 synopsis.Enrich「只填缺的」的延续）。
+//
+// 演员是关联表（jav_movie_actors），所以单独走一次 ReplaceMovieActors ——
+// 只在**一个都没有**时才做（missingForMovie 已经判过）。
+func applyPatch(m *domain.JavMovie, p synopsis.FieldPatch, linked []*domain.JavActor) {
+	if p.TitleZH != "" {
+		m.TitleZH = p.TitleZH
+		m.TitleZHSource = p.Source
+	}
+	if p.Summary != "" {
+		m.Summary = p.Summary
+		m.SummarySource = p.Source
+	}
+	if p.ReleaseDate != "" {
+		m.ReleaseDate = p.ReleaseDate
+	}
+	if p.DurationMin > 0 {
+		m.Duration = p.DurationMin
+	}
+	if p.Director != "" {
+		m.DirectorName = p.Director
+	}
+	if p.Maker != "" && strings.TrimSpace(m.MakerName) == "" {
+		m.MakerName = p.Maker
+	}
+	if len(p.Tags) > 0 {
+		m.Tags = p.Tags
+	}
+	if len(p.Actors) > 0 && len(linked) == 0 {
+		// 补到的演员在别站只有名字（javbus 的 `/star/xxx` 里那串是它自己的 id，
+		// 与 JAVDB 的演员 id 不是一套）——所以**只记名字、不建关联**：
+		// 拿别站的 id 去建关联会让头像与演员页指到错误的人。
+		// 这里只把名字拼进标签之外的地方没有意义，所以演员这一项在有 id 的源
+		// 出现之前**不动**（missing 那边也只在完全没有时才来，见 missingForMovie）。
+		_ = p.Actors
 	}
 }

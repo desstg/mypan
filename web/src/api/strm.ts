@@ -86,6 +86,28 @@ export interface StrmSettings {
    * 一样的字符串，「有没有改动」才能靠字符串比较判断（顺序一变就会一直误报未保存）。
    */
   jav_metadata_items: string;
+  /**
+   * 番号海报水印总开关（重刮 / 扫描生成海报时贴不贴）。默认关。
+   *
+   * 只影响**自动**那条路；编辑页手动裁剪时贴不贴由那一页上的勾选决定。
+   */
+  jav_watermark_enabled: boolean;
+  /** 水印图标目录（空 = 用内置那套）。开关关着时界面上不显示这三项。 */
+  jav_watermark_dir: string;
+  /** 水印大小：水印宽占海报宽的百分比。 */
+  jav_watermark_scale: number;
+  /** 贴边距：占水印宽的百分比（0 = 像素级贴边）。 */
+  jav_watermark_margin: number;
+  /**
+   * 番号海报墙上**整档隐藏**的一级目录名（JSON 数组字符串，如 `["未匹配"]`）。
+   *
+   * **勾上 = 隐藏**。这是一份**全局**名单（不按任务存）。
+   * 空串表示「还没勾过」—— 那时实际隐藏的是分类规则里那条兜底规则的目标目录
+   * （默认「未匹配」），用户把那个目录改名后隐藏的会跟着变；
+   * `[]` 表示「勾过、且一个都不藏」（这两件事必须分得开，所以用 JSON 而不是空串）。
+   * 给的是**规范字符串**（排序 + 去重），前端靠字符串比较判断「有没有改动」。
+   */
+  jav_wall_hidden_dirs: string;
 }
 
 export type StrmTaskInput = Pick<
@@ -282,6 +304,12 @@ export function saveStrmSettings(body: Partial<Record<keyof StrmSettings, string
     ["metadata_parent_enabled", (v) => (v ? "true" : "false")],
     ["metadata_sync_mode", (v) => String(v)],
     ["jav_metadata_items", (v) => String(v)],
+    ["jav_watermark_enabled", (v) => (v ? "true" : "false")],
+    ["jav_watermark_dir", (v) => String(v)],
+    ["jav_watermark_scale", (v) => String(v)],
+    ["jav_watermark_margin", (v) => String(v)],
+    // 数组型：面板里存的是规范 JSON 串，原样透传。
+    ["jav_wall_hidden_dirs", (v) => String(v)],
   ];
   for (const [key, fmt] of map) {
     if (body[key] !== undefined) payload[key] = fmt(body[key]);

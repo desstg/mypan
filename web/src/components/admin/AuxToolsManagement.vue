@@ -105,7 +105,11 @@ async function handleDrawerSave() {
   <div class="settings">
     <SectionTabBar :model-value="activeTab" :tabs="tabs" @update:model-value="setActiveTab">
       <template #actions>
-        <template v-if="isScrapeTab">
+        <!-- 番号影片的任务上**不显示**这两个按钮：那套走的是 TMDB 刮削，会往同一批目录
+             写 nfo，而「标记为正常」那一步（clearScrapedMetadata）的正则正好命中
+             thumb.jpg / poster.jpg —— 把番号生成器写的图删掉。番号自己的动作在
+             卡片上（编辑 / 重刮）与设置下拉里（刷新元数据）。 -->
+        <template v-if="isScrapeTab && !scrapePanelRef?.isJavTask">
           <AppButton
             v-if="scrapePanelRef?.running"
             type="button"

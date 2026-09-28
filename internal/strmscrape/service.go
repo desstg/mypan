@@ -44,6 +44,15 @@ type Service struct {
 	progress    Progress
 	cancel      context.CancelFunc
 	indexLocks  sync.Map // taskID -> *sync.Mutex
+
+	// javWallCache 是番号海报墙的扫盘快照（taskID → 快照）。
+	// 与 indexLocks 一样是"每个任务一份"，但这里只是缓存：丢了重建即可。
+	javWallMu    sync.Mutex
+	javWallCache map[int64]*javWallSnapshot
+	// javTitleCache 是 nfo 标题的内存缓存（绝对路径 → 标题/番号/mtime/size）。
+	// 冷启动要读几千份 nfo，命中就免一次读盘 + 解析。**不落盘**。
+	javTitleMu    sync.Mutex
+	javTitleCache map[string]javTitleEntry
 }
 
 func New(opts Options) *Service {
@@ -56,12 +65,14 @@ func New(opts Options) *Service {
 		strmDir = filepath.Join(filepath.Dir(filepath.Clean(opts.DataDir)), "strm")
 	}
 	return &Service{
-		strm:     opts.Strm,
-		settings: opts.Settings,
-		bus:      opts.Bus,
-		dataDir:  opts.DataDir,
-		strmDir:  strmDir,
-		log:      log,
+		strm:          opts.Strm,
+		settings:      opts.Settings,
+		bus:           opts.Bus,
+		dataDir:       opts.DataDir,
+		strmDir:       strmDir,
+		log:           log,
+		javWallCache:  map[int64]*javWallSnapshot{},
+		javTitleCache: map[string]javTitleEntry{},
 	}
 }
 

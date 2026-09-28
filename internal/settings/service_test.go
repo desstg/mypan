@@ -102,6 +102,52 @@ func TestJavOrganizeSettingKeysAreRegistered(t *testing.T) {
 	}
 }
 
+// 番号墙的隐藏名单走 settings.Update 的**真实路径**（不只是注册表登记）——
+// 这里的重点与别处不同：它要能存住 `[]`，而这正是「不能用空串表示空列表」那件事。
+// 空串在本项目里是「没存过」（读侧据此回落分类规则的兜底目录名），
+// 一旦 `[]` 被写成空串，用户取消全选后「未匹配」会自己冒回来。
+func TestJavWallHiddenDirsRoundTripThroughService(t *testing.T) {
+	repo := &memoryConfigRepo{values: map[string]string{}}
+	svc, err := New(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 没存过：StringAllowEmpty 给空串（Spec.Default 是空串）
+	if got := svc.StringAllowEmpty(KeyStrmJavWallHiddenDirs); got != "" {
+		t.Fatalf("没存过时=%q，期望空串（读侧据此回落兜底目录名）", got)
+	}
+	// 存一份名单（前端照规范串回传）
+	if err := svc.Update(context.Background(), map[string]string{
+		KeyStrmJavWallHiddenDirs: `["未匹配"]`,
+	}); err != nil {
+		t.Fatalf("写入隐藏名单失败：%v", err)
+	}
+	if got := svc.StringAllowEmpty(KeyStrmJavWallHiddenDirs); got != `["未匹配"]` {
+		t.Errorf("读回=%q，期望 [\"未匹配\"]", got)
+	}
+	// **`[]` 必须存得住**（= 一个都不隐藏）
+	if err := svc.Update(context.Background(), map[string]string{
+		KeyStrmJavWallHiddenDirs: "[]",
+	}); err != nil {
+		t.Fatalf("写入空名单失败：%v", err)
+	}
+	if got := svc.StringAllowEmpty(KeyStrmJavWallHiddenDirs); got != "[]" {
+		t.Fatalf("空名单读回=%q，期望 []（存不下去的话用户取消全选后「未匹配」会自己冒回来）", got)
+	}
+	if dirs, ok := ParseJavWallHiddenDirs(svc.StringAllowEmpty(KeyStrmJavWallHiddenDirs)); !ok || len(dirs) != 0 {
+		t.Errorf("空名单解析 = %v ok=%v，期望「存过、且一个都不藏」", dirs, ok)
+	}
+	// 乱序 + 重复要归一（前端拿前后两个串比「有没有改动」）
+	if err := svc.Update(context.Background(), map[string]string{
+		KeyStrmJavWallHiddenDirs: `["b","a","b"]`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.StringAllowEmpty(KeyStrmJavWallHiddenDirs); got != `["a","b"]` {
+		t.Errorf("归一后=%q，期望 [\"a\",\"b\"]", got)
+	}
+}
+
 // 公告地址必须是一个「可见、可写、默认回落内置地址」的普通设置项。
 //
 // 这里锁的是一个静默失效点：如果哪天给它加上 Hidden，它会从 /admin/settings 的返回里消失，

@@ -149,13 +149,25 @@ func TestCropRatioFor(t *testing.T) {
 	}
 }
 
-// sampleJPEG 造一张纯色 jpeg（不依赖 testdata 里的图片文件）。
+// sampleJPEG 造一张确定图案的 jpeg（不依赖 testdata 里的图片文件）。
 func sampleJPEG(t *testing.T, w, h int) []byte {
+	return sampleJPEGSeed(t, w, h, 0x9E3779B1)
+}
+
+// sampleJPEGSeed 同上的可换种子版：**"不相干的图"必须换种子**，
+// 否则它就是同一张图案的另一块，反推成功是理所当然的（用例会误报）。
+func sampleJPEGSeed(t *testing.T, w, h int, seed uint32) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			img.Set(x, y, color.RGBA{R: uint8(x % 256), G: uint8(y % 256), B: 128, A: 255})
+			// 按 **8x8 块**伪随机（块内同值）：既保证每一列的均值都不同（不然反推
+			// 位置就是真歧义，代码会正确地拒绝、测不出东西），又是低频、JPEG 友好
+			// （逐像素噪声那种高频图案会被 DCT 抹得列均值乱飘，同样测不出东西）。
+			h := uint32(x/8)*seed ^ uint32(y/8)*0x85EBCA6B
+			img.Set(x, y, color.RGBA{
+				R: uint8(h >> 16), G: uint8(h >> 8), B: uint8(h), A: 255,
+			})
 		}
 	}
 	var buf bytes.Buffer
@@ -163,4 +175,130 @@ func sampleJPEG(t *testing.T, w, h int) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+// TestCropPoster 按显式窗口裁：像素对得上、越界被夹、坏图**报错**。
+//
+// 报错这条是有意的（与 BuildPoster 的降级语义相反）：这里是用户在编辑器里点了
+// 「保存海报裁剪」，悄悄什么都不做比报错难查得多。
+func TestCropPoster(t *testing.T) {
+	thumb := sampleJPEG(t, 800, 538)
+	out, err := CropPoster(thumb, CropRect{X: 400, Y: 0, W: 300, H: 400}, nil, 0, 0)
+	if err != nil {
+		t.Fatalf("CropPoster：%v", err)
+	}
+	img, err := jpeg.Decode(bytes.NewReader(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Bounds().Dx() != 300 || img.Bounds().Dy() != 400 {
+		t.Errorf("尺寸 = %dx%d，期望 300x400", img.Bounds().Dx(), img.Bounds().Dy())
+	}
+	// 逐像素对：取源图的同一块比
+	src, _ := jpeg.Decode(bytes.NewReader(thumb))
+	for _, p := range [][2]int{{0, 0}, {150, 200}, {299, 399}} {
+		want := src.At(400+p[0], 0+p[1])
+		got := img.At(p[0], p[1])
+		wr, wg, wb, _ := want.RGBA()
+		gr, gg, gb, _ := got.RGBA()
+		// JPEG 有损，给一点容差（这块图案在块边界上有跳变，振铃会大一点）
+		if absInt(int(wr>>8)-int(gr>>8)) > 24 || absInt(int(wg>>8)-int(gg>>8)) > 24 || absInt(int(wb>>8)-int(gb>>8)) > 24 {
+			t.Errorf("(%d,%d) 像素对不上：源 %v / 裁出 %v", p[0], p[1], want, got)
+		}
+	}
+
+	// 起点越界 → 夹进边界，宽高不变（没超过图宽就不缩）
+	out, err = CropPoster(thumb, CropRect{X: 700, Y: 400, W: 300, H: 400}, nil, 0, 0)
+	if err != nil {
+		t.Fatalf("越界应当夹紧而不是报错：%v", err)
+	}
+	img, _ = jpeg.Decode(bytes.NewReader(out))
+	if img.Bounds().Dx() != 300 || img.Bounds().Dy() != 400 {
+		t.Errorf("尺寸 = %dx%d，期望 300x400", img.Bounds().Dx(), img.Bounds().Dy())
+	}
+	// 宽高本身超过图 → 缩到图内
+	out, err = CropPoster(thumb, CropRect{X: 0, Y: 0, W: 900, H: 600}, nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, _ = jpeg.Decode(bytes.NewReader(out))
+	if img.Bounds().Dx() != 800 || img.Bounds().Dy() != 538 {
+		t.Errorf("超过图片尺寸时应缩到 %dx%d，got %dx%d", 800, 538, img.Bounds().Dx(), img.Bounds().Dy())
+	}
+
+	if _, err := CropPoster([]byte("不是图片"), CropRect{X: 0, Y: 0, W: 10, H: 10}, nil, 0, 0); err == nil {
+		t.Error("解不开图时必须报错（编辑器路径）")
+	}
+}
+
+// TestDefaultPosterRect 默认窗口就是生成器会给的那一个。
+func TestDefaultPosterRect(t *testing.T) {
+	thumb := sampleJPEG(t, 800, 538)
+	for _, censored := range []bool{true, false} {
+		got, err := DefaultPosterRect(thumb, censored)
+		if err != nil {
+			t.Fatalf("DefaultPosterRect：%v", err)
+		}
+		img, _ := jpeg.Decode(bytes.NewReader(thumb))
+		strategy := CropFace
+		if censored {
+			strategy = CropRight
+		}
+		face, _ := DetectFace(img)
+		want := PosterCropWindow(800, 538, CropRatioFor(800, 538), strategy, face)
+		if got != want {
+			t.Errorf("censored=%v 的默认窗口 = %+v，期望 %+v", censored, got, want)
+		}
+	}
+}
+
+func TestThumbSize(t *testing.T) {
+	w, h, err := ThumbSize(sampleJPEG(t, 800, 538))
+	if err != nil {
+		t.Fatalf("ThumbSize：%v", err)
+	}
+	if w != 800 || h != 538 {
+		t.Errorf("尺寸 = %dx%d", w, h)
+	}
+	if _, _, err := ThumbSize([]byte("xx")); err == nil {
+		t.Error("坏图应当报错")
+	}
+}
+
+// TestMatchPosterRect 反推当前裁剪位置：自己裁出来的必须认得，无关的图必须说不认识。
+func TestMatchPosterRect(t *testing.T) {
+	thumb := sampleJPEG(t, 800, 538)
+	rect := CropRect{X: 420, Y: 0, W: 360, H: 538}
+	poster, err := CropPoster(thumb, rect, nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := MatchPosterRect(thumb, poster)
+	if !ok {
+		t.Fatal("自己裁出来的海报应当能反推出位置")
+	}
+	if absInt(got.X-rect.X) > 1 || got.W != rect.W || got.H != rect.H {
+		t.Errorf("反推 = %+v，期望 %+v（±1px）", got, rect)
+	}
+
+	// 另一张不相干的图（换种子 → 图案与 thumb 无关）→ 不该硬认
+	other := sampleJPEGSeed(t, 360, 538, 0x27D4EB2F)
+	if _, ok := MatchPosterRect(thumb, other); ok {
+		t.Error("不相干的图不该反推成功")
+	}
+	// 高度不同（竖裁过）→ v1 直接放弃
+	tall, err := CropPoster(sampleJPEG(t, 800, 800), CropRect{X: 0, Y: 0, W: 400, H: 600}, nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := MatchPosterRect(thumb, tall); ok {
+		t.Error("高度不同时不该反推成功")
+	}
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

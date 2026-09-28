@@ -572,6 +572,11 @@ func mapStrmSettingAliases(in map[string]string) {
 		"metadata_parent_enabled": settings.KeyStrmMetadataParentEnabled,
 		"metadata_sync_mode":      settings.KeyStrmMetadataSyncMode,
 		"jav_metadata_items":      settings.KeyStrmJavMetaItems,
+		"jav_wall_hidden_dirs":    settings.KeyStrmJavWallHiddenDirs,
+		"jav_watermark_enabled":   settings.KeyJavWatermarkEnabled,
+		"jav_watermark_scale":     settings.KeyJavWatermarkScale,
+		"jav_watermark_margin":    settings.KeyJavWatermarkMargin,
+		"jav_watermark_dir":       settings.KeyJavWatermarkDir,
 	}
 	for k, v := range aliases {
 		if raw, ok := in[k]; ok {

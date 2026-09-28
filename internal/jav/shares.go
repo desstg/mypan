@@ -75,6 +75,24 @@ func (s *Service) CommentShares(ctx context.Context, movieID string, refresh boo
 		// 在这一档上都是空列表。真要说的话，下面的本地读会给出已有那部分。
 		s.logWarn("jav share review fetch failed", "id", movieID, "err", err)
 	}
+	return s.commentSharesLocal(ctx, movieID)
+}
+
+// CommentSharesLocal 是 commentSharesLocal 的导出版，给 API 层的
+// 「评论区分享那一档」用（它先调 /reviews 把评论补上，再拿这里算好的分享）。
+func (s *Service) CommentSharesLocal(ctx context.Context, movieID string) ([]CommentShareView, error) {
+	return s.commentSharesLocal(ctx, movieID)
+}
+
+// commentSharesLocal 只按本地已有的评论算分享（**不碰上游**）。
+//
+// 给详情页首屏用：它要立刻返回，而 ensureReviews 有 45 秒预算。
+// 分享档改由 /movies/{id}/reviews 那条惰性路去补（那条会调 CommentShares 的完整版）。
+func (s *Service) commentSharesLocal(ctx context.Context, movieID string) ([]CommentShareView, error) {
+	movieID = strings.TrimSpace(movieID)
+	if movieID == "" {
+		return nil, domain.Errorf(domain.CodeValidation, "影片 id 为空")
+	}
 
 	reviews, err := s.reviews.ListByMovieAll(ctx, movieID)
 	if err != nil {

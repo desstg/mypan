@@ -41,6 +41,11 @@ type PushResultView struct {
 	// 拿 CandidateID 去重的结果是一轮 N 个名额全烧在同一颗磁链上（实测：
 	// 08:57 那轮 sub 2 连推 5 次同一颗，retry 从 7 涨到 11）。
 	ResourceFingerprint string `json:"resource_fingerprint"`
+	// AlreadyPushed 表示这一颗**没提交任何东西**，只是「之前已经推过 / 在盘里了」。
+	//
+	// 判据就是幂等命中（同一个幂等键已经 succeeded）。它与「推失败」必须分开：
+	// 前者说明这条订阅没活干了，后者才是需要用户去查的问题。
+	AlreadyPushed bool `json:"already_pushed"`
 }
 
 // AutoPush 替一条订阅挑最优资源并推送。
@@ -192,9 +197,31 @@ func (s *Service) PushMagnetManually(ctx context.Context, movieID, linkURI, link
 // 的错误（没配目标、网盘不可达）才立刻收手。
 //
 // 返回推成功的部数，以及「为什么停下来的」那句话（给日志看）。
-func (s *Service) pushBatch(ctx context.Context, sub *domain.JavSubscription, limit int) (int, string) {
+// pushOutcome 是 pushBatch 的结论。
+//
+// 为什么要**结构化**而不是就返回一句 msg：定时推送那轮的收尾要按结论决定
+// 发不发通知、发什么级别，而「一句人话」分不出「没活干了」和「真出错了」。
+// 2026-09-27 就是栽在这上面 —— 13 条订阅的片早就推完了，日志里全是
+// 「没有符合推送条件的资源」，通知却写成「13 条订阅本轮都没推成」，
+// 用户看到的是「有 13 个失败要查」，实际是「这 13 条无事可做」。
+type pushOutcome struct {
+	// Pushed 是这一轮**真提交出去**的部数。
+	Pushed int
+	// Idle 表示「这条订阅没得推了，而且不是错误」——
+	// 池子空了（片都推过/都在库里/没有合格资源）或已经有在途任务。
+	// 定时推送的收尾看它决定走「不发通知」那条路。
+	Idle bool
+	// Failed 表示**真出了状况**：网盘报错、上游不可达、整条订阅推不动。
+	// 只有它才该发 warning。
+	Failed bool
+	// Reason 是人话，给日志与通知正文用。
+	Reason string
+}
+
+func (s *Service) pushBatch(ctx context.Context, sub *domain.JavSubscription, limit int) pushOutcome {
 	if limit <= 0 {
-		return 0, "每轮推送部数为 0，跳过"
+		// 用户自己把「每轮推送部数」设成 0 —— 那是**他的意图**，不是故障。
+		return pushOutcome{Idle: true, Reason: "每轮推送部数为 0，跳过"}
 	}
 
 	inFlight := 0
@@ -209,11 +236,13 @@ func (s *Service) pushBatch(ctx context.Context, sub *domain.JavSubscription, li
 	}
 	slots := limit - inFlight
 	if slots <= 0 {
-		return 0, "已有推送在等待网盘下载，稍后再试"
+		// 在等网盘下载，下轮再来 —— 正常状态，不是故障。
+		return pushOutcome{Idle: true, Reason: "已有推送在等待网盘下载，稍后再试"}
 	}
 
 	tried := make(map[string]struct{}, slots)
 	pushed, attempts, lastMsg := 0, 0, ""
+	failed := false
 	// limit 是「这一轮要**推出去**几部」，不是「试几颗」。
 	//
 	// 这两者不等价：死资源（网盘永久拒收、重试到上限的那种）会白吃一次尝试。
@@ -232,16 +261,20 @@ func (s *Service) pushBatch(ctx context.Context, sub *domain.JavSubscription, li
 		res, err := s.autoPush(ctx, sub, false, true, tried)
 		if err != nil {
 			// 目标没配、网盘不可达这类**整条订阅**都推不动的问题：立刻收手，
-			// 没必要再拿剩下几个名额去撞同一堵墙。
+			// 没必要再拿剩下几个名额去撞同一堵墙。**这是真失败**，要发通知。
 			s.logWarn("jav batch push failed", "sub", sub.ID, "err", err)
-			return pushed, err.Error()
+			return pushOutcome{Pushed: pushed, Failed: true, Reason: err.Error()}
 		}
 		if res == nil || res.ResourceFingerprint == "" {
-			// 一颗都没挑出来（池子空了、或预下载这类闸挡着）—— 是真没得推了。
-			if res != nil {
+			// 一颗都没挑出来（池子空了、或预下载这类闸挡着）—— 没得推。
+			//
+			// ⚠️ 但**如果这一轮已经被拒过**（failed），那结论是「全被拒」而不是
+			// 「无事可做」：池子是被失败一次一次试空的。这两种在通知里天差地别
+			// （一个要用户去查网盘，一个什么都不用做），别让后面的 Idle 把它盖掉。
+			if res != nil && lastMsg == "" {
 				lastMsg = res.Message
 			}
-			break
+			return pushOutcome{Pushed: pushed, Failed: failed, Idle: !failed, Reason: lastMsg}
 		}
 		// 按**资源**记（不是按候选行）：候选是按 run 存的，同一颗磁链会有几十个
 		// 候选行，按行去重等于没去重。
@@ -254,18 +287,26 @@ func (s *Service) pushBatch(ctx context.Context, sub *domain.JavSubscription, li
 			// 批量里把它算成一次推送，卡片上的数字就是虚的。
 			if res.TaskID != "" {
 				pushed++
-			} else {
-				lastMsg = res.Message
+				continue
 			}
+			// 没提交、却被判成 OK —— 只有「之前已经推过」这一种。
+			// 它意味着**这条订阅没活干了**：不要再去撞池子里剩下的那些
+			// （它们多半是同一部片的别的磁链，同样会被幂等挡回来）。
+			if res.AlreadyPushed {
+				return pushOutcome{Pushed: pushed, Failed: failed, Idle: !failed, Reason: res.Message}
+			}
+			lastMsg = res.Message
 			continue
 		}
 		// 单颗被网盘拒了（重复提交、资源不可用…）**不该掐掉整轮** ——
 		// 换下一颗接着推，这正是「一轮推 N 部」的意义所在。
+		// 但它确实是**真失败**：记下来，收尾时据此发 warning。
 		lastMsg = res.Message
+		failed = true
 		s.logWarn("jav batch push rejected",
 			"sub", sub.ID, "candidate", res.CandidateID, "reason", res.Message)
 	}
-	return pushed, lastMsg
+	return pushOutcome{Pushed: pushed, Failed: failed, Reason: lastMsg}
 }
 
 // pickCandidate 按订阅模式挑出要推的那一颗。
@@ -587,8 +628,12 @@ func (s *Service) deliverCandidate(ctx context.Context, sub *domain.JavSubscript
 	if existing, err := s.attempts.GetByIdempotencyKey(ctx, idempotencyKey); err == nil && existing != nil {
 		switch existing.Status {
 		case domain.JavAttemptSucceeded:
-			// 成功过的不再推。
-			return &PushResultView{OK: true, Message: "这颗资源之前已经推送过了", MovieID: cand.MovieID}, nil
+			// 成功过的不再推。标记 AlreadyPushed：批量路径据此把它算成
+			// 「没得推了」而不是「推失败」—— 通知里那两种结论完全不同。
+			return &PushResultView{
+				OK: true, Message: "这颗资源之前已经推送过了",
+				MovieID: cand.MovieID, AlreadyPushed: true,
+			}, nil
 
 		case domain.JavAttemptRunning:
 			// 在途的也不叠加提交（网盘对并发提交有风控）。

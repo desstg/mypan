@@ -11,6 +11,13 @@ export interface JavMovieCard {
   number: string;
   title: string;
   origin_title: string;
+  /**
+   * 别站补来的**中文标题**（missav / airav 那类站给的），空 = 没补到。
+   *
+   * 与 `title` 并存、**不覆盖它**：`title` 是 JAVDB 的口径（实测大面积是日文）。
+   * 展示时的回落由前端做：`title_zh || title || origin_title`。
+   */
+  title_zh: string;
   cover_url: string;
   thumb_url: string;
   javbus_cover: string;
@@ -515,6 +522,7 @@ export interface JavConfig {
   sub_timeout_sec: number;
   /** 推送成功后要不要在资源所在目录写 `<番号>.json`（元数据侧车）。 */
   sidecar_enabled: boolean;
+
 
   default_account_id: number;
   default_parent_id: string;

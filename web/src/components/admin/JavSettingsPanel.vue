@@ -576,8 +576,8 @@ onMounted(async () => {
                 label="走全局代理"
                 :help-text="
                   draft.use_proxy && !config?.proxy_ready
-                    ? '已开启，但「系统设置 → 网络代理」里的代理是关着的，实际不会走代理。'
-                    : 'JAVDB 与 JAVBUS 都在境外，建议开启。代理地址在系统设置里配。'
+                    ? '已开启，但「系统设置 → 网络代理」里的代理是关着的，实际不会生效。'
+                    : '抓取策略是「能直连就直连，连不上才走这里的代理」——不用你判断哪家需要代理。关掉就等于完全直连。代理地址在系统设置里配。'
                 "
               />
             </template>
@@ -585,7 +585,7 @@ onMounted(async () => {
               <div style="display: flex; align-items: center; gap: 10px">
                 <SettingsBoolSegment v-model="draft.use_proxy" label="走全局代理" />
                 <span style="font-size: 11.5px; color: var(--text-muted)">
-                  实际：{{ config?.effective_proxy || "—" }}
+                  兜底代理：{{ config?.effective_proxy || "—" }}
                 </span>
               </div>
             </template>
@@ -761,6 +761,7 @@ onMounted(async () => {
               </label>
             </template>
           </SettingsRow>
+
 
           <SettingsRow>
             <template #info>

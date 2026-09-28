@@ -1,6 +1,7 @@
 import { http } from "./client";
 import type {
   JavCheckResult,
+  JavCommentShare,
   JavConfig,
   JavConfigInput,
   JavConnectionResult,
@@ -128,10 +129,34 @@ export function fetchJavLocalMovies(params: {
   return http.get<JavListResult>(`${BASE}/movies${q(params)}`);
 }
 
-export function fetchJavMovie(id: string, refresh = false) {
+/**
+ * 取影片详情。
+ *
+ * `local` 传 true 时走**只读本地**的模式：毫秒级返回，缺的字段就是空
+ * （简介 / 中文标题 / 磁链 / 评论）。详情页首屏用它 —— 先显示本地已有的，
+ * 缺的由后台补（服务端在 local 模式下会把这部排进补缺队列），隔几秒再拉一次。
+ *
+ * 不传 local 是老的同步语义：该抓就抓，可能要等好几秒。留给「重新获取」那种
+ * 用户明确要等的场景。
+ */
+export function fetchJavMovie(id: string, refresh = false, local = false) {
   return http.get<JavMovieDetail>(
-    `${BASE}/movies/${encodeURIComponent(id)}${q({ refresh: refresh ? 1 : undefined })}`,
+    `${BASE}/movies/${encodeURIComponent(id)}${q({
+      refresh: refresh ? 1 : undefined,
+      local: local ? 1 : undefined,
+    })}`,
   );
+}
+
+/**
+ * 要求后台把这一部补起来（立刻返回，不等结果）。
+ *
+ * 详情接口在 local 模式下**自己会调一次**，所以正常情况下前端不用管它；
+ * 这个函数留给「明知没补上、想再催一次」的场景。
+ * 返回 `queued: false` 表示冷却中或已排队 —— 不是错误。
+ */
+export function hydrateJavMovie(id: string) {
+  return http.post<{ queued: boolean }>(`${BASE}/movies/${encodeURIComponent(id)}/hydrate`, {});
 }
 
 export function ingestJavMovie(id: string) {
@@ -150,14 +175,24 @@ export async function fetchJavPreviewURL(id: string) {
   return res?.url ?? "";
 }
 
-export function fetchJavMagnets(id: string, refresh = false) {
-  return http.get<{ items: JavMovieDetail["magnets"] }>(
-    `${BASE}/movies/${encodeURIComponent(id)}/magnets${q({ refresh: refresh ? 1 : undefined })}`,
+export function fetchJavMagnets(id: string, refresh = false, local = false) {
+  return http.get<{ items: JavMovieDetail["magnets"]; pending?: boolean }>(
+    `${BASE}/movies/${encodeURIComponent(id)}/magnets${q({
+      refresh: refresh ? 1 : undefined,
+      local: local ? 1 : undefined,
+    })}`,
   );
 }
 
+/**
+ * 取评论。
+ *
+ * 响应里还带着 **`shares`**（评论区分享）—— 那一档与评论共用同一份数据
+ * （分享就是从评论正文里提链接出来的），所以补评论时顺手把分享算好。
+ * 详情首屏瘦身之后，那一档就靠这里拿分享。
+ */
 export function fetchJavReviews(id: string, page = 1) {
-  return http.get<{ items: JavReview[]; total: number }>(
+  return http.get<{ items: JavReview[]; total: number; shares: JavCommentShare[] }>(
     `${BASE}/movies/${encodeURIComponent(id)}/reviews${q({ page })}`,
   );
 }

@@ -911,9 +911,12 @@ func TestPushBatchPushesSeveral(t *testing.T) {
 		t.Fatalf("取订阅: %v", err)
 	}
 
-	pushed, msg := f.svc.pushBatch(ctx, sub, 2)
-	if pushed != 2 {
-		t.Fatalf("上限 2 时应当推 2 部，got %d（%s）", pushed, msg)
+	out := f.svc.pushBatch(ctx, sub, 2)
+	if out.Pushed != 2 {
+		t.Fatalf("上限 2 时应当推 2 部，got %d（%s）", out.Pushed, out.Reason)
+	}
+	if out.Failed {
+		t.Errorf("推成功的一轮不该被标成失败：%s", out.Reason)
 	}
 	if len(off.calls) != 2 {
 		t.Fatalf("应当提交 2 次，got %d", len(off.calls))
@@ -924,8 +927,11 @@ func TestPushBatchPushesSeveral(t *testing.T) {
 
 	// 在途已经 2 条、上限也是 2：这一轮不该再塞新的进来，
 	// 否则「一轮 N 部」会变成「一轮无限部」。
-	if again, _ := f.svc.pushBatch(ctx, sub, 2); again != 0 {
-		t.Errorf("在途占满上限时不应当再推，got %d", again)
+	if again := f.svc.pushBatch(ctx, sub, 2); again.Pushed != 0 {
+		t.Errorf("在途占满上限时不应当再推，got %d", again.Pushed)
+	} else if !again.Idle || again.Failed {
+		t.Errorf("在途占满上限是「无事可做」而不是失败，got idle=%v failed=%v（%s）",
+			again.Idle, again.Failed, again.Reason)
 	}
 	if len(off.calls) != 2 {
 		t.Errorf("提交次数应当还是 2，got %d", len(off.calls))
@@ -973,9 +979,14 @@ func TestPushBatchKeepsGoingAfterOneRejected(t *testing.T) {
 	// 第一颗投递就失败：stub 对**每次** AddURLs 都返回错误，所以三颗都会失败。
 	off.addErr = errors.New("115 API 错误(10008)：任务已存在，请勿输入重复的链接地址")
 
-	pushed, _ := f.svc.pushBatch(ctx, sub, 3)
-	if pushed != 0 {
-		t.Errorf("全被拒时不应当算成功，got %d", pushed)
+	out := f.svc.pushBatch(ctx, sub, 3)
+	if out.Pushed != 0 {
+		t.Errorf("全被拒时不应当算成功，got %d", out.Pushed)
+	}
+	// **全被拒要算「失败」**：这正是通知里那条 warning 的判据 ——
+	// 它跟「这些订阅没事干」必须分开，否则用户看到的还是「都没推成」这种含糊话。
+	if !out.Failed {
+		t.Errorf("全被网盘拒收应当标成失败，got idle=%v（%s）", out.Idle, out.Reason)
 	}
 	if len(off.calls) != 3 {
 		t.Fatalf("应当把三个名额都用掉（换下一颗接着试），got %d 次提交", len(off.calls))

@@ -18,6 +18,12 @@ type MovieCard struct {
 	Number      string `json:"number"`
 	Title       string `json:"title"`
 	OriginTitle string `json:"origin_title"`
+	// TitleZH 是**别站补来的中文标题**（missav / airav 那类站给的），空 = 没补到。
+	//
+	// 与 Title 并存、不覆盖它：Title 是 JAVDB 的口径（实测真库 8650 部里 6356 部
+	// 是日文），而用户要的是「取标题时取中文、没有才回落」。那个回落放在**前端**
+	// 做（`title_zh || title || origin_title`），服务端不替它选。
+	TitleZH     string `json:"title_zh"`
 	CoverURL    string `json:"cover_url"`
 	ThumbURL    string `json:"thumb_url"`
 	JavbusCover string `json:"javbus_cover"`
@@ -196,6 +202,7 @@ func toCard(m *domain.JavMovie, inLibrary bool) MovieCard {
 		Number:       m.Number,
 		Title:        m.Title,
 		OriginTitle:  m.OriginTitle,
+		TitleZH:      m.TitleZH,
 		CoverURL:     m.CoverURL,
 		ThumbURL:     m.ThumbURL,
 		JavbusCover:  m.JavbusCover,

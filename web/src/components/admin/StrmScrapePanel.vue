@@ -6,6 +6,9 @@ import {
   type MediaOrganizeTmdbSearchHit,
 } from "@/api/mediaOrganize";
 import { fetchStrmTasks, type StrmTask } from "@/api/strm";
+import StrmJavWall from "@/components/admin/StrmJavWall.vue";
+import StrmJavWallHiddenDirsModal from "@/components/admin/StrmJavWallHiddenDirsModal.vue";
+import { JAV_WALL_SORTS } from "@/api/strmJavWall";
 import {
   fetchStrmScrapeItems,
   fetchStrmScrapeScope,
@@ -123,14 +126,41 @@ const taskOptions = computed(() =>
 const selectedTask = computed(() =>
   tasks.value.find((t) => Number(t.id) === Number(selectedTaskId.value)) || null,
 );
-const scopeLabel = computed(() =>
-  excludedScopeDirs.value.length ? `已排除 ${excludedScopeDirs.value.length} 个目录` : "全部目录",
-);
+// 任务是不是「番号影片」：决定整面墙长什么样（番号有自己的一套）。
+const isJavTask = computed(() => selectedTask.value?.media_kind === "jav");
+const javWallRef = ref<{ refreshMeta: () => void } | null>(null);
+// 番号墙「整档隐藏的目录」：那份名单是**全局**的（不按任务存），但入口在墙上。
+const javHiddenOpen = ref(false);
+// 已隐藏的目录数（页头那颗按钮的文案要用）。从墙的列表响应里带回来，省一次请求。
+const javHiddenCount = ref(0);
+
+// 页头那颗「全部目录」按钮的文案：两种任务各是各的一套（外观与位置完全一样）。
+const scopeLabel = computed(() => {
+  if (isJavTask.value) {
+    return javHiddenCount.value ? `隐藏 ${javHiddenCount.value} 个目录` : "全部目录";
+  }
+  return excludedScopeDirs.value.length ? `已排除 ${excludedScopeDirs.value.length} 个目录` : "全部目录";
+});
+
+/** 页头那颗按钮点了之后走哪套：番号墙是「隐藏哪些目录」，其余是「刮削范围」。 */
+function openScopePanel() {
+  if (isJavTask.value) {
+    javHiddenOpen.value = true;
+    return;
+  }
+  scopeOpen.value = true;
+}
+
+/** 隐藏名单改了之后：重列墙（服务端已经作废了所有快照），并让按钮文案跟上。 */
+function onJavHiddenSaved() {
+  javWallRef.value?.refreshMeta();
+}
 
 async function loadScope() {
   const taskId = selectedTaskId.value;
   excludedScopeDirs.value = [];
-  if (!taskId) return;
+  // 番号影片不吃「刮削范围」（那是 TMDB 索引那条路的东西），这一趟纯属白跑。
+  if (!taskId || isJavTask.value) return;
   try {
     const data = await fetchStrmScrapeScope(taskId);
     if (selectedTaskId.value === taskId) excludedScopeDirs.value = data.excluded_dirs ?? [];
@@ -147,7 +177,8 @@ async function saveScope(dirs: string[]) {
     const data = await saveStrmScrapeScope(taskId, dirs);
     excludedScopeDirs.value = data.excluded_dirs ?? [];
     scopeOpen.value = false;
-    await loadItems();
+    // 番号影片不走 TMDB 索引（这颗按钮对它们是另一套），别白列一次。
+    if (!isJavTask.value) await loadItems();
     toast.success("刮削范围已保存");
   } catch (e) {
     toast.error(getApiErrorMessage(e, "保存刮削范围失败"));
@@ -156,7 +187,12 @@ async function saveScope(dirs: string[]) {
   }
 }
 
-const sortOptions: { value: SortKey; label: string }[] = [
+// 排序与搜索**按任务类型分叉，共用页头那两个按钮**（用户要求：
+// 番号墙自己的搜索框/排序框不要了，都用页头这一套）。
+//
+// 两套选项的**取值不重叠**（tmdb 是 title/year/added，番号是 number/release/added），
+// 各有各的存储，`currentSort` 只负责「当前该显示哪一个」。
+const tmdbSortOptions: { value: SortKey; label: string }[] = [
   { value: "added_desc", label: "添加时间 · 新→旧" },
   { value: "added_asc", label: "添加时间 · 旧→新" },
   { value: "year_desc", label: "上映年份 · 新→旧" },
@@ -171,11 +207,21 @@ const matchTypeOptions = [
 ];
 
 const sortMenuOpen = ref(false);
+// 番号墙的排序（自己存一份，不与 tmdb 那套混）。
+const javSortKey = ref<string>("number_asc");
+const sortOptions = computed(() =>
+  isJavTask.value
+    ? JAV_WALL_SORTS.map((o) => ({ value: o.value, label: o.label }))
+    : tmdbSortOptions,
+);
+const currentSort = computed(() =>
+  isJavTask.value ? javSortKey.value : (sortKey.value as string),
+);
 const namingTipOpen = ref(false);
 const searchOpen = ref(false);
 const searchInputEl = ref<HTMLInputElement | null>(null);
 const currentSortLabel = computed(
-  () => sortOptions.find((o) => o.value === sortKey.value)?.label ?? "排序",
+  () => sortOptions.value.find((o) => o.value === currentSort.value)?.label ?? "排序",
 );
 const currentListQuery = computed<StrmScrapeItemListQuery>(() => ({
   keyword: keyword.value.trim(),
@@ -200,11 +246,27 @@ const hasActiveFilters = computed(
     ),
 );
 
-function applySort(key: SortKey) {
-  sortKey.value = key;
-  saveSortKey(key);
+function applySort(value: string) {
+  if (isJavTask.value) {
+    // 番号墙按 props 重列（子组件 watch 了 sort），这里不用手动催它。
+    javSortKey.value = value;
+    sortMenuOpen.value = false;
+    return;
+  }
+  sortKey.value = value as SortKey;
+  saveSortKey(value as SortKey);
   sortMenuOpen.value = false;
 }
+
+// 搜索也共用：番号那套用同一个输入框，只是把词交给子组件去过滤。
+const javKeyword = ref("");
+const activeKeyword = computed({
+  get: () => (isJavTask.value ? javKeyword.value : keyword.value),
+  set: (v: string) => {
+    if (isJavTask.value) javKeyword.value = v;
+    else keyword.value = v;
+  },
+});
 
 async function toggleSearch() {
   searchOpen.value = !searchOpen.value;
@@ -212,7 +274,7 @@ async function toggleSearch() {
     await nextTick();
     window.setTimeout(() => searchInputEl.value?.focus(), 220);
   } else {
-    keyword.value = "";
+    activeKeyword.value = "";
   }
 }
 
@@ -447,6 +509,13 @@ async function refreshAll() {
   await loadTasks();
   if (!selectedTaskId.value) {
     clearItemList();
+    await syncProgress();
+    return;
+  }
+  // 番号影片：那颗键是「重读本地文件」（不联网、不重建 nfo/图片），
+  // 与 TMDB 那套「重建刮削索引」完全是两码事 —— 外观一样，功能各是各的。
+  if (isJavTask.value) {
+    javWallRef.value?.refreshMeta();
     await syncProgress();
     return;
   }
@@ -742,10 +811,16 @@ watch(selectedTaskId, () => {
   typeFilter.value = "all";
   tvSubFilter.value = "all";
   keyword.value = "";
+  // 番号那套的关键词也要清：它是页头同一个输入框的另一半，留着会带到下一个任务上。
+  javKeyword.value = "";
+  javHiddenCount.value = 0;
 });
 
 watch(currentListQueryKey, () => {
   if (!booted.value) return;
+  // 番号影片的卡片是子组件直接扫本地磁盘来的，**不经过 TMDB 索引** ——
+  // 不早退的话每敲一个字都会白发一次 TMDB 列表请求（错了还会弹 toast）。
+  if (isJavTask.value) return;
   if (!selectedTaskId.value) {
     clearItemList();
     return;
@@ -784,6 +859,9 @@ onUnmounted(() => {
 defineExpose({
   startScrape,
   stopScrape,
+  // 父组件（辅助工具页）要用它决定页头那几个按钮显不显示：番号任务上跑 TMDB 刮削
+  // 会往同一批目录写 nfo，而「标记为正常」那一步会把 thumb/poster 删掉。
+  isJavTask,
   refresh: refreshAll,
   refreshing,
   running,
@@ -813,7 +891,7 @@ defineExpose({
           size="md"
           class="scrape-panel__scope-button"
           :disabled="running || scopeLoading"
-          @click="scopeOpen = true"
+          @click="openScopePanel"
         >
           {{ scopeLabel }}
         </AppButton>
@@ -822,10 +900,10 @@ defineExpose({
         <div class="scrape-search-expand" :class="{ 'scrape-search-expand--open': searchOpen }">
           <input
             ref="searchInputEl"
-            v-model="keyword"
+            v-model="activeKeyword"
             class="scrape-search-expand__input"
             type="search"
-            placeholder="搜索片名"
+            :placeholder="isJavTask ? '搜索番号 / 片名' : '搜索片名'"
             :tabindex="searchOpen ? 0 : -1"
             @keydown.escape.prevent="toggleSearch"
           />
@@ -833,7 +911,7 @@ defineExpose({
             <button
               type="button"
               class="scrape-icon-btn"
-              :class="{ 'scrape-icon-btn--active': searchOpen || Boolean(keyword) }"
+              :class="{ 'scrape-icon-btn--active': searchOpen || Boolean(activeKeyword) }"
               :aria-label="searchOpen ? '收起搜索' : '搜索片名'"
               :aria-expanded="searchOpen"
               @click="toggleSearch"
@@ -852,6 +930,7 @@ defineExpose({
               <button
                 type="button"
                 class="scrape-icon-btn"
+                :class="{ 'scrape-icon-btn--active': open }"
                 :aria-expanded="open"
                 aria-label="排序"
                 @click.stop="toggle"
@@ -873,7 +952,7 @@ defineExpose({
                 :key="opt.value"
                 type="button"
                 class="scrape-sort-menu__item"
-                :class="{ 'scrape-sort-menu__item--active': sortKey === opt.value }"
+                :class="{ 'scrape-sort-menu__item--active': currentSort === opt.value }"
                 @click="applySort(opt.value)"
               >
                 {{ opt.label }}
@@ -891,30 +970,63 @@ defineExpose({
             no-native-title
             @click="refreshAll"
           />
-          <span class="scrape-tip__bubble">重建刮削索引（扫描本地 STRM 目录）</span>
+          <span class="scrape-tip__bubble">
+            {{ isJavTask ? "刷新元数据（只重新读取本地文件）" : "重建刮削索引（扫描本地 STRM 目录）" }}
+          </span>
         </span>
-        <span class="scrape-tip scrape-tip--right">
-          <AppIconButton
-            icon="settings"
-            label="STRM 刮削设置"
-            variant="secondary"
-            size="md"
-            no-native-title
-            @click="emit('open-settings')"
-          />
-          <span class="scrape-tip__bubble">STRM 刮削设置</span>
-        </span>
+        <!-- 设置改成下拉：刮削设置一直有；番号影片时多一项「隐藏的目录」直达 ——
+             那颗 ⚙ 在两种任务下长得一样，菜单里有几项按任务类型分。 -->
+        <AppDropdown align="right">
+          <template #trigger="{ toggle }">
+            <span class="scrape-tip scrape-tip--right">
+              <AppIconButton
+                icon="settings"
+                label="设置"
+                variant="secondary"
+                size="md"
+                no-native-title
+                @click.stop="toggle"
+              />
+              <span class="scrape-tip__bubble">STRM 刮削设置</span>
+            </span>
+          </template>
+          <template #panel>
+            <div class="scrape-menu">
+              <button type="button" class="scrape-menu__item" @click="emit('open-settings')">
+                <span>STRM 刮削设置</span>
+              </button>
+              <button
+                v-if="isJavTask"
+                type="button"
+                class="scrape-menu__item"
+                @click="javHiddenOpen = true"
+              >
+                <span>番号墙隐藏的目录</span>
+                <span class="scrape-menu__hint">勾上的目录整档不出现在墙上</span>
+              </button>
+            </div>
+          </template>
+        </AppDropdown>
       </div>
     </div>
 
     <StrmScrapeScopePicker
-      v-if="selectedTaskId"
+      v-if="selectedTaskId && !isJavTask"
       :open="scopeOpen"
       :task-id="selectedTaskId"
       :task-name="selectedTask?.name"
       :excluded-dirs="excludedScopeDirs"
       @close="scopeOpen = false"
       @save="saveScope"
+    />
+
+    <!-- 番号影片那颗按钮是另一码事：勾哪些一级目录**整档不出现在墙上**（全局一份）。 -->
+    <StrmJavWallHiddenDirsModal
+      v-if="isJavTask"
+      :open="javHiddenOpen"
+      :task-id="selectedTaskId"
+      @close="javHiddenOpen = false"
+      @saved="onJavHiddenSaved"
     />
 
     <div v-if="running && progress" class="scrape-progress">
@@ -927,6 +1039,18 @@ defineExpose({
       icon="🎬"
       title="还没有 STRM 任务"
       description="请先在「STRM 任务」里创建任务，再回来刮削其输出目录。"
+    />
+
+    <!-- 番号影片：整套换成番号自己的海报墙（一级目录 tab / 视图切换 / 编辑 / 重刮）。
+         搜索与排序也由**页头**那两颗按钮驱动（外观与 TMDB 那套一样，功能各是各的）。 -->
+    <StrmJavWall
+      v-if="!loading && isJavTask"
+      ref="javWallRef"
+      :task-id="selectedTaskId"
+      :keyword="javKeyword"
+      :sort="javSortKey"
+      @hidden-dirs="javHiddenCount = $event.length"
+      @open-hidden-dirs="javHiddenOpen = true"
     />
 
     <template v-else-if="!loading">
@@ -2108,4 +2232,8 @@ defineExpose({
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
   cursor: default;
 }
+.scrape-menu { display: flex; flex-direction: column; min-width: 220px; padding: 6px; }
+.scrape-menu__item { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; padding: 8px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; }
+.scrape-menu__item:hover { background: var(--surface-sunken); }
+.scrape-menu__hint { font-size: 11px; color: var(--text-muted); }
 </style>

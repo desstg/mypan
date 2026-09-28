@@ -11,16 +11,23 @@
 export interface CheckboxOption {
   key: string;
   label: string;
+  /** 行尾的浅色小字（如部数）。不给就不显示。 */
+  hint?: string;
 }
 
 const props = withDefaults(
   defineProps<{
-    /** 键 → 是否勾选。**缺项按勾选**（与后端「缺项回落全开」一致） */
+    /** 键 → 是否勾选。**缺项按 `missingChecked` 处理**（默认按勾选）。 */
     modelValue: Record<string, boolean>;
     options: CheckboxOption[];
     disabled?: boolean;
+    /**
+     * 键**不在** modelValue 里时算不算勾上。默认 true —— 与后端「番号元数据缺项回落全开」
+     * 一致。语义相反的场景（如「番号墙隐藏的目录」：缺项 = 不隐藏）传 false。
+     */
+    missingChecked?: boolean;
   }>(),
-  { disabled: false },
+  { disabled: false, missingChecked: true },
 );
 
 const emit = defineEmits<{ "update:modelValue": [Record<string, boolean>] }>();
@@ -30,7 +37,9 @@ function toggle(key: string, checked: boolean) {
 }
 
 function isChecked(key: string): boolean {
-  return props.modelValue[key] !== false;
+  const raw = props.modelValue[key];
+  if (raw === undefined) return props.missingChecked;
+  return raw;
 }
 </script>
 
@@ -44,6 +53,12 @@ function isChecked(key: string): boolean {
         @change="toggle(opt.key, ($event.target as HTMLInputElement).checked)"
       />
       <span>{{ opt.label }}</span>
+      <span v-if="opt.hint" class="settings-check__hint">{{ opt.hint }}</span>
     </label>
   </div>
 </template>
+
+<style scoped>
+/* gap 由 .settings-check 给（见 styles/settings-panel.css），这里只调字号与颜色。 */
+.settings-check__hint { color: var(--text-muted); font-size: 11px; }
+</style>
