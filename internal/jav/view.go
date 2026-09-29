@@ -163,6 +163,15 @@ type MovieDetail struct {
 	// CanPlay 报告上游有没有在线播放源（详情页那个「在线」角标）。
 	CanPlay      bool `json:"can_play"`
 	ReviewsCount int  `json:"reviews_count"`
+
+	// RefreshState / RefreshError 是「用户点的那次重新获取」的状态，只由**接口层**
+	// 在 `?local=1` 那条路上填（详情页首屏与轮询都走它，零额外往返）；
+	// 值是 internal/jav 的 RefreshState* 常量，空串 = 没点过 / 已过期 / 重启过。
+	//
+	// 放在**本地读**而不是单开一个状态端点：前端本来就每 3 秒轮询这条路，
+	// 而单开端点会让每一跳多一次请求 —— 与磁链那个 `pending` 是同一个套路。
+	RefreshState string `json:"refresh_state,omitempty"`
+	RefreshError string `json:"refresh_error,omitempty"`
 }
 
 // SearchResult 是一次搜索的结论。

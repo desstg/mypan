@@ -8,6 +8,7 @@ import FolderPickerModal from "@/components/file/FolderPickerModal.vue";
 import SectionTabBar from "@/components/admin/SectionTabBar.vue";
 import AppDropdown from "@/components/base/AppDropdown.vue";
 import AppPagination from "@/components/base/AppPagination.vue";
+import MediaImage from "@/components/base/MediaImage.vue";
 import JavMovieCard from "@/components/admin/JavMovieCard.vue";
 import JavUserSharesModal from "@/components/admin/JavUserSharesModal.vue";
 import { getApiErrorMessage } from "@/api/client";
@@ -1300,29 +1301,19 @@ onMounted(() => {
           >
             <!-- 演员/清单订阅没有横版封面，头像居中摆成圆的 —— 与榜单的演员卡同一形态。 -->
             <div v-if="usesAvatarCard(sub)" class="jav-actor-avatar">
-              <img
-                v-if="sub.cover"
-                :src="javImageURL(sub.cover)"
-                loading="lazy"
-                :alt="sub.target_name"
-              />
-              <!-- 没有图时退成文字：演员给 👤，清单给名字的前两个字。
-                   清单多取一个字，是因为中文清单名一个字太含糊。 -->
-              <span v-else-if="sub.target_type === 'list'" class="jav-actor-avatar__text">
+              <!-- 清单本来就没有头像（`sub.cover` 为空）—— 那种情况仍用文字占位
+                   （清单名首字比一个人形图标更好认）。只有「有头像 URL 但加载失败」
+                   才落到人形占位图上，所以这里单独判一次 list。 -->
+              <span
+                v-if="sub.target_type === 'list' && !sub.cover"
+                class="jav-actor-avatar__text"
+              >
                 {{ listAvatarText(sub.target_name) }}
               </span>
-              <span v-else>👤</span>
+              <MediaImage v-else :src="javImageURL(sub.cover)" :alt="sub.target_name" variant="person" />
             </div>
             <template v-else>
-              <img
-                v-if="sub.cover"
-                :src="javImageURL(sub.cover)"
-                loading="lazy"
-                :alt="sub.target_name"
-              />
-              <div v-else class="jav-card__placeholder">
-                {{ javTargetLabel(sub.target_type) }}
-              </div>
+              <MediaImage :src="javImageURL(sub.cover)" :alt="sub.target_name" />
             </template>
 
             <!-- 左上：订阅状态 -->

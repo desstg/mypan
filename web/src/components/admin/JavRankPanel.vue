@@ -4,6 +4,7 @@ import AppSelect from "@/components/base/AppSelect.vue";
 import JavMovieCard from "@/components/admin/JavMovieCard.vue";
 import { getApiErrorMessage } from "@/api/client";
 import { fetchJavRanking, javImageURL } from "@/api/jav";
+import MediaImage from "@/components/base/MediaImage.vue";
 import {
   JAV_RANK_TYPE_TABS,
   javTopTypeOptions,
@@ -296,13 +297,7 @@ onBeforeUnmount(() => {
           <div class="jav-actor-avatar">
             <!-- 头像同样要过代理：上游的图是 XOR 混淆的，直链会是花屏。
                  全模块只有这一处漏了包 javImageURL。 -->
-            <img
-              v-if="actor.avatar_url"
-              :src="javImageURL(actor.avatar_url)"
-              :alt="actor.name"
-              loading="lazy"
-            />
-            <span v-else>👤</span>
+            <MediaImage :src="javImageURL(actor.avatar_url)" :alt="actor.name" variant="person" />
           </div>
           <div class="jav-actor-name">{{ actor.name }}</div>
         </div>

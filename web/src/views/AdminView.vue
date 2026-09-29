@@ -51,7 +51,9 @@ const nav = [
   { key: "tools", label: "辅助工具", icon: "toolbox" },
   { key: "cross-transfer", label: "跨盘传输", icon: "right-left" },
   { key: "share", label: "文件共享", icon: "share-alt" },
-  { key: "subscribe", label: "热门推荐", icon: "fire" },
+  // 「影视订阅」是 subscribe 那一页的显示名（用户要求改的，功能不变）——
+  // key 仍是 subscribe：路由 ?page=subscribe、图标、各 tab 一律不动。
+  { key: "subscribe", label: "影视订阅", icon: "fire" },
 ];
 const navKeys = nav.map((n) => n.key);
 

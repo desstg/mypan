@@ -5,6 +5,7 @@ import AppInput from "@/components/base/AppInput.vue";
 import AppPagination from "@/components/base/AppPagination.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import { getApiErrorMessage } from "@/api/client";
+import MediaImage from "@/components/base/MediaImage.vue";
 import {
   deleteJavRecord,
   fetchJavPushRecordDownloaders,
@@ -202,7 +203,7 @@ onMounted(async () => {
             <span v-else class="jav-record-status jav-record-status--pend" title="待推送">⟳</span>
           </td>
           <td>
-            <img v-if="rec.cover" :src="javImageURL(rec.cover)" class="jav-record-cover" loading="lazy" :alt="rec.code" />
+            <MediaImage v-if="rec.cover" class="jav-record-cover" :src="javImageURL(rec.cover)" :alt="rec.code" />
             <span v-else style="color: var(--text-muted); font-size: 11.5px">无</span>
           </td>
           <td>

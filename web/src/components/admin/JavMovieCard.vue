@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { javImageURL } from "@/api/jav";
+import MediaImage from "@/components/base/MediaImage.vue";
 import type { JavMovieCard } from "@/types/jav";
 
 /**
@@ -56,8 +57,9 @@ const label = computed(() => props.movie.number || props.movie.id);
 <template>
   <div class="jav-card" role="button" tabindex="0" @click="emit('open')" @keyup.enter="emit('open')">
     <div class="jav-card__cover">
-      <img v-if="cover" :src="javImageURL(cover)" :alt="label" loading="lazy" />
-      <div v-else class="jav-card__placeholder">无封面</div>
+      <!-- 没有 URL **或图加载失败**都落到同一张占位图（见 MediaImage 的说明）——
+           以前只处理了「没有 URL」，图挂了就留一块破图。 -->
+      <MediaImage :src="javImageURL(cover)" :alt="label" />
 
       <button
         v-if="showSubscribe"

@@ -28,9 +28,17 @@ import (
 //  4. **磁链优先**：它是最先要看到的东西（前端那一档在没拉到之前显示转圈），
 //     所以「只抓磁链」的活插队首，排在所有整条补缺前面。
 //
-// 执行体复用立刻能用的那条 —— `backfillSummary`（loops.go）：
-// 它自己 Get → missingForMovie → 两条链 Enrich → applyPatch → Upsert → 写侧车 → 记账，
-// **幂等且带完整记账**（enriched_at / summary_attempts）。这里不重写一套补缺。
+// 执行体分两段，**顺序不能反**：
+//
+//  1. `ingestMovie(id, false)` —— **先把 JAVDB 那份详情抓回来入库**（一次请求，几百毫秒）。
+//     演员 / 标签 / 导演 / 片商 / 评分 / 封面全在它里面，而**别的路径都不抓它**：
+//     榜单、影库同步入库的只有 number/title/cover（列表接口不给详情），
+//     订阅检查走的也是列表 → 于是那些片点开详情永远是空的。这一句就是补那一刀。
+//  2. `backfillSummary`（loops.go）—— 再补简介与中文标题（要打 4~6 个外站，慢）。
+//     它自己 Get → missingForMovie → 两条链 Enrich → applyPatch → Upsert → 记账，
+//     **幂等且带完整记账**（enriched_at / summary_attempts）。这里不重写一套补缺。
+//
+// 两段分开的理由见 ingestMovie 的注释：详情必须**先落库**，补缺慢不能挡在它前面。
 //
 // ⚠️ 与后台的大回填（summaryBackfillLoop）共用同一批 synopsis 客户端：
 // 那条链有「上游 30 秒内被请求过就整轮跳过 / 用户一活跃就收手」的避让，
@@ -50,7 +58,7 @@ const (
 type hydrateTask struct {
 	id string
 	// chain 决定补什么：
-	//   - hydrateChainFull：整条（上游详情 + 简介 + 中文标题）—— 详情页点开时用；
+	//   - hydrateChainFull：整条（**先抓 JAVDB 详情**，再补简介与中文标题）—— 详情页点开时用；
 	//   - hydrateChainMagnets：**只抓磁链** —— 用户切到「磁力链接」那一档时用。
 	chain string
 }
@@ -241,8 +249,19 @@ func (s *Service) hydrateLoop(ctx context.Context) {
 			case hydrateChainMagnets:
 				s.runMagnetFetch(ctx, task.id)
 			default:
-				// 复用回填那条链的执行体（幂等、自带记账）。失败只记 warn：
-				// 补缺是锦上添花，失败不该冒到界面上（用户看到的就是「这块还是空的」）。
+				// ① **先把 JAVDB 那份详情抓回来**（一次请求，几百毫秒）：
+				//    演员 / 标签 / 导演 / 片商 / 评分 / 封面这些「点开就该看见」的
+				//    字段全在它里面。少了这一步，从榜单/影库进库的片（只有
+				//    number/title/cover，没有详情）点开永远是空的 —— 而
+				//    backfillSummary 只补简介与中文标题，**不抓详情**。
+				//
+				// ② 再跑补缺链（简介 / 中文标题这些「不急的」，可能要几十秒）。
+				//    它自己带记账（enriched_at / summary_attempts），幂等。
+				if _, err := s.ingestMovie(ctx, task.id, false); err != nil {
+					// 抓不到详情不算致命：本地那份照旧显示，补缺也照跑
+					//（简介只认番号，不需要详情）。
+					s.logWarn("jav hydrate detail failed", "id", task.id, "err", err)
+				}
 				if _, err := s.backfillSummary(ctx, task.id); err != nil {
 					s.logWarn("jav hydrate failed", "id", task.id, "err", err)
 				}

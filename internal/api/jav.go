@@ -261,10 +261,11 @@ func (h *Handler) javMovieByNumber(w http.ResponseWriter, r *http.Request) {
 //
 // 两种模式（2026-09-28 拆分）：
 //
-//   - `?local=1`：**只读本地，绝不碰上游**。详情页首屏走这条，毫秒级返回，
-//     缺的字段就是空；同时把这部排进后台补缺队列（见下面的 hydrate）。
-//   - 默认（`?refresh=1` 或都不给）：老语义，该抓就抓。留给「重新获取」那种
-//     **用户明确要等**的场景。
+//   - `?local=1`：**只读本地，绝不碰上游**。详情页首屏**与轮询**都走这条，
+//     毫秒级返回，缺的字段就是空；同时把这部排进后台补缺队列（见下面的 hydrate），
+//     并把「重新获取」那次刷新的状态搭车回给前端（见 refresh_state）。
+//   - 默认（`?refresh=1` 或都不给）：老语义，该抓就抓。**界面已不再调用**
+//     （抽屉改走 `?local=1` + 后台任务），留着是给 curl / 外部脚本的直通口。
 func (h *Handler) javMovieDetail(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {
 		return
@@ -276,13 +277,24 @@ func (h *Handler) javMovieDetail(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, err)
 			return
 		}
+		// 「重新获取」的状态**搭本地详情一起回去**：前端本来就每 3 秒轮询这条路，
+		// 加两个字段零额外往返 —— 与磁链那个 `pending` 是同一个套路。
+		detail.RefreshState, detail.RefreshError = h.jav.RefreshStatus(id)
+
 		// 首屏读本地之后顺手把这部排进后台补缺队列 —— 用户点开就是想看这部，
 		// 补缺该在后台发生，而不是让他对着「加载中…」等。
 		//
 		// 放在这里而不是让前端多打一次 POST：**少一次往返**，而且「点开即补」
 		// 是这一条语义的一部分，不该由前端记得去做。返回 false（冷却中/已排队）
 		// 不是错误，界面照常显示本地那份。
-		h.jav.Hydrate(id)
+		//
+		// ⚠️ **刷新在途时不要再排补缺**：轮询一跳一次，跑一轮刷新就是上百次
+		// `Hydrate` 调用；平时被队列的 5 分钟冷却挡住，但刷新期间排进去就是白跑
+		// 一遍补缺链（那条链与刷新跑的是同一批上游）。
+		if detail.RefreshState == "" || detail.RefreshState == jav.RefreshStateOK ||
+			detail.RefreshState == jav.RefreshStateFailed {
+			h.jav.Hydrate(id)
+		}
 		writeOK(w, detail)
 		return
 	}
@@ -295,16 +307,44 @@ func (h *Handler) javMovieDetail(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, detail)
 }
 
-// javMovieHydrate 要求后台把这一部补起来（立刻返回，不等结果）。
+// javMovieRefresh 让后台把这部**完整重新获取**一遍（立刻返回，不等结果）。
 //
-// 详情接口在 local 模式下会自己调一次，这个端点留给「明知没补上、想再催一次」
-// 的场景（比如用户手动点刷新）。
-func (h *Handler) javMovieHydrate(w http.ResponseWriter, r *http.Request) {
+// 为什么是后台：这条链实测 24 秒 ~ 126 秒（一次 JAVDB 详情 + 磁链两个站 + 评论），
+// 挂在用户点的按钮上会被任何一层中间件的读超时切掉（用户看到「请求失败 (502)」）。
+// 详见 internal/jav/refresh.go 顶部。
+func (h *Handler) javMovieRefresh(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {
 		return
 	}
-	queued := h.jav.Hydrate(chi.URLParam(r, "id"))
-	writeOK(w, map[string]bool{"queued": queued})
+	id := chi.URLParam(r, "id")
+	queued := h.jav.Refresh(id)
+	state, msg := h.jav.RefreshStatus(id)
+	if !queued && state == "" {
+		// 后台循环没起来（测试 / 快照模式）。**不静默**：说清楚，
+		// 别让用户对着一个「按了没反应」的按钮。见 hydrate.go 的 enqueue 注释。
+		writeErr(w, domain.Errorf(domain.CodeInternal, "后台任务未启动，无法重新获取"))
+		return
+	}
+	// 照本项目惯例：触发端点返回**当前状态快照**而不是单纯 ack。
+	writeOK(w, map[string]any{"queued": queued, "state": state, "error": msg})
+}
+
+// javMovieRefreshMagnets 让后台**重抓**这部片的磁链（立刻返回）。
+//
+// 与 `?local=1` 的墓碑式补缺（HydrateMagnets：「本地没有才去抓」）不同：
+// 这是用户主动点的「不管有没有都重抓一遍」。
+func (h *Handler) javMovieRefreshMagnets(w http.ResponseWriter, r *http.Request) {
+	if !h.javReady(w) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	queued := h.jav.RefreshMagnets(id)
+	state, msg := h.jav.RefreshStatus(id)
+	if !queued && state == "" {
+		writeErr(w, domain.Errorf(domain.CodeInternal, "后台任务未启动，无法刷新磁链"))
+		return
+	}
+	writeOK(w, map[string]any{"queued": queued, "state": state, "error": msg})
 }
 
 // javMoviePreviewURL 现取一个新鲜的预览片播放地址。
@@ -324,7 +364,11 @@ func (h *Handler) javMoviePreviewURL(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]string{"url": url})
 }
 
-// javIngestMovie 强制重新抓一次详情。
+// javIngestMovie 强制重新抓一次详情（**同步**，含补缺链）。
+//
+// ⚠️ 界面已不再调用它 —— 抽屉改走 `POST /movies/{id}/refresh`（后台，见 refresh.go），
+// 因为这条同步路实测 24~126 秒，挂在按钮上会被中间层切掉。
+// 留着是给 curl / 外部脚本的直通口（它带着补缺链，一次就能把简介与中文标题也补上）。
 func (h *Handler) javIngestMovie(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {
 		return
@@ -392,11 +436,16 @@ func (h *Handler) javMovieMagnets(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, err)
 			return
 		}
+		// 「在途」有两个来源：本地一颗都没有（后台在抓第一遍），或者用户刚点了
+		// 「刷新磁链」（后台在重抓）。前端据此显示「获取中…」而不是「没有磁链」——
+		// 显示 0 颗会让用户以为这片没资源，而其实只是还在路上。
+		state, _ := h.jav.RefreshStatus(id)
+		pending := len(items) == 0 || state == jav.RefreshStateRunning
 		if len(items) == 0 {
 			// 本地确实没有 —— 排进后台去抓（幂等：同一部重复排会被去重/冷却挡住）。
 			h.jav.HydrateMagnets(id)
 		}
-		writeOK(w, map[string]any{"items": items, "pending": len(items) == 0})
+		writeOK(w, map[string]any{"items": items, "pending": pending})
 		return
 	}
 	items, err := h.jav.Magnets(r.Context(), id, refresh)

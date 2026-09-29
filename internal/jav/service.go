@@ -14,6 +14,7 @@ package jav
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,6 +31,16 @@ import (
 	"litepan/internal/settings"
 	"litepan/pkg/singleflight"
 )
+
+// enrichBudget 是「补缺链」（简介链 4 个源 + 中文标题链 2 个源）的**整体**上限。
+//
+// 见 fillMissingFields 的注释：每个源最坏 ~40 秒且以前没有总上限，实测整条链 24~126 秒。
+// 到点就用手上已经拿到的，只少补几个字段，不会丢前面的成果。
+//
+// 3 分钟这个值的取舍：正常几秒到几十秒，上限只在病态时生效；而真正需要它兜底的是
+// **后台补缺队列是串行的**（hydrate.go 的 hydrateGap，一次一部）—— 一件无限卡住会挡住
+// 后面所有片的补缺。
+const enrichBudget = 3 * time.Minute
 
 // Service 是番号模块的门面。
 type Service struct {
@@ -130,6 +141,11 @@ type Service struct {
 	// 用 once 惰性建：它只在 Start 之后才有人用，而单测不调 Start。
 	hydrateOnce sync.Once
 	hydrate     *hydrateQueue
+
+	// refresh 是「用户主动点的刷新」队列（见 refresh.go：重新获取 / 刷新磁链）。
+	// 与上面那个**故意分开**（串行队列 + 冷却 + 队头阻塞，三条都不合这里的语义）。
+	refreshOnce sync.Once
+	refresh     *refreshQueue
 }
 
 // JavdbClient 是 JAVDB 客户端的切面，供测试注入。
@@ -522,10 +538,22 @@ func (s *Service) synopsisSources() []synopsis.Source {
 // 要 actor id —— 拿名字硬建关联会让详情页的头像指到别人，宁可不补。
 //
 // 失败只记 warn：补字段是锦上添花，不该让「抓详情」这件事本身失败 —— 与侧车写入同一条规矩。
+//
+// # 为什么套一个总预算（enrichBudget）
+//
+// 每个源单独 `jav_timeout_sec`（默认 20 秒），而 synopsis 的 conn 在**网络层失败时会再用
+// 代理重试一次** —— 单源最坏 ~40 秒；两条链加起来最多 6 个源，**以前没有任何总上限**。
+// 实测一条链 24~126 秒，那正是「重新获取」被中间层切掉的直接原因（见 refresh.go 顶部）。
+//
+// 到点之后的语义是**用手上已经拿到的**：synopsis.Enrich 每进一个源之前检查 ctx，
+// 取消时把已经攒好的 patch 一起返回（见 synopsis.go 的循环），下面照常应用它。
+// 所以截断只会「少补几个字段」，不会把前面的成果丢掉。
 func (s *Service) fillMissingFields(ctx context.Context, n *javdb.NormalizedMovie) {
 	if n == nil || s.testDisableEnrich {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, enrichBudget)
+	defer cancel()
 	missing := synopsis.Missing{
 		Summary: strings.TrimSpace(n.Summary) == "",
 		// 中文标题：**没有就去要一个**（不是「补缺」而是「另存」，见 FieldPatch.TitleZH）。
@@ -546,7 +574,13 @@ func (s *Service) fillMissingFields(ctx context.Context, n *javdb.NormalizedMovi
 	}
 	patch, err := synopsis.Enrich(ctx, n.Number, missing, srcs...)
 	if err != nil {
-		s.logWarn("补番号元数据失败", "number", n.Number, "err", err)
+		// 预算到点**单独记一条 info**：它是「用手上已拿到的」这个正常降级，
+		// 不是故障 —— 混在 warn 里会让日志看起来像上游全挂了。
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.logInfo("补番号元数据超预算，用已拿到的", "number", n.Number, "budget", enrichBudget.String())
+		} else {
+			s.logWarn("补番号元数据失败", "number", n.Number, "err", err)
+		}
 	}
 	// 中文标题走**另一条链**（只有 airav / missav 两家），与简介那条并行 ——
 	// 两条链的判据不同（一个补缺、一个另存），所以分开跑（见 titleEnrichers 的注释）。

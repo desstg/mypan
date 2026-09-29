@@ -95,12 +95,11 @@
   display: block;
 }
 
-.tg-card__image--empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-  font-size: 28px;
+/* MediaImage 的占位图带的是 .tg-card__image（调用方透传的 class），
+   而上面那条 `display: block` 会盖掉占位图自己的 grid —— 图标就不居中了。
+   这里把 display 拉回来。放在 --empty 之后靠**顺序**赢（同特异性）。 */
+.tg-card__image.media-ph {
+  display: grid;
 }
 
 /* 左上角类型角标 */

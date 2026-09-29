@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import AppInput from "@/components/base/AppInput.vue";
+import MediaImage from "@/components/base/MediaImage.vue";
 import AppPagination from "@/components/base/AppPagination.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
@@ -179,14 +180,11 @@ defineExpose({ load });
         @click="emit('open', item)"
       >
         <div class="tg-card__poster">
-          <img
-            v-if="item.poster_path"
+          <MediaImage
             class="tg-card__image"
             :src="tgPosterURL(item.poster_path, posterSize)"
             :alt="titleOf(item)"
-            loading="lazy"
           />
-          <div v-else class="tg-card__image tg-card__image--empty">🎬</div>
 
           <span class="tg-card__type">{{ mediaType === "movie" ? "电影" : "剧集" }}</span>
 

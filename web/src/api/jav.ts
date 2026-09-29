@@ -149,18 +149,24 @@ export function fetchJavMovie(id: string, refresh = false, local = false) {
 }
 
 /**
- * 要求后台把这一部补起来（立刻返回，不等结果）。
+ * 让后台把这部**完整重新获取**一遍（**立刻返回**）。
  *
- * 详情接口在 local 模式下**自己会调一次**，所以正常情况下前端不用管它；
- * 这个函数留给「明知没补上、想再催一次」的场景。
- * 返回 `queued: false` 表示冷却中或已排队 —— 不是错误。
+ * 为什么要后台：这条链要打好几个上游（JAVDB 详情 + 磁链两个站 + 评论），
+ * 实测最坏两分钟 —— 挂在按钮上会被中间层的读超时切掉（「请求失败 (502)」）。
+ *
+ * 返回的 `state` 是**当前**状态（running / ok / failed，空 = 没跑过）：
+ * `queued: false` 表示已经在跑了（去重），**不是错误**。
+ * 结果靠轮询 `GET /movies/{id}?local=1` 里的 `refresh_state` 看。
  */
-export function hydrateJavMovie(id: string) {
-  return http.post<{ queued: boolean }>(`${BASE}/movies/${encodeURIComponent(id)}/hydrate`, {});
+export function refreshJavMovie(id: string) {
+  return http.post<{ queued: boolean; state: string; error?: string }>(
+    `${BASE}/movies/${encodeURIComponent(id)}/refresh`, {});
 }
 
-export function ingestJavMovie(id: string) {
-  return http.post<JavMovieCard>(`${BASE}/movies/${encodeURIComponent(id)}/ingest`, {});
+/** 让后台**重抓**这部片的磁链（立刻返回）。与上面同形。 */
+export function refreshJavMovieMagnets(id: string) {
+  return http.post<{ queued: boolean; state: string; error?: string }>(
+    `${BASE}/movies/${encodeURIComponent(id)}/magnets/refresh`, {});
 }
 
 /**

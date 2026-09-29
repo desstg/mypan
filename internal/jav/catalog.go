@@ -13,6 +13,7 @@ import (
 	"litepan/internal/jav/javbus"
 	"litepan/internal/jav/javdb"
 	"litepan/internal/jav/quality"
+	"litepan/internal/jav/synopsis"
 )
 
 // 检索结果的默认页大小，与源码对齐。
@@ -605,7 +606,10 @@ func (s *Service) rankCards(ctx context.Context, movies []javdb.Movie) []MovieCa
 // ⚠️ 2026-09-28 起，**详情页不再走这条路** —— 它要「立刻显示本地已有的」，
 // 而这里的 needFetch 会让绝大多数点开都同步等好几秒（真库 8760 部里 6842 部
 // raw_json 是空的）。详情页走 DetailLocal()，上游补缺交给后台（见 hydrate.go）。
-// 这条路保留给「重新获取」那种**用户明确要等**的场景。
+//
+// 现在**界面已经一处都不调它了**（2026-09-29：「重新获取」也改成后台任务，
+// 见 refresh.go）。留着是给 curl / 外部脚本的直通口 —— `?refresh=1` 会顺带跑
+// 补缺链，一次把简介与中文标题也补上，这一点后台那条链做不到（它只跑补缺、不重取详情）。
 func (s *Service) Detail(ctx context.Context, id string, refresh bool) (*MovieDetail, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -698,8 +702,30 @@ func rawHasRelativeMovies(raw string) bool {
 	return strings.Contains(raw, `"relative_movies"`)
 }
 
-// IngestMovie 抓一部影片的完整详情并入库（含演员关联）。
+// IngestMovie 抓一部影片的完整详情并入库（含演员关联 + **补缺链**）。
+//
+// 搜索、订阅检查、以及首次进详情都走它 —— 补缺链挂在这一层，一处覆盖全部。
+//
+// ⚠️ 「重新获取」那颗按钮**不走这条**（走 ingestMovieDetailOnly）：它的补缺链要打
+// 4~6 个外站，实测整条 24~126 秒，挂在用户点的按钮上必然超时。简介与中文标题
+// 交给后台的补缺循环（summaryBackfillLoop / hydrate 队列），那颗按钮只管把
+// **JAVDB 自己的那份详情**重新取回来。详见 refresh.go 顶部的说明。
 func (s *Service) IngestMovie(ctx context.Context, id string) (*domain.JavMovie, error) {
+	return s.ingestMovie(ctx, id, true)
+}
+
+// ingestMovieDetailOnly 只重取 JAVDB 的详情（**不跑补缺链**）。
+//
+// 这是「重新获取」要的那件事：一次 JAVDB 请求（带重试），把那部片的封面、演员、
+// 发行日期、时长、评分、标签这些**JAVDB 口径**的字段更新回库。
+//
+// 简介与中文标题不在这里补 —— 它们是后台补缺循环的活（同一个函数 fillMissingFields
+// 在 IngestMovie 上仍然照跑，所以首次入库、搜索、订阅检查那些路一条都没变）。
+func (s *Service) ingestMovieDetailOnly(ctx context.Context, id string) (*domain.JavMovie, error) {
+	return s.ingestMovie(ctx, id, false)
+}
+
+func (s *Service) ingestMovie(ctx context.Context, id string, enrich bool) (*domain.JavMovie, error) {
 	client, err := s.javdbClient()
 	if err != nil {
 		return nil, err
@@ -712,14 +738,6 @@ func (s *Service) IngestMovie(ctx context.Context, id string) (*domain.JavMovie,
 	if n.ID == "" {
 		return nil, domain.Errorf(domain.CodeNotFound, "上游没有返回这部影片")
 	}
-	// JAVDB 大面积不给简介（实测用户库 8574 部里只有 435 部有），去别的站补一段。
-	// 只在这条路上补：详情页、搜索、订阅检查**全都走 IngestMovie**，一处覆盖全部。
-	s.fillMissingFields(ctx, &n)
-	if strings.TrimSpace(n.SummarySource) != "" {
-		// 补到了（来源非空才推）：本地那份 json 也得有，否则 nfo 里还是空
-		// （nfo 读的是本地 json，不是库）。写失败只记 warn，不影响入库。
-		s.pushSummaryToSidecar(n.Number, n.Summary)
-	}
 
 	// raw_json 存原始响应：上游字段随时会变，全量留一份保证「当时收到了什么」
 	// 这个事实不丢，将来排查「某个字段为什么是空的」时是唯一线索。
@@ -728,11 +746,20 @@ func (s *Service) IngestMovie(ctx context.Context, id string) (*domain.JavMovie,
 		rawJSON = string(b)
 	}
 
+	// ⚠️ **先把 JAVDB 这份入库，再去补缺**（2026-09-29 修的，顺序不能反）。
+	//
+	// 反过来的代价实测过：补缺链要打 4~6 个外站（每个源最坏 ~40 秒，见 enrichBudget），
+	// 而入库排在它后面 —— 链一慢、请求被中间层切掉，**连 JAVDB 自己的那份都没落库**
+	// （演员 / 标签 / 导演 / 片商 / 评分 / 封面全空）。用户看到的就是「反复打开同一部
+	// 影片，元数据一直是空的」，而每次都在等待中被切断，一次都没存进去。
+	//
+	// 一次 JAVDB 请求本来就是几百毫秒，先把这份存好，详情页点开立刻就有东西看；
+	// 补缺（简介 / 中文标题这些）慢就慢，压根不该挡在入库前面。
 	rec := s.domainMovie(n, rawJSON)
 	if err := s.movies.Upsert(ctx, rec); err != nil {
 		return nil, err
 	}
-
+	// 演员是关联表，跟着一起写 —— 它同样来自 JAVDB 那份响应，不属于补缺。
 	if len(n.Actors) > 0 {
 		ids := make([]string, 0, len(n.Actors))
 		for _, a := range n.Actors {
@@ -752,11 +779,114 @@ func (s *Service) IngestMovie(ctx context.Context, id string) (*domain.JavMovie,
 		}
 	}
 
+	// 补缺放在**入库之后**：它失败（或被预算截断）只影响「简介 / 中文标题这些锦上添花
+	// 的字段」，不该让上面那份已经拿到的数据一起丢掉。
+	if enrich {
+		s.enrichAndSave(ctx, rec, &n)
+	}
+
 	saved, err := s.movies.Get(ctx, n.ID)
 	if err != nil {
 		return rec, nil
 	}
 	return saved, nil
+}
+
+// enrichAndSave 跑补缺链并把补到的字段写回库（**入库之后的第二步**）。
+//
+// 为什么单独一段、而且重新 Get 一次：补缺可能跑上一分钟（见 enrichBudget），
+// 期间用户可能已经在别处改了这一部（编辑器保存、重刮、订阅检查又抓了一次）。
+// 拿入库那一刻的 rec 直接写回去会把那些改动覆盖掉 —— 所以这里重新读一次当前记录，
+// 在它上面套补丁，再 Upsert（Upsert 本身就只在字段非空时才覆盖 summary/title_zh
+// 那几个「别处给不出」的列，见 store 里那段注释）。
+//
+// 补缺失败只记 warn：它是锦上添花，绝不翻掉已经完成的入库。
+func (s *Service) enrichAndSave(ctx context.Context, rec *domain.JavMovie, n *javdb.NormalizedMovie) {
+	// 拿一份**独立副本**给补缺用：那个函数会往 n 上写补到的值，
+	// 而 n 是调用方的（入库已经用过了，这里不该再动它）。
+	work := *n
+	s.fillMissingFields(ctx, &work)
+
+	patch := patchFromNormalized(&work, n)
+	if patch.Empty() {
+		return
+	}
+	// 重新读一次：见上面的说明（补缺期间这行可能被别的路径改过）。
+	current, err := s.movies.Get(ctx, rec.ID)
+	if err != nil || current == nil {
+		current = rec
+	}
+	linked, _ := s.movies.ListActors(ctx, current.ID)
+	applyPatch(current, patch, linked)
+	if err := s.movies.Upsert(ctx, current); err != nil {
+		s.logWarn("jav enrichment save failed", "id", current.ID, "err", err)
+		return
+	}
+	if patch.Summary != "" {
+		// 补到了：本地那份 json 也得有，否则 nfo 里还是空
+		// （nfo 读的是本地 json，不是库）。写失败只记 warn，不影响入库。
+		s.pushSummaryToSidecar(work.Number, patch.Summary)
+	}
+	if patch.TitleZH != "" {
+		// 中文标题同样要落到本地那份 json 上（侧车那边是**替换 title**）。
+		s.pushTitleZHToSidecar(work.Number, patch.TitleZH)
+	}
+}
+
+// patchFromNormalized 比出「补缺链到底补到了什么」。
+//
+// 判据是**与补缺前那份比**（before 是 JAVDB 原始响应里的值）：补缺只填缺的，
+// 所以「after 有、before 没有」的就是这次补到的。
+func patchFromNormalized(after, before *javdb.NormalizedMovie) synopsis.FieldPatch {
+	var p synopsis.FieldPatch
+	if strings.TrimSpace(before.Summary) == "" && strings.TrimSpace(after.Summary) != "" {
+		p.Summary = after.Summary
+		p.Source = strings.TrimSpace(after.SummarySource)
+	}
+	if strings.TrimSpace(before.TitleZH) == "" && strings.TrimSpace(after.TitleZH) != "" {
+		p.TitleZH = after.TitleZH
+		if p.Source == "" {
+			p.Source = strings.TrimSpace(after.TitleZHSource)
+		}
+	}
+	if strings.TrimSpace(before.ReleaseDate) == "" {
+		p.ReleaseDate = strings.TrimSpace(after.ReleaseDate)
+	}
+	if before.Duration <= 0 && after.Duration > 0 {
+		p.DurationMin = after.Duration
+	}
+	if strings.TrimSpace(before.DirectorName) == "" {
+		p.Director = strings.TrimSpace(after.DirectorName)
+	}
+	if strings.TrimSpace(before.MakerName) == "" {
+		p.Maker = strings.TrimSpace(after.MakerName)
+	}
+	if len(before.Tags) == 0 && len(after.Tags) > 0 {
+		p.Tags = append([]string(nil), after.Tags...)
+	}
+	// Filled 是 Empty() 的判据 —— 上面每补到一项都要记一笔，否则整段会被当成「什么都没补到」。
+	if p.Summary != "" {
+		p.Filled = append(p.Filled, "summary")
+	}
+	if p.TitleZH != "" {
+		p.Filled = append(p.Filled, "title_zh")
+	}
+	if p.ReleaseDate != "" {
+		p.Filled = append(p.Filled, "release_date")
+	}
+	if p.DurationMin > 0 {
+		p.Filled = append(p.Filled, "duration")
+	}
+	if p.Director != "" {
+		p.Filled = append(p.Filled, "director")
+	}
+	if p.Maker != "" {
+		p.Filled = append(p.Filled, "maker")
+	}
+	if len(p.Tags) > 0 {
+		p.Filled = append(p.Filled, "tags")
+	}
+	return p
 }
 
 // IngestByNumber 按番号抓取：先搜，命中后抓第一条的详情。

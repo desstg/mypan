@@ -9,6 +9,7 @@ import {
   type JavWallListResult,
 } from "@/api/strmJavWall";
 import AppButton from "@/components/base/AppButton.vue";
+import MediaImage from "@/components/base/MediaImage.vue";
 import StrmJavMetaDrawer from "@/components/admin/StrmJavMetaDrawer.vue";
 import { toast } from "@/composables/useToast";
 import "@/styles/jav.css";
@@ -221,9 +222,11 @@ defineExpose({ refreshMeta, load });
     <div v-else class="jav-wall__grid" :class="`jav-wall__grid--${view}`">
       <article v-for="item in items" :key="item.id" class="jav-card jav-card--wall">
         <div class="jav-card__cover" :class="{ 'jav-card__cover--poster': view === 'poster' }">
-          <img v-if="view === 'poster' && item.poster_url" :src="item.poster_url" :alt="item.number" loading="lazy" />
-          <img v-else-if="view === 'thumb' && item.thumb_url" :src="item.thumb_url" :alt="item.number" loading="lazy" />
-          <div v-else class="jav-card__placeholder">无图</div>
+          <!-- 两个视图各自的 URL；都没有或加载失败 → 统一占位图。 -->
+          <MediaImage
+            :src="view === 'poster' ? (item.poster_url ?? '') : (item.thumb_url ?? '')"
+            :alt="item.number"
+          />
 
           <div class="jav-card__hover">
             <AppButton type="button" size="sm" variant="secondary" @click="openEditor(item)">编辑</AppButton>

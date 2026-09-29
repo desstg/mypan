@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import AppButton from "@/components/base/AppButton.vue";
+import MediaImage from "@/components/base/MediaImage.vue";
 import AppDropdown from "@/components/base/AppDropdown.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
@@ -274,14 +275,11 @@ defineExpose({ load });
             :title="`《${titleOf(sub)}》· 点开订阅详情`"
             @click="openDetail(sub)"
           >
-            <img
-              v-if="sub.poster_path"
+            <MediaImage
               class="tg-card__image"
               :src="tgPosterURL(sub.poster_path, 'w300')"
               :alt="titleOf(sub)"
-              loading="lazy"
             />
-            <div v-else class="tg-card__image tg-card__image--empty">🎬</div>
           </button>
 
           <!-- 海报四角各放一个元素：左上类型、右上勾选、左下状态、右下悬停操作。

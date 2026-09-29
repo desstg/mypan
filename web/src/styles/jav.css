@@ -72,7 +72,8 @@
   overflow: hidden;
 }
 
-.jav-card__cover img {
+.jav-card__cover img,
+.jav-card__cover .media-ph {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -1051,7 +1052,8 @@
   font-size: 22px;
 }
 
-.jav-actor-avatar img {
+.jav-actor-avatar img,
+.jav-actor-avatar .media-ph {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -1654,6 +1656,7 @@
 }
 
 .jd-cover img,
+.jd-cover .media-ph,
 .jd-cover video {
   width: 100%;
   height: 100%;
@@ -1835,7 +1838,8 @@
   flex-shrink: 0;
 }
 
-.jd-actor__avatar img {
+.jd-actor__avatar img,
+.jd-actor__avatar .media-ph {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -1879,7 +1883,8 @@
 }
 .jd-previews::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
-.jd-previews img {
+.jd-previews img,
+.jd-previews .media-ph {
   flex: 0 0 auto;
   width: 168px;
   aspect-ratio: 3 / 2;
@@ -1890,7 +1895,8 @@
   transition: transform 0.15s, box-shadow 0.15s;
 }
 
-.jd-previews img:hover {
+.jd-previews img:hover,
+.jd-previews .media-ph:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-card);
 }
@@ -1948,7 +1954,8 @@
   box-shadow: var(--shadow-pop);
 }
 
-.jd-rel__card img {
+.jd-rel__card img,
+.jd-rel__card .media-ph {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -2096,7 +2103,8 @@
   .jd-lightbox__arrow { width: 40px; height: 40px; font-size: 1.5rem; }
   .jd-lightbox__arrow--prev { left: 6px; }
   .jd-lightbox__arrow--next { right: 6px; }
-  .jd-previews img { width: 132px; }
+  .jd-previews img,
+  .jd-previews .media-ph { width: 132px; }
   .jd-rel__card { width: 118px; }
   /* 一排只放得下一张多一点时，翻页键会盖住卡片本身，收进内侧。 */
   .jd-rel__nav--prev { left: -6px; }

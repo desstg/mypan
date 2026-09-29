@@ -61,6 +61,15 @@ export interface JavMovieDetail extends JavMovieCard {
   can_play: boolean;
   relative_movies: JavRelativeMovie[];
   reviews_count: number;
+  /**
+   * 「重新获取」后台任务的状态：running / ok / failed，空串 = 没点过 / 已过期 / 重启过。
+   *
+   * 服务端**只在 `?local=1` 那条路上**填它（详情页首屏与轮询都走那条），
+   * 所以它搭着本来就要发的轮询回来，零额外请求。
+   */
+  refresh_state?: string;
+  /** 上一次「重新获取」失败的原因（成功后为空）。 */
+  refresh_error?: string;
 }
 
 /**

@@ -36,6 +36,7 @@ import AppIconButton from "@/components/base/AppIconButton.vue";
 import AppInput from "@/components/base/AppInput.vue";
 import AppModal from "@/components/base/AppModal.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
+import MediaImage from "@/components/base/MediaImage.vue";
 import BusySpinner from "@/components/base/BusySpinner.vue";
 import { useAdminPageLoading } from "@/composables/useAdminLoadingBar";
 import { useConditionalPolling } from "@/composables/useConditionalPolling";
@@ -1189,14 +1190,8 @@ defineExpose({
               :class="{ 'scrape-card--busy': isItemBusy(item) }"
             >
               <div class="scrape-card__poster">
-                <img
-                  v-if="item.poster_url"
-                  :src="item.poster_url"
-                  :alt="item.title"
-                  loading="lazy"
-                  decoding="async"
-                />
-                <div v-else class="scrape-card__placeholder">{{ item.title.slice(0, 1) }}</div>
+                <!-- 加载失败也落到统一占位图（以前只有「没有 URL」才有兜底）。 -->
+                <MediaImage :src="item.poster_url ?? ''" :alt="item.title" />
 
                 <span
                   class="scrape-card__mark"
@@ -1339,8 +1334,7 @@ defineExpose({
               :title="hitPosterURL(hit) ? '点击放大' : undefined"
               @click="openPosterPreview(hit, $event)"
             >
-              <img v-if="hitPosterURL(hit)" :src="hitPosterURL(hit)" :alt="hitTitle(hit)" loading="lazy" />
-              <span v-else class="scrape-match__card-ph">无图</span>
+              <MediaImage :src="hitPosterURL(hit)" :alt="hitTitle(hit)" />
             </div>
             <div class="scrape-match__card-body">
               <div class="scrape-match__card-title" :title="hitTitle(hit)">{{ hitTitle(hit) }}</div>
@@ -1852,21 +1846,12 @@ defineExpose({
   background: var(--surface-sunken);
   overflow: hidden;
 }
-.scrape-card__poster img {
+.scrape-card__poster img,
+.scrape-card__poster .media-ph {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
-}
-.scrape-card__placeholder {
-  width: 100%;
-  height: 100%;
-  display: grid;
-  place-items: center;
-  font-size: 42px;
-  font-weight: 800;
-  background: linear-gradient(135deg, color-mix(in srgb, var(--text) 88%, transparent), var(--text-muted));
-  color: var(--text-on-brand);
 }
 .scrape-card__mark {
   position: absolute;
@@ -2124,19 +2109,12 @@ defineExpose({
   outline: 2px solid var(--brand);
   outline-offset: 1px;
 }
-.scrape-match__card-poster img {
+.scrape-match__card-poster img,
+.scrape-match__card-poster .media-ph {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
-}
-.scrape-match__card-ph {
-  width: 100%;
-  height: 100%;
-  display: grid;
-  place-items: center;
-  font-size: 10px;
-  color: var(--text-muted);
 }
 .scrape-match__card-body {
   padding: 0;

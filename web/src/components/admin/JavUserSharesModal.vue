@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import AppButton from "@/components/base/AppButton.vue";
 import AppPlainModal from "@/components/base/AppPlainModal.vue";
+import MediaImage from "@/components/base/MediaImage.vue";
 import { getApiErrorMessage } from "@/api/client";
 import { fetchJavUserShares, followJavUser, pushJavMagnet, unfollowJavUser, javImageURL } from "@/api/jav";
 import { toast } from "@/composables/useToast";
@@ -195,8 +196,7 @@ watch(
         <div v-for="m in items" :key="m.id" class="jav-us__row">
           <!-- 影片头：封面 + 番号 + 标题 + 日期。点它开详情。 -->
           <div class="jav-us__head" @click="emit('openMovie', m.id)">
-            <img v-if="m.cover" class="jav-us__thumb" :src="javImageURL(m.cover)" loading="lazy" :alt="m.number" />
-            <div v-else class="jav-us__thumb jav-us__thumb--none">无封面</div>
+            <MediaImage class="jav-us__thumb" :src="javImageURL(m.cover)" :alt="m.number" />
             <div class="jav-us__meta">
               <div class="jav-us__num">
                 {{ m.number || m.id }}
@@ -299,12 +299,10 @@ watch(
   background: var(--surface-sunken);
 }
 
-.jav-us__thumb--none {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  color: var(--text-muted);
+/* MediaImage 的占位图带的是 .jav-us__thumb（调用方透传的 class）——
+   补一条 display 让它内部那个图标居中（上面的规则只保证尺寸）。 */
+.jav-us__thumb.media-ph {
+  display: grid;
 }
 
 .jav-us__meta {

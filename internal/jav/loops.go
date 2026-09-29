@@ -65,6 +65,9 @@ func (s *Service) startLoops(ctx context.Context) {
 	go s.summaryBackfillLoop(ctx, gate)
 	// 详情页点开就调 Hydrate 把这部排进来，消费者是这一个 goroutine（见 hydrate.go）。
 	go s.hydrateLoop(ctx)
+	// 「重新获取 / 刷新磁链」那两颗按钮排的活（见 refresh.go）。**与上面那个分开**：
+	// 那条是串行 + 带冷却的补缺，这条是用户主动点的、不许被冷却挡掉的长活。
+	go s.refreshLoop(ctx)
 	// 给影库里**没有磁链**的片后台补磁链（见 magnetSweepLoop）。
 	go s.magnetSweepLoop(ctx, gate)
 }

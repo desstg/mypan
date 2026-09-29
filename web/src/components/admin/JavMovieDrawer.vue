@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import AppButton from "@/components/base/AppButton.vue";
+import MediaImage from "@/components/base/MediaImage.vue";
 import AdminSettingsDrawer from "@/components/admin/AdminSettingsDrawer.vue";
 import JavUserSharesModal from "@/components/admin/JavUserSharesModal.vue";
 import SectionTabBar from "@/components/admin/SectionTabBar.vue";
@@ -11,9 +12,10 @@ import {
   fetchJavPreviewURL,
   fetchJavRelatedLists,
   fetchJavReviews,
-  ingestJavMovie,
   javImageURL,
   pushJavMagnet,
+  refreshJavMovie,
+  refreshJavMovieMagnets,
 } from "@/api/jav";
 import { toast } from "@/composables/useToast";
 import type {
@@ -465,19 +467,35 @@ function detailStillMissing(): boolean {
   return !d.summary || !d.title_zh || d.comments_count === 0;
 }
 
+/**
+ * 「重新获取」在跑时，轮询要等的是**服务端那个任务**，不是「本地还缺哪几个字段」——
+ * 所以判据换成服务端回的 `refresh_state === "running"`。
+ *
+ * 为什么单列一位而不是并进 detailStillMissing：那一堆判据会随着补缺陆续满足而
+ * 自动停（这正是它们的作用），而这一位**只有任务真跑完才该停**；混在一起会出现
+ * 「字段先齐了就提前停轮询、任务结果永远看不到」。
+ */
+const refreshPending = ref(false);
+
 /** 轮询上限（次）。缺的东西（比如这片本来就没有磁链）补不上时不能无限轮下去。 */
 const DETAIL_POLL_MAX = 20;
+/** 「重新获取」在跑时的轮询上限：它可能跑几分钟（服务端预算见 jav.refreshBudget）。 */
+const REFRESH_POLL_MAX = 100;
+
+function currentPollMax(): number {
+  return refreshPending.value ? REFRESH_POLL_MAX : DETAIL_POLL_MAX;
+}
 
 function syncDetailPoll(round = 0) {
   if (detailPollTimer !== null) {
     clearTimeout(detailPollTimer);
     detailPollTimer = null;
   }
-  if (!props.open || !props.movieId || !detailStillMissing()) {
+  if (!props.open || !props.movieId || !(detailStillMissing() || refreshPending.value)) {
     pollingActive.value = false;
     return;
   }
-  if (round >= DETAIL_POLL_MAX) {
+  if (round >= currentPollMax()) {
     // 到顶就停：已经问过一圈，缺的就是真缺（比如这片本来没有磁链），
     // 别再显示「加载中…」吊着用户。
     pollingActive.value = false;
@@ -494,14 +512,39 @@ function syncDetailPoll(round = 0) {
         void loadMagnets();
       }
       const next = await fetchJavMovie(props.movieId, false, true);
+      const wasPending = refreshPending.value;
       // 只在还是同一部时才写回（用户可能已经翻到别的片了）。
       if (next.id === detail.value?.id) detail.value = next;
+      refreshPending.value = next.refresh_state === "running";
+      // **完成边沿**：在跑 → 不跑了。这是本项目检测「后台任务收工」的通用套路
+      // （见 StrmScrapePanel 的 wasRunning && !p.running）。
+      if (wasPending && !refreshPending.value) onRefreshFinished(next);
     } catch {
       /* 轮询失败静默：下一跳再试，不打扰用户 */
     }
     schedulePushPoll();
     syncDetailPoll(round + 1);
   }, DETAIL_POLL_MS);
+}
+
+/**
+ * 「重新获取」跑完那一跳。
+ *
+ * 轮询期间**全程安静**（本项目规矩：轮询不弹提示），只在这里弹一次结果。
+ * 顺带把依赖的几块对齐：磁链与评论都被那条任务换过一遍，不能拿旧的那份继续用。
+ */
+function onRefreshFinished(next: JavMovieDetail) {
+  if (next.refresh_state === "failed") {
+    toast.error(next.refresh_error || "重新获取失败");
+  } else {
+    toast.success("已重新获取");
+  }
+  if (next.magnets.length) magnetsLoaded.value = true;
+  if (next.comments_count > 0) sharesLoaded.value = true;
+  // 正在看的那两档：内容换过了，重新拉一次（不在看就不管，切过去时会自己拉）。
+  if (tab.value === TAB_REVIEWS && reviews.value.length > 0) void loadReviews(1);
+  else if (tab.value === TAB_COMMENTS) void ensureShares();
+  emit("changed");
 }
 
 function stopDetailPoll() {
@@ -614,28 +657,47 @@ async function loadRelatedLists() {
 }
 
 /** 重新抓一次上游元数据。 */
+/**
+ * 重新获取：**排一个后台任务，立刻返回**。
+ *
+ * 以前是同步等两件重活（POST /ingest + GET ?refresh=1），而后者内部又跑一遍
+ * 整条补缺链 —— 实测一个请求 24~126 秒，中间任何一层（反代 / 浏览器侧代理 /
+ * 网关）的读超时都会把它切掉，用户看到的是「请求失败 (502)」。
+ *
+ * 现在：POST 立刻回来 → 服务端的任务在后台跑 → 轮询看 `refresh_state`，
+ * 跑完在 onRefreshFinished 里弹一次结果。**这样不管它跑多久都不会被切。**
+ */
 async function reingest() {
-  if (!props.movieId) return;
-  refreshing.value = true;
+  if (!props.movieId || refreshPending.value) return;
+  // 先乐观置位：POST 到下一次轮询之间按钮不该闪回「重新获取」。
+  refreshPending.value = true;
   try {
-    await ingestJavMovie(props.movieId);
-    // 「重新获取」是**用户明确要等**的动作：走完整语义（该抓就抓），不是本地模式。
-    await load(true, false);
-    toast.success("已重新获取");
+    const res = await refreshJavMovie(props.movieId);
+    // 服务端说没入队 = 已经在跑了（去重），照样算在跑；以轮询看到的状态为准。
+    refreshPending.value = res.queued || res.state === "running";
   } catch (err) {
+    refreshPending.value = false;
     toast.error(getApiErrorMessage(err, "重新获取失败"));
-  } finally {
-    refreshing.value = false;
+    return;
   }
+  syncDetailPoll();
 }
 
-/** 重新抓一次磁链。 */
+/**
+ * 重新抓一次磁链：**同样排后台任务**（那两个站很慢，理由与 reingest 一样）。
+ *
+ * 以前这里调的是 `fetchJavMovie(id, true)` —— 为了刷磁链把**整条补缺链**重跑一遍
+ * （`?refresh=1` 内部会再跑一次 IngestMovie）。现在走磁链自己的端点：
+ * 一次 JAVDB + 一次 JAVBUS，后台跑，前端看 `magnetsPending`（服务端把「磁链刷新在途」
+ * 也并进了那个 pending 标记）。
+ */
 async function refreshMagnets() {
-  if (!props.movieId) return;
+  if (!props.movieId || refreshing.value) return;
   refreshing.value = true;
   try {
-    detail.value = await fetchJavMovie(props.movieId, true);
-    toast.success("磁链已刷新");
+    const res = await refreshJavMovieMagnets(props.movieId);
+    magnetsPending.value = res.queued || res.state === "running";
+    if (!magnetsPending.value) await loadMagnets();
   } catch (err) {
     toast.error(getApiErrorMessage(err, "磁链刷新失败"));
   } finally {
@@ -804,7 +866,15 @@ onUnmounted(() => {
     <div v-else-if="error && !detail" class="jav-empty">
       <div class="jav-empty__icon">⚠️</div>
       <div>{{ error }}</div>
-      <AppButton variant="ghost" size="sm" style="margin-top: 12px" @click="reingest">重新获取</AppButton>
+      <AppButton
+        variant="ghost"
+        size="sm"
+        style="margin-top: 12px"
+        :disabled="refreshPending"
+        @click="reingest"
+      >
+        {{ refreshPending ? "获取中…" : "重新获取" }}
+      </AppButton>
     </div>
 
     <div v-else-if="detail">
@@ -828,8 +898,11 @@ onUnmounted(() => {
           </span>
         </div>
         <div class="jd-meta__right">
-          <button class="jd-btn" :disabled="refreshing" @click="reingest">
-            <i class="fas fa-sync-alt" /> {{ refreshing ? "获取中…" : "重新获取" }}
+          <!-- 禁用绑 **refreshPending** 而不是 refreshing：后者与「刷新磁链」共用，
+               轮询把它点着会让这颗按钮莫名闪一下（那段注释就是这么写的）。 -->
+          <button class="jd-btn" :disabled="refreshPending" @click="reingest">
+            <i :class="refreshPending ? 'fas fa-spinner fa-spin' : 'fas fa-sync-alt'" />
+            {{ refreshPending ? "获取中…" : "重新获取" }}
           </button>
           <button
             class="jd-btn"
@@ -847,12 +920,7 @@ onUnmounted(() => {
         <div class="jd-col">
           <div class="jd-cover">
             <video v-if="showPlayer" ref="videoRef" controls playsinline />
-            <img
-              v-else-if="detail.cover"
-              :src="javImageURL(detail.cover)"
-              :alt="detail.number || detail.id"
-            />
-            <div v-else class="jav-card__placeholder">无封面</div>
+            <MediaImage v-else :src="javImageURL(detail.cover)" :alt="detail.number || detail.id" />
 
             <button
               v-if="!showPlayer"
@@ -947,13 +1015,8 @@ onUnmounted(() => {
             @click="searchByActor(a)"
           >
             <span class="jd-actor__avatar">
-              <img
-                v-if="a.avatar_url"
-                :src="javImageURL(a.avatar_url)"
-                loading="lazy"
-                :alt="a.name"
-              />
-              <template v-else>{{ a.name.slice(0, 1) }}</template>
+              <!-- 头像挂了也落到占位图（人形那个 variant）。 -->
+              <MediaImage :src="javImageURL(a.avatar_url)" :alt="a.name" variant="person" />
             </span>
             <span>{{ a.name }}</span>
           </button>
@@ -982,11 +1045,10 @@ onUnmounted(() => {
           <span class="jd-count">{{ detail.preview_images.length }}</span>
         </div>
         <div class="jd-previews">
-          <img
+          <MediaImage
             v-for="(src, i) in detail.preview_images"
             :key="i"
             :src="javImageURL(src)"
-            loading="lazy"
             alt="预览图"
             @click="openLightbox(i)"
           />
@@ -1009,8 +1071,7 @@ onUnmounted(() => {
               :title="r.number"
               @click="emit('openMovie', r.id)"
             >
-              <img v-if="r.thumb" :src="javImageURL(r.thumb)" loading="lazy" :alt="r.number" />
-              <div v-else class="jav-card__placeholder">无封面</div>
+              <MediaImage :src="javImageURL(r.thumb)" :alt="r.number" />
               <span class="jd-rel__flag" :class="{ 'jd-rel__flag--missing': !r.in_library }">
                 {{ r.in_library ? "已入库" : "未入库" }}
               </span>

@@ -498,6 +498,10 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/movies/by-number", h.javMovieByNumber)
 				r.Get("/movies/{id}", h.javMovieDetail)
 				r.Post("/movies/{id}/ingest", h.javIngestMovie)
+				// 后台跑的用户主动刷新（立刻返回；状态搭 ?local=1 的详情回去）。
+				// 与上面那条 /ingest 的区别：这两条**不在请求里跑长链**，见 internal/jav/refresh.go。
+				r.Post("/movies/{id}/refresh", h.javMovieRefresh)
+				r.Post("/movies/{id}/magnets/refresh", h.javMovieRefreshMagnets)
 				r.Get("/movies/{id}/magnets", h.javMovieMagnets)
 				// 预览片地址现取：上游那份带限时签名，存的会过期。
 				r.Get("/movies/{id}/preview-url", h.javMoviePreviewURL)
