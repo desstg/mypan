@@ -443,7 +443,12 @@ async function load(refresh = false, local = true) {
     }
     // 首屏之后**至少还轮一跳**（见 pollMustTickOnce）：首屏那份可能是后台写入
     // 之前的快照，没有再拉一次的话导演/片商/评分/标签会一直停在旧值。
-    if (first) pollMustTickOnce.value = true;
+    if (first) {
+      pollMustTickOnce.value = true;
+      // 换了一部片：上一部「用户点过重新获取」不能把完成提示带到这一部
+      //（这一部是自动刷的，全程静默）。
+      userAskedRefresh = false;
+    }
     syncDetailPoll();
   }
 }
@@ -493,6 +498,14 @@ function detailStillMissing(): boolean {
  * 「字段先齐了就提前停轮询、任务结果永远看不到」。
  */
 const refreshPending = ref(false);
+
+/**
+ * 这次任务是不是**用户点了按钮**发起的。
+ *
+ * 只有它决定「跑完要不要弹一句」：打开详情自动做的那次（autoRefresh）全程静默。
+ * 不用 ref：它只被轮询回调读，不参与渲染。
+ */
+let userAskedRefresh = false;
 
 /** 轮询上限（次）。缺的东西（比如这片本来就没有磁链）补不上时不能无限轮下去。 */
 const DETAIL_POLL_MAX = 20;
@@ -564,14 +577,20 @@ function syncDetailPoll(round = 0) {
 /**
  * 「重新获取」跑完那一跳。
  *
- * 轮询期间**全程安静**（本项目规矩：轮询不弹提示），只在这里弹一次结果。
+ * 轮询期间**全程安静**（本项目规矩：轮询不弹提示），只在这里弹一次结果 ——
+ * 而且**只在用户点过那颗按钮时**才弹：打开详情自动做的那一次（autoRefresh）
+ * 也是同一个任务，但它不该给用户任何提示，该长出来的自己长出来就行了。
+ *
  * 顺带把依赖的几块对齐：磁链与评论都被那条任务换过一遍，不能拿旧的那份继续用。
  */
 function onRefreshFinished(next: JavMovieDetail) {
-  if (next.refresh_state === "failed") {
-    toast.error(next.refresh_error || "重新获取失败");
-  } else {
-    toast.success("已重新获取");
+  if (userAskedRefresh) {
+    userAskedRefresh = false;
+    if (next.refresh_state === "failed") {
+      toast.error(next.refresh_error || "重新获取失败");
+    } else {
+      toast.success("已重新获取");
+    }
   }
   if (next.magnets.length) magnetsLoaded.value = true;
   if (next.comments_count > 0) sharesLoaded.value = true;
@@ -620,7 +639,11 @@ function schedulePushPoll() {
     pushPollTimer = null;
     if (!props.open || !props.movieId) return;
     try {
-      detail.value = await fetchJavMovie(props.movieId, false);
+      // ⚠️ 必须走 `local=1`（第三个参数）：不带它就是**同步那条路**
+      // （`Service.Detail`，可能跑 IngestMovie + 磁链 + 评论）。这是一条
+      // **每 30 秒一跳**的轮询，拿同步路去打上游会一直打 —— 而它要的只是
+      // 推送状态，那是本地表里的数据（服务端每次现算）。
+      detail.value = await fetchJavMovie(props.movieId, false, true);
     } catch {
       // 轮询失败不弹提示：网盘那边本来就可能慢，下一跳还会再试。
     }
@@ -705,13 +728,42 @@ async function reingest() {
   if (!props.movieId || refreshPending.value) return;
   // 先乐观置位：POST 到下一次轮询之间按钮不该闪回「重新获取」。
   refreshPending.value = true;
+  userAskedRefresh = true;
   try {
     const res = await refreshJavMovie(props.movieId);
     // 服务端说没入队 = 已经在跑了（去重），照样算在跑；以轮询看到的状态为准。
     refreshPending.value = res.queued || res.state === "running";
   } catch (err) {
     refreshPending.value = false;
+    userAskedRefresh = false;
     toast.error(getApiErrorMessage(err, "重新获取失败"));
+    return;
+  }
+  syncDetailPoll();
+}
+
+/**
+ * 打开详情时**自动**做的那一次重新获取。
+ *
+ * 与用户点按钮调的是**同一个后端任务**（`POST /movies/{id}/refresh`：重取 JAVDB 详情
+ * + 磁链 + 评论），差别只有一条：**全程静默**。
+ *
+ * 不弹「正在获取…」、不弹结果、按钮也不进「获取中…」—— 用户看到的就是
+ * 「打开就是本地这些，过几秒该长出来的自己长出来了」。
+ *
+ * 为什么不弹：他不是来等这个的。多一个进度提示只会让他以为「要等它」，
+ * 而这一趟跑多久都不影响他继续看（轮询每 3 秒一跳，本机读，很便宜）。
+ *
+ * 失败也不弹：打开详情顺手做的补全失败了，下一轮后台回填还在，没必要打扰他。
+ */
+async function autoRefresh() {
+  if (!props.movieId) return;
+  try {
+    const res = await refreshJavMovie(props.movieId);
+    // 没入队 = 已经在跑了（服务端去重），照样等着。
+    refreshPending.value = res.queued || res.state === "running";
+  } catch {
+    /* 静默：这是顺手做的事，失败就等下一轮后台回填 */
     return;
   }
   syncDetailPoll();
@@ -865,9 +917,17 @@ watch(
   () => [props.open, props.movieId],
   ([open]) => {
     if (open && props.movieId) {
-      // 首屏走**本地模式**：毫秒级返回，缺的由后台补（服务端会顺手把这部排进
-      // 补缺队列），隔几秒再拉一次本地详情，哪块补好了哪块自己长出来。
+      // 首屏走**本地模式**：毫秒级返回，先把本地有的显示出来。
       void load(false, true);
+      // 同时**自动做一次「重新获取」** —— 和用户点那颗按钮完全同一件事
+      // （同一个后台任务：重取 JAVDB 详情 + 磁链 + 评论），只是不需要他点。
+      //
+      // **这是「用户打开了这部片」唯一的点火口**：服务端那条 `?local=1` 以前也会
+      // 顺手排一次补缺，两边一起排会导致同一部片打两遍详情，已经从服务端去掉了。
+      //
+      // **静默**：不弹「正在获取…」、不弹结果、按钮也不变。用户看到的就是
+      // 「打开就是这些，过几秒该长出来的自己长出来了」。
+      void autoRefresh();
     } else {
       closePlayer();
       // 抽屉关了就停轮询：在后台每 30 秒打一次本地库没有意义。

@@ -391,6 +391,19 @@ func (s *Service) runFullRefresh(ctx context.Context, id string) error {
 		s.logWarn("jav refresh reviews failed", "id", id, "err", err)
 	}
 
+	// **顺手排一个补缺**（简介 / 中文标题）—— 走 hydrate 那条队列，排在最低优先级。
+	//
+	// 这一步不能少：本函数只取 JAVDB 那份详情（快、用户能等），而简介与中文标题要打
+	// 4~6 个外站。它们得**有人排**才行 —— 以前是服务端在 `?local=1` 里顺手排的，
+	// 那条已经去掉（它会跟这里重复打一遍详情，见 internal/api/jav.go 的注释）。
+	// 所以点火口收在这里：**用户点开这一部**（自动刷新）或**点了重新获取**，都算。
+	//
+	// 只取 JAVDB 那份成功的才排：详情都没拿到时，补缺大概率也是白问
+	//（简介只认番号，理论上能补，但那种情况上游本来就不可达）。
+	if mainErr == nil {
+		s.Hydrate(id)
+	}
+
 	if mainErr != nil {
 		return mainErr
 	}

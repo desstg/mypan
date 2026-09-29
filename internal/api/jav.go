@@ -281,20 +281,14 @@ func (h *Handler) javMovieDetail(w http.ResponseWriter, r *http.Request) {
 		// 加两个字段零额外往返 —— 与磁链那个 `pending` 是同一个套路。
 		detail.RefreshState, detail.RefreshError = h.jav.RefreshStatus(id)
 
-		// 首屏读本地之后顺手把这部排进后台补缺队列 —— 用户点开就是想看这部，
-		// 补缺该在后台发生，而不是让他对着「加载中…」等。
+		// ⚠️ **这里不再排补缺队列**（2026-09-29 去掉的）。
 		//
-		// 放在这里而不是让前端多打一次 POST：**少一次往返**，而且「点开即补」
-		// 是这一条语义的一部分，不该由前端记得去做。返回 false（冷却中/已排队）
-		// 不是错误，界面照常显示本地那份。
+		// 以前这么做是「点开即补」的语义。但前端打开详情时已经会**自动做一次
+		// 「重新获取」**（`POST /movies/{id}/refresh`，与用户点那颗按钮同一件事），
+		// 而那一次里面就会补缺 —— 两边一起排，同一部片点开一次要打**两遍**
+		// JAVDB 详情（这个请求每次轮询都会发，等于每 3 秒再排一次）。
 		//
-		// ⚠️ **刷新在途时不要再排补缺**：轮询一跳一次，跑一轮刷新就是上百次
-		// `Hydrate` 调用；平时被队列的 5 分钟冷却挡住，但刷新期间排进去就是白跑
-		// 一遍补缺链（那条链与刷新跑的是同一批上游）。
-		if detail.RefreshState == "" || detail.RefreshState == jav.RefreshStateOK ||
-			detail.RefreshState == jav.RefreshStateFailed {
-			h.jav.Hydrate(id)
-		}
+		// 现在只留前端那一条路：它是「用户打开了这部」的**唯一**信号，一处点火。
 		writeOK(w, detail)
 		return
 	}
