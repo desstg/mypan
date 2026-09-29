@@ -1,7 +1,7 @@
 {
   "notice_version": "2026-09-28-1",
-  "badge": "v2.5.0",
-  "dialog_title": "MyPan v2.5.0",
+  "badge": "v2.5.1",
+  "dialog_title": "MyPan v2.5.1",
   "banner": "番号一整套体验重做：海报墙、详情页秒开、STRM 直接生成 Emby 认的 nfo 与图、自动下字幕。\n更新镜像并重启容器后生效，不需要重新配置。",
   "special": "",
   "lead": "番号这条线从「能找到、能推送」走到「推完就是能直接看的媒体库」。",

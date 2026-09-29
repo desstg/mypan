@@ -263,9 +263,9 @@ export function saveJavWallHiddenDirs(taskId: number, dirs: string[]) {
 }
 
 export const JAV_WALL_SORTS = [
-  { value: "number_asc", label: "番号升序" },
-  { value: "number_desc", label: "番号降序" },
-  { value: "release_desc", label: "发行日期（新→旧）" },
   { value: "added_desc", label: "添加时间（新→旧）" },
   { value: "added_asc", label: "添加时间（旧→新）" },
+  { value: "release_desc", label: "发行日期（新→旧）" },
+  { value: "number_asc", label: "番号升序" },
+  { value: "number_desc", label: "番号降序" },
 ];

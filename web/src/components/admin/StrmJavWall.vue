@@ -67,7 +67,7 @@ async function load(options: { silent?: boolean } = {}) {
     result.value = await fetchJavWallItems(props.taskId, {
       category: category.value,
       keyword: props.keyword ?? "",
-      sort: props.sort ?? "number_asc",
+      sort: props.sort ?? "added_desc",
       limit: 200,
     });
     publishHiddenDirs();
@@ -88,7 +88,7 @@ async function refreshMeta() {
     result.value = await refreshJavWall(props.taskId, {
       category: category.value,
       keyword: props.keyword ?? "",
-      sort: props.sort ?? "number_asc",
+      sort: props.sort ?? "added_desc",
       limit: 200,
     });
     publishHiddenDirs();

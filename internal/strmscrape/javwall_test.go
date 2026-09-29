@@ -21,6 +21,8 @@ import (
 
 const javWallSampleJSON = `{"schema":"litepan.jav.sidecar/1","number":"NIMA-086","number_letter":"NIMA",
 "title":"実写版！テスト","type":"0","summary":"剧情","score":4.61,"score_max":5,"reviews_count":9,
+"release_date":"2024-03-15",
+"dest":{"added_at":"2026-09-20T10:00:00+08:00"},
 "actors":[{"name":"彩月七緒"}],"tags":["巨乳"],"maker":{"name":"Fitch"},
 "images":{"cover":"https://x/y.jpg"},"quality":{"uncensored":true,"subtitle":true}}`
 
@@ -107,7 +109,7 @@ func TestBuildJavWallSnapshotLayout(t *testing.T) {
 	}
 
 	// 墙（= 走一遍 listJavWall）上不该有「未匹配」那一档，也不该有它的卡片。
-	visible := listJavWall(snap, JavWallListQuery{}, func(javWallRow) (string, string) { return "", "" })
+	visible := listJavWall(snap, JavWallListQuery{}, func(javWallRow) emby.JavNFOInfo { return emby.JavNFOInfo{} })
 	if visible.Total != 5 {
 		t.Fatalf("墙上应当 5 张（未匹配整档藏掉）：%d", visible.Total)
 	}
@@ -233,7 +235,7 @@ func TestListJavWallFilterAndSort(t *testing.T) {
 	root := t.TempDir()
 	writeJavLibrary(t, root)
 	snap := javWallSnapshotForTest(t, root, []string{"未匹配"})
-	titles := func(row javWallRow) (string, string) { return "", "" }
+	titles := func(row javWallRow) emby.JavNFOInfo { return emby.JavNFOInfo{} }
 
 	all := listJavWall(snap, JavWallListQuery{}, titles)
 	if all.Total != 5 || len(all.Items) != 5 {

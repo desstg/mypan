@@ -589,10 +589,18 @@ func defaultSpecs() []Spec {
 		},
 
 		// TG 影片订阅：全部 Hidden，由功能自己的配置弹窗读写。
-		// tg_bot_auto_push 默认 false 是刻意的安全设计 —— 用户先开「观察模式」跑一段，
-		// 确认匹配历史里的判定符合预期，再打开自动推送。回填历史帖时也靠它兜底。
+		//
+		// tg_bot_auto_push **默认 true**（2026-09-29 用户要求改成默认开）。
+		// 改之前这里是 false，理由写在原来的注释里：这是「真的会往网盘写东西」的开关，
+		// 想让人先跑一段观察模式。用户明确要默认开 —— 那套安全设计改成由**界面上的
+		// 确认弹窗**承担（见 TGSettingsPanel 的 toggleAutoPush：手动打开时会弹一次确认，
+		// 讲清「会按画质方案自动推送到网盘并开始下载」）。
+		//
+		// ⚠️ 改的是**默认值**：只影响「库里没存过这一项」的全新安装。
+		// 已经存过值的实例（包括开发机那份 tg_bot_auto_push=true）不会被改写 ——
+		// settings 的读侧是「库里没有才回落 Default」，不会拿 Default 覆盖已存值。
 		{Key: KeyTGBotEnabled, Type: TypeBool, Default: "false", Hidden: true},
-		{Key: KeyTGBotAutoPush, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyTGBotAutoPush, Type: TypeBool, Default: "true", Hidden: true},
 		{Key: KeyTGBotDefaultAccountID, Type: TypeString, Default: "0", Hidden: true},
 		{Key: KeyTGBotDefaultParentID, Type: TypeString, Default: "", Hidden: true},
 		{Key: KeyTGBotDefaultPath, Type: TypeString, Default: "", Hidden: true},

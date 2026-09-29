@@ -97,10 +97,12 @@ const STRM_TAB = "strm";
 const ORGANIZE_TAB = "organize";
 const AUTOMATION_TAB = "automation";
 const DEFAULT_STRM_SCAN_INTERVAL_MINUTES = 6 * 60;
+// tab 顺序即界面顺序。「目录整理」排在「STRM 任务」左边（用户要求）——
+// 只挪位置，key 与各档的行为一律不动（路由仍是 ?tab=organize）。
 const tabs = [
+  { key: ORGANIZE_TAB, label: "目录整理" },
   { key: STRM_TAB, label: "STRM 任务" },
   { key: CACHE_TAB, label: "缓存任务" },
-  { key: ORGANIZE_TAB, label: "目录整理" },
   { key: AUTOMATION_TAB, label: "自动联动" },
 ];
 
@@ -197,7 +199,16 @@ const strmRepairLoadingTitle = ref("正在检测并关联…");
 const strmRepairPrecheck = ref<StrmAccountRepairPrecheck | null>(null);
 const strmRepairResult = ref<{ ok: boolean; updated?: number; message: string } | null>(null);
 const pendingCreateBody = ref<StrmTaskInput | null>(null);
-const showAdvanced = ref(false);
+/**
+ * 「更多选项」那一块是否展开。
+ *
+ * 默认 **true**（用户要求：弹窗打开就把全部设置项摆出来）。那一块里的每一项都有
+ * 合理默认值，展开着不会让人误改出问题；而藏起来的话，新建任务的人根本不知道
+ * 还能选「媒体类型 = 番号影片」—— 那是这个弹窗里最容易被漏掉的一项。
+ *
+ * 收起按钮仍然保留：把常用几项之外的东西折起来，是有价值的整理手段。
+ */
+const showAdvanced = ref(true);
 const pickerOpen = ref(false);
 
 const branchDialogOpen = ref(false);
@@ -591,7 +602,8 @@ async function refreshAll() {
 function resetForm() {
   Object.assign(form, emptyForm());
   form.scan_interval = defaultScanInterval();
-  showAdvanced.value = false;
+  // 回到默认展开（见 showAdvanced 的说明）：新建任务时那几项该直接看得见。
+  showAdvanced.value = true;
 }
 
 function resetStrmRepairFlow() {
@@ -644,7 +656,9 @@ function openEdit(task: StrmTask) {
   form.media_kind = task.media_kind === "jav" ? "jav" : "tmdb";
   form.branch_check_enabled = !!task.branch_check_enabled;
   applyTimeWindowFromTask(form, task);
-  showAdvanced.value = false;
+  // 编辑既有任务时也展开：改任务的人多半正是来动这几项的（媒体类型、同步元数据…），
+  // 折起来只会让他多点一次。
+  showAdvanced.value = true;
   dialogOpen.value = true;
 }
 
@@ -1262,6 +1276,7 @@ watch(activeTab, (tab) => {
     <AppModal
       :open="dialogOpen"
       size="account"
+      scroll-body
       :title="editingId ? '编辑 STRM 任务' : '添加 STRM 任务'"
       @close="closeTaskDialog"
     >
@@ -1379,11 +1394,13 @@ watch(activeTab, (tab) => {
           </div>
         </template>
 
-        <div v-if="strmRepairPhase === 'idle'" class="modal-form__footer">
-          <AppButton type="button" variant="primary" :disabled="submitting" @click="submitTask">
-            {{ submitting ? "保存中…" : "保存" }}
-          </AppButton>
-        </div>
+        <template v-if="strmRepairPhase === 'idle'">
+          <div class="modal-form__footer strm-form__footer">
+            <AppButton type="button" variant="primary" :disabled="submitting" @click="submitTask">
+              {{ submitting ? "保存中…" : "保存" }}
+            </AppButton>
+          </div>
+        </template>
 
         <div v-if="strmRepairPhase !== 'idle'" class="strm-repair-overlay">
           <div v-if="strmRepairPhase === 'prompt'" class="strm-repair-panel">
@@ -1771,6 +1788,15 @@ watch(activeTab, (tab) => {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* 底部操作区跟着内容走，**不做 sticky**（弹窗用的是 scrollBody，不是 steady）。
+ *
+ * 弹窗按内容高、封顶 88vh：内容装得下时它就在内容末尾，装不下时内容区自己滚、
+ * 保存键跟着滚 —— 那是对的，因为此时「能看到全部字段」比「保存键常驻」重要，
+ * 而且滚到底就能看见它。 */
+.strm-form__footer {
+  margin-top: 4px;
 }
 
 .strm-form--repair-active > :not(.strm-repair-overlay) {

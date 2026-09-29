@@ -208,7 +208,8 @@ const matchTypeOptions = [
 
 const sortMenuOpen = ref(false);
 // 番号墙的排序（自己存一份，不与 tmdb 那套混）。
-const javSortKey = ref<string>("number_asc");
+// 默认「添加时间（新→旧）」—— 与后端 sortJavWallRows 的兜底一致，也与菜单里第一项一致。
+const javSortKey = ref<string>("added_desc");
 const sortOptions = computed(() =>
   isJavTask.value
     ? JAV_WALL_SORTS.map((o) => ({ value: o.value, label: o.label }))

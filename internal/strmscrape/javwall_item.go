@@ -25,12 +25,18 @@ var (
 	errBadJavPath = domain.Errorf(domain.CodeValidation, "非法路径")
 )
 
-// javTitleEntry 是 nfo 标题的内存缓存条目（键 = nfo 绝对路径）。
+// javTitleEntry 是 nfo 的内存缓存条目（键 = nfo 绝对路径）。
+//
+// 名字还叫 title，但装的其实是「列卡片 + 排序」要用的**整组**字段（见 JavNFOInfo）——
+// 改名的收益抵不上满仓 diff，函数注释里点明即可。
+//
+// 日期必须在**这一层**缓存：排序发生在读标题之前（listJavWall 里 sortJavWallRows
+// 先跑），那时 row 上就得有值。nfo 变过（mod/size 不一致）时整条作废重解，
+// 所以用户手改 nfo 里的日期也会跟着更新。
 type javTitleEntry struct {
-	mod    time.Time
-	size   int64
-	title  string
-	number string
+	mod  time.Time
+	size int64
+	info emby.JavNFOInfo
 }
 
 // javItemRef 是把 (rel_dir, stem) 收敛成的一组绝对路径。
@@ -174,37 +180,40 @@ func (s *Service) cachedJavTitle(absPath string) (javTitleEntry, bool) {
 	return e, true
 }
 
-// javTitleOf 读一份 nfo 的标题与番号（带缓存）。
-func (s *Service) javTitleOf(absPath string) (title, number string) {
+// javNFOInfoOf 读一份 nfo 的「标题 / 番号 / 两个日期」（带缓存）。
+//
+// 读不到（文件不在、不是 <movie> 结构）返回零值 —— 调用方按「没有」处理，
+// 卡片上回落到主干、排序键为空。
+func (s *Service) javNFOInfoOf(absPath string) emby.JavNFOInfo {
 	info, err := os.Stat(absPath)
 	if err != nil {
-		return "", ""
+		return emby.JavNFOInfo{}
 	}
 	s.javTitleMu.Lock()
 	if e, ok := s.javTitleCache[absPath]; ok && e.mod.Equal(info.ModTime()) && e.size == info.Size() {
 		s.javTitleMu.Unlock()
-		return e.title, e.number
+		return e.info
 	}
 	s.javTitleMu.Unlock()
 
 	data, err := os.ReadFile(absPath)
 	if err != nil {
-		return "", ""
+		return emby.JavNFOInfo{}
 	}
-	title, number, err = emby.TitleAndNumber(data)
+	parsed, err := emby.TitleNumberDates(data)
 	if err != nil {
-		return "", ""
+		return emby.JavNFOInfo{}
 	}
 	s.javTitleMu.Lock()
-	s.javTitleCache[absPath] = javTitleEntry{mod: info.ModTime(), size: info.Size(), title: title, number: number}
+	s.javTitleCache[absPath] = javTitleEntry{mod: info.ModTime(), size: info.Size(), info: parsed}
 	s.javTitleMu.Unlock()
-	return title, number
+	return parsed
 }
 
-// javTitleLookup 是给列表用的「读标题」函数（带缓存 + 并发）。
-type javTitleLookup func(row javWallRow) (title, number string)
+// javTitleLookup 是给列表用的「读一份 nfo」函数（带缓存 + 并发）。
+type javTitleLookup func(row javWallRow) emby.JavNFOInfo
 
-// newJavTitleLookup 返回一个带并发预热的标题读取器：先把这一页要用的都读出来
+// newJavTitleLookup 返回一个带并发预热的 nfo 读取器：先把这一页要用的都读出来
 // （8 个 worker），再逐行取。冷启动几千份 nfo 时差别明显。
 //
 // nfo 名与生成器同源（`emby.TargetNames`）：**不要**在这里另拼一个名字，
@@ -212,7 +221,7 @@ type javTitleLookup func(row javWallRow) (title, number string)
 func (s *Service) newJavTitleLookup(rows []javWallRow) javTitleLookup {
 	var (
 		mu     sync.Mutex
-		loaded = map[string][2]string{}
+		loaded = map[string]emby.JavNFOInfo{}
 		wg     sync.WaitGroup
 	)
 	sem := make(chan struct{}, 8)
@@ -229,22 +238,22 @@ func (s *Service) newJavTitleLookup(rows []javWallRow) javTitleLookup {
 		go func(p string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			title, number := s.javTitleOf(p)
+			info := s.javNFOInfoOf(p)
 			mu.Lock()
-			loaded[p] = [2]string{title, number}
+			loaded[p] = info
 			mu.Unlock()
 		}(path)
 	}
 	wg.Wait()
-	return func(row javWallRow) (string, string) {
+	return func(row javWallRow) emby.JavNFOInfo {
 		path := pathOf(row)
 		mu.Lock()
 		if v, ok := loaded[path]; ok {
 			mu.Unlock()
-			return v[0], v[1]
+			return v
 		}
 		mu.Unlock()
-		return s.javTitleOf(path)
+		return s.javNFOInfoOf(path)
 	}
 }
 

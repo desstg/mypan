@@ -24,6 +24,16 @@ const props = withDefaults(
     // 切页、翻页、筛选之后条数一变，鼠标还没移开窗口就缩了。
     // 与订阅页那张影片弹窗的 .jav-modal__panel--steady 是同一套观感。
     steady?: boolean;
+    // scrollBody：**按内容高，封顶 88vh**；确实装不下时内容区自己滚。
+    //
+    // 与 steady 的区别就一条：**内容少时它不会撑满一屏**。
+    //   - steady   = 高度写死 88vh（哪怕里面只有三行）；
+    //   - scrollBody = 高度跟着内容走，只有超出视口才封顶并出滚动条。
+    //
+    // 表单类弹窗要的是后者：内容本来就该一屏看全，硬占满 88vh 只会让
+    // 底部留一大块空白。而矮屏（笔记本 768px 以下）装不下时，滚动条出现在
+    // 内容区里 —— 头部标题与关闭键始终看得见，这点比「整页滚动」好。
+    scrollBody?: boolean;
   }>(),
   {
     title: "",
@@ -34,6 +44,7 @@ const props = withDefaults(
     bodyFlush: false,
     headPlain: false,
     steady: false,
+    scrollBody: false,
   },
 );
 const emit = defineEmits<{ close: [] }>();
@@ -78,7 +89,7 @@ onUnmounted(() => {
         <div class="overlay__center">
           <div
             class="modal"
-            :class="[bare ? 'modal--bare' : `modal--${size}`, { 'modal--steady': steady }]"
+            :class="[bare ? 'modal--bare' : `modal--${size}`, { 'modal--steady': steady, 'modal--scroll-body': scrollBody }]"
             role="dialog"
           >
             <template v-if="bare">
@@ -190,6 +201,27 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+}
+
+/* 按内容高、封顶 88vh（见 scrollBody prop）。
+ *
+ * 三行各管一件事，缺一行就有一种坏法：
+ *   - `max-height` —— 内容再多也不超一屏；**没有 height**，所以内容少时
+ *     面板就矮，不会留一块空白。取 `min(88vh, 100vh - 80px)` 是因为
+ *     `.overlay__center` 上下各有 40px 内边距：只写 88vh 的话，矮屏上
+ *     88vh + 80px 会超过视口，整页多出一条滚动条（面板看着被切了底）。
+ *   - `.modal__body { max-height: 100%; overflow-y: auto }` —— 装不下时滚动条落在
+ *     内容区里。用 `max-height: 100%` 而不是 `flex: 1`：后者会把内容区**撑满**，
+ *     内容少时又变成「面板很矮但里面留白」；而 `100%` 只在父级被 max-height 压住时
+ *     才生效，正好是我们要的那一种情形。
+ *   - `min-height: 0` 同 steady：不写它 flex 子项会按内容撑，撑不出滚动条。 */
+.modal--scroll-body {
+  max-height: min(88vh, calc(100vh - 80px));
+}
+.modal--scroll-body .modal__body {
+  min-height: 0;
+  max-height: 100%;
   overflow-y: auto;
 }
 .modal--bare {

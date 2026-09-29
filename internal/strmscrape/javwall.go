@@ -90,7 +90,10 @@ type JavWallListQuery struct {
 	// Category 为空表示「全部」（含根目录下散落的那些）。
 	Category string `json:"category"`
 	Keyword  string `json:"keyword"`
-	// Sort: number_asc（默认）| number_desc | release_desc | added_desc | added_asc
+	// Sort: added_desc（默认）| added_asc | number_asc | number_desc | release_desc
+	//
+	// 默认是「添加时间（新→旧）」（用户要求）：墙是拿来看最近进了什么的，
+	// 按番号排会把刚入库的片散到整页里。传空串也是这个默认（见 sortJavWallRows）。
 	Sort   string `json:"sort"`
 	Offset int    `json:"offset"`
 	Limit  int    `json:"limit"`
@@ -477,6 +480,9 @@ func listJavWall(snap *javWallSnapshot, q JavWallListQuery, titles javTitleLooku
 		}
 		rows = append(rows, row)
 	}
+	// 排序键（发行日期 / 入库时间）**不在 row 上**，得现从 nfo 取 —— 见
+	// sortJavWallRows 的说明。所以这里把「这一页要用的」先并发读出来再排。
+	fillJavWallSortKeys(rows, titles)
 	sortJavWallRows(rows, q.Sort)
 
 	limit := q.Limit
@@ -501,12 +507,12 @@ func listJavWall(snap *javWallSnapshot, q JavWallListQuery, titles javTitleLooku
 	for _, row := range rows[offset:end] {
 		item := row.item
 		// 标题/番号从 nfo 读（带缓存）—— 读不到就保持主干，卡片上不至于空着。
-		if title, number := titles(row); title != "" || number != "" {
-			if item.Number == item.Stem && number != "" {
-				item.Number = number
+		if nfo := titles(row); nfo.Title != "" || nfo.Number != "" {
+			if item.Number == item.Stem && nfo.Number != "" {
+				item.Number = nfo.Number
 			}
-			if title != "" {
-				item.Title = stripJavNumberPrefix(item.Number, title)
+			if nfo.Title != "" {
+				item.Title = stripJavNumberPrefix(item.Number, nfo.Title)
 			}
 		}
 		page = append(page, item)
@@ -548,25 +554,74 @@ func javWallMatches(item JavWallItem, keyword string) bool {
 	return false
 }
 
-// sortJavWallRows 排序。默认按番号升序，稳定（同番号时保持磁盘顺序）。
+// sortJavWallRows 排序。默认**添加时间（新→旧）**，稳定（键相同或都为空时保持原序）。
+//
+// # 两个日期排序键来自 nfo，**排序前必须已经填好**
+//
+// `ReleaseDate` / `AddedAt` 是建 nfo 时就写死的（生成器把侧车里的 release_date 与
+// dest.added_at 写进 `<premiered>` / `<dateadded>`），列表这条路只负责**读回来**。
+// 调用方要先跑 fillJavWallSortKeys —— 少了那一步，两个字段恒为零值、比较恒 false、
+// 稳定排序原序返回，表现为「日期排序点下去毫无反应」且不报错（这坑踩过）。
+//
+// # 为什么默认是 added_desc 而不是番号升序
+//
+// 用户要求（2026-09-29）。理由也站得住：这面墙的用处是「最近进了什么」，
+// 番号升序会把刚入库的片散到整页里去。
+//
+// ⚠️ 日期缺失时**不能**直接比较：两个空串相等 → 稳定排序保持原序，那是对的
+// （没有入库时间的片不参与定序）；但混着空串与非空时，「空串排哪头」得有个说法 ——
+// 这里让**空的排最后**，因为「不知道什么时候进的」不该霸占最前面。
 func sortJavWallRows(rows []javWallRow, sortKey string) {
 	keyOf := func(row javWallRow) string { return strings.ToUpper(row.item.Number) }
+	// asc 为真表示按时间/番号从小到大。两个日期键共用一个比较器。
+	byTime := func(get func(javWallRow) string, asc bool) {
+		sort.SliceStable(rows, func(i, j int) bool {
+			a, b := get(rows[i]), get(rows[j])
+			switch {
+			case a == b:
+				return false // 相等（含两个都空）：交给稳定排序保持原序
+			case a == "":
+				return false // 空的排最后
+			case b == "":
+				return true
+			case asc:
+				return a < b
+			default:
+				return a > b
+			}
+		})
+	}
 	switch sortKey {
+	case "number_asc":
+		sort.SliceStable(rows, func(i, j int) bool { return keyOf(rows[i]) < keyOf(rows[j]) })
 	case "number_desc":
 		sort.SliceStable(rows, func(i, j int) bool { return keyOf(rows[i]) > keyOf(rows[j]) })
 	case "release_desc":
-		sort.SliceStable(rows, func(i, j int) bool {
-			return rows[i].item.ReleaseDate > rows[j].item.ReleaseDate
-		})
-	case "added_desc", "added_asc":
-		sort.SliceStable(rows, func(i, j int) bool {
-			if sortKey == "added_asc" {
-				return rows[i].item.AddedAt < rows[j].item.AddedAt
-			}
-			return rows[i].item.AddedAt > rows[j].item.AddedAt
-		})
+		byTime(func(r javWallRow) string { return r.item.ReleaseDate }, false)
+	case "added_asc":
+		byTime(func(r javWallRow) string { return r.item.AddedAt }, true)
 	default:
-		sort.SliceStable(rows, func(i, j int) bool { return keyOf(rows[i]) < keyOf(rows[j]) })
+		// 含空串与未知值：一律按「添加时间（新→旧）」。
+		// 上游对未知 sort 是静默回落的（这个项目里 JAVDB 榜单那边踩过同样的坑），
+		// 所以这里必须有个明确的兜底，而不是把参数原样信下去。
+		byTime(func(r javWallRow) string { return r.item.AddedAt }, false)
+	}
+}
+
+// fillJavWallSortKeys 给每一行补上排序用的两个日期（就地改 item）。
+//
+// 走的是与「读标题」同一个读取器：**同一个 nfo、同一次解析**，标题与日期一起出来，
+// 不额外读盘。titles 内部有 8 并发预热 + mtime 缓存，所以冷启动几千份 nfo 时
+// 这一趟就是原来那一趟。
+//
+// 为什么排序前就要填：`sortJavWallRows` 拿 `item.ReleaseDate` / `.AddedAt` 比较，
+// 而 listJavWall 里排序排在「给这一页读标题」之前 —— 那一步只覆盖当页，
+// 排序却要看**全部**行。
+func fillJavWallSortKeys(rows []javWallRow, titles javTitleLookup) {
+	for i := range rows {
+		nfo := titles(rows[i])
+		rows[i].item.ReleaseDate = nfo.Release
+		rows[i].item.AddedAt = nfo.AddedAt
 	}
 }
 

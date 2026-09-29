@@ -26,16 +26,13 @@ const ORGANIZE_SETTINGS_ACCENT = "#10b981";
 
 const TMDB_TAB = "tmdb";
 const JAV_TAB = "jav";
-const THROTTLE_TAB = "throttle";
-const RULES_TAB = "rules";
-const TAGS_TAB = "tags";
+// 原先还有「API 请求节流 / 文件识别与整理规则 / 媒体信息标签排序」三个 tab，
+// 2026-09-29 用户要求把它们的三块设置**并进「TMDB 设置」这一页**（功能一律不变，
+// 只是不再各占一个 tab）—— 那一页现在承载整个「整理设置」的全部设置项。
 const tabs = [
   { key: TMDB_TAB, label: "TMDB 设置" },
   // 番号跟在 TMDB 后面：两个匹配方案是平级的二选一，放一起才看得出关系
   { key: JAV_TAB, label: "番号匹配规则设置" },
-  { key: THROTTLE_TAB, label: "API 请求节流" },
-  { key: RULES_TAB, label: "文件识别与整理规则" },
-  { key: TAGS_TAB, label: "媒体信息标签排序" },
 ];
 
 const ALL_TAG_KEYS = ["screen_size", "frame_rate", "video_codec", "audio_codec", "audio_channels"] as const;
@@ -115,10 +112,15 @@ const tagOrder = reactive<string[]>([...ALL_TAG_KEYS]);
 
 /** 每个 Tab 覆盖的设置项，用来判断该 Tab 内是否有未保存改动。 */
 const TAB_FIELDS: Record<string, Array<keyof MediaOrganizeSettings>> = {
-  [TMDB_TAB]: ["tmdb_api_key", "tmdb_language", "tmdb_api_host", "tmdb_image_host"],
-  [THROTTLE_TAB]: ["api_request_interval_ms", "tmdb_request_interval_ms"],
-  [RULES_TAB]: ["file_extensions", "metadata_extensions", "max_works_per_run", "overwrite_existing"],
-  [TAGS_TAB]: ["align_media_tags", "media_tag_order"],
+  // TMDB 那一页现在装了整个面板的全部设置项（原「API 请求节流 / 文件识别与整理规则 /
+  // 媒体信息标签排序」三块并进来了）—— 那份名单必须跟着合全，否则那几项的改动
+  // 不会在 tab 上亮小圆点（脏标记漏报）。
+  [TMDB_TAB]: [
+    "tmdb_api_key", "tmdb_language", "tmdb_api_host", "tmdb_image_host",
+    "api_request_interval_ms", "tmdb_request_interval_ms",
+    "file_extensions", "metadata_extensions", "max_works_per_run", "overwrite_existing",
+    "align_media_tags", "media_tag_order",
+  ],
 };
 
 // 标签页状态只存在组件内部：这个面板挂在任务管理抽屉里，写 route.query 会和页面级的 ?tab= 打架。
@@ -309,9 +311,12 @@ function endTagDrag() {
   document.body.classList.remove("mo-tag-dragging");
 }
 
-// 拖拽监听挂在 document 上，切走「媒体信息标签排序」标签页时要收尾，避免幽灵标签残留。
+// 拖拽监听挂在 document 上，切走 TMDB 那一页时要收尾，避免幽灵标签残留。
+//
+// 「媒体信息标签排序」并进 TMDB 页之后，标签编辑器就挂在那**同一页**里 ——
+// 所以判据从「是不是 tags tab」变成了「是不是 tmdb tab」（那一页现在装着它）。
 watch(activeTab, (tab) => {
-  if (tab === TAGS_TAB) return;
+  if (tab === TMDB_TAB) return;
   cleanupTagPointerListeners();
   endTagDrag();
 });
@@ -506,7 +511,11 @@ defineExpose(
         </SettingsRow>
       </SettingsCard>
 
-      <SettingsCard v-else-if="activeTab === THROTTLE_TAB" :accent="ORGANIZE_SETTINGS_ACCENT">
+        <!-- 以下三块原先各自是一个 tab（API 请求节流 / 文件识别与整理规则 /
+             媒体信息标签排序），2026-09-29 并进这一页。用带标题的 SettingsCard 分段，
+             不再是并列的 tab —— 设置项本身与各自的读写、脏标记、拖拽交互一行没改。 -->
+
+        <SettingsCard title="API 请求节流" :accent="ORGANIZE_SETTINGS_ACCENT">
         <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('api_request_interval_ms')">
           <template #info>
             <div class="settings-row__label"><span>API 额外补偿间隔（毫秒）</span></div>
@@ -526,7 +535,7 @@ defineExpose(
         </SettingsRow>
       </SettingsCard>
 
-      <SettingsCard v-else-if="activeTab === RULES_TAB" :accent="ORGANIZE_SETTINGS_ACCENT">
+      <SettingsCard title="文件识别与整理规则" :accent="ORGANIZE_SETTINGS_ACCENT">
         <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('file_extensions')">
           <template #info>
             <div class="settings-row__label"><span>媒体文件后缀（分号分隔）</span></div>
@@ -578,7 +587,7 @@ defineExpose(
         </SettingsRow>
       </SettingsCard>
 
-      <SettingsCard v-else-if="activeTab === TAGS_TAB" :accent="ORGANIZE_SETTINGS_ACCENT">
+      <SettingsCard title="媒体信息标签排序" :accent="ORGANIZE_SETTINGS_ACCENT">
         <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('align_media_tags')">
           <template #info>
             <div class="settings-row__label">

@@ -8,7 +8,6 @@ import {
   saveStrmSettings,
   type StrmSettings,
 } from "@/api/strm";
-import { fetchJavWallHiddenDirs } from "@/api/strmJavWall";
 import AppButton from "@/components/base/AppButton.vue";
 import AppDropdown from "@/components/base/AppDropdown.vue";
 import AppInput from "@/components/base/AppInput.vue";
@@ -67,7 +66,6 @@ type StrmSettingsForm = Pick<
   | "jav_watermark_dir"
   | "jav_watermark_scale"
   | "jav_watermark_margin"
-  | "jav_wall_hidden_dirs"
 >;
 
 const { loading, loaded, runLoad } = useSettingsLoad(false);
@@ -109,7 +107,6 @@ const {
     jav_watermark_dir: "",
     jav_watermark_scale: 18,
     jav_watermark_margin: 2,
-    jav_wall_hidden_dirs: "[]",
   },
   {
     compareField: (key, cur, orig) => {
@@ -154,69 +151,6 @@ function setJavMetaItems(next: Record<string, boolean>) {
   settings.jav_metadata_items = encodeJavMeta(next);
 }
 
-/** 番号墙隐藏名单：规范成 `["名",…]` 这种串（空串 = 还没勾过，原样留着）。 */
-function normalizeHiddenDirsValue(raw: string | undefined): string {
-  const trimmed = (raw ?? "").trim();
-  if (!trimmed) return "";
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (!Array.isArray(parsed)) return "";
-    const clean = [...new Set(parsed.map((v) => String(v).trim()).filter(Boolean))].sort();
-    return JSON.stringify(clean);
-  } catch {
-    return "";
-  }
-}
-
-/** 已经勾上的目录名（设置页里没有磁盘可扫，只能按规则的目标目录列候选 + 已勾的那批）。 */
-const javHiddenDirs = computed<string[]>(() => {
-  const raw = settings.jav_wall_hidden_dirs;
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.map((v) => String(v)) : [];
-  } catch {
-    return [];
-  }
-});
-
-/**
- * 设置页里的候选清单：分类规则的目标目录 ∪ 默认兜底目录名 ∪ 已勾的那批。
- *
- * 这里**手上没有任务**，扫不了盘，所以走后端那个接口的 taskId=0 分支（只按规则列）。
- * 磁盘上真实存在的一级目录与各自的部数在番号墙页头那颗「全部目录」按钮里看（那边有 taskId）。
- */
-const javHiddenCandidates = ref<string[]>([]);
-
-async function loadJavHiddenCandidates() {
-  try {
-    const data = await fetchJavWallHiddenDirs(0);
-    const names = (data.dirs ?? []).map((d) => d.name);
-    if (data.fallback_name) names.push(data.fallback_name);
-    javHiddenCandidates.value = [...new Set(names.filter(Boolean))];
-  } catch {
-    // 候选拉不到不影响这个面板能用（下面会把已勾的那批兜上来）。
-    javHiddenCandidates.value = [];
-  }
-}
-
-const javHiddenDirOptions = computed(() => {
-  const names = [...new Set([...javHiddenCandidates.value, ...javHiddenDirs.value])].sort();
-  return names.map((name) => ({ key: name, label: name }));
-});
-
-/** 勾选态**只看表单里存的那些名字**：没存过（空串）就是「一个都没勾」。 */
-const javHiddenDirChecked = computed<Record<string, boolean>>(() => {
-  const out: Record<string, boolean> = {};
-  for (const name of javHiddenDirs.value) out[name] = true;
-  return out;
-});
-
-function setJavHiddenDirs(next: Record<string, boolean>) {
-  const dirs = Object.keys(next).filter((name) => next[name]);
-  settings.jav_wall_hidden_dirs = JSON.stringify([...new Set(dirs)].sort());
-}
-
 function setNumberSetting(
   key: "min_file_size_mb" | "task_concurrency" | "metadata_max_size_mb" | "jav_watermark_scale" | "jav_watermark_margin",
   raw: string,
@@ -251,18 +185,12 @@ function applySettings(data: Awaited<ReturnType<typeof fetchStrmSettings>>) {
     jav_watermark_dir: data.jav_watermark_dir ?? "",
     jav_watermark_scale: parseSettingNumber(data.jav_watermark_scale) || 18,
     jav_watermark_margin: parseSettingNumber(data.jav_watermark_margin) || 0,
-    // 空串（= 还没勾过）在界面上显示成「一个都没勾」—— 实际生效的那个兜底目录名
-    // 由**番号墙那边**回落，这里只负责把「用户勾了什么」原样呈现与回存。
-    jav_wall_hidden_dirs: normalizeHiddenDirsValue(data.jav_wall_hidden_dirs),
   });
 }
 
 async function loadSettings(options?: { silent?: boolean }) {
   await runLoad(async () => {
     applySettings(await fetchStrmSettings());
-    // 候选目录（分类规则的目标目录）顺手拉一次：这个面板没有任务可扫，
-    // 后端那条 taskId=0 的分支只按规则列。
-    void loadJavHiddenCandidates();
   }, "加载 STRM 设置失败", options);
 }
 
@@ -299,7 +227,6 @@ async function saveSettings() {
       jav_watermark_dir: settings.jav_watermark_dir,
       jav_watermark_scale: settings.jav_watermark_scale,
       jav_watermark_margin: settings.jav_watermark_margin,
-      jav_wall_hidden_dirs: settings.jav_wall_hidden_dirs,
     });
     applySettings(data);
     toast.success("STRM 设置已保存");
@@ -615,6 +542,10 @@ defineExpose(
           </template>
         </SettingsRow>
 
+        <!-- 番号那几项（元数据 / 海报水印）与上面的通用元数据设置是两回事，
+             加一条显眼的分隔线断一下。 -->
+        <div class="strm-settings-divider" role="separator" aria-label="番号相关设置"></div>
+
         <SettingsRow :show-changed-badge="true" :changed="isSettingChanged('jav_metadata_items')">
           <template #info>
             <div class="settings-row__label">
@@ -712,62 +643,26 @@ defineExpose(
           </template>
         </SettingsRow>
 
-        <SettingsRow :show-changed-badge="true" :changed="isSettingChanged('jav_wall_hidden_dirs')">
-          <template #info>
-            <div class="settings-row__label">
-              <span>番号墙隐藏的目录</span>
-              <SettingsHelpTooltip title="番号墙隐藏的目录说明">
-                <p>
-                  番号影片的海报墙按<b>一级目录</b>分档（有码 / 无码 / 欧美 / 国产…）。
-                  这里勾上的目录会<b>整档不显示</b> —— 它的 tab 与卡片一起藏起来。
-                </p>
-                <p>
-                  默认藏掉分类规则里那条<b>兜底规则</b>的目标目录（默认叫「未匹配」）：
-                  那是「规则表没命中」的桶，不代表真实分类。
-                  <b>你还没在这里勾过时，它会跟着规则里的改名一起走</b>；
-                  一旦勾过，就以你勾的为准。
-                </p>
-                <p>
-                  想看某个目录（比如「未匹配」）：把它的勾去掉。
-                  磁盘上真实存在的一级目录与各自的部数，在番号墙页头那颗
-                  <b>「全部目录」</b>按钮里能看到（这里没有任务可扫，只列规则里的目标目录）。
-                </p>
-              </SettingsHelpTooltip>
-            </div>
-          </template>
-          <template #control>
-            <div class="jav-hidden-dirs">
-              <SettingsCheckboxRow
-                v-if="javHiddenDirOptions.length"
-                :model-value="javHiddenDirChecked"
-                :options="javHiddenDirOptions"
-                :disabled="saving"
-                :missing-checked="false"
-                @update:model-value="setJavHiddenDirs"
-              />
-              <p v-else class="jav-hidden-dirs__empty">
-                分类规则里还没有任何目标目录 —— 先去「目录整理 → 番号匹配规则设置」建一条规则，
-                或者直接在番号墙页头的「全部目录」按钮里按磁盘上的目录勾选。
-              </p>
-              <p class="jav-hidden-dirs__hint">
-                {{ javHiddenDirs.length ? `已勾选 ${javHiddenDirs.length} 个目录（这些会整档不显示）。` : "没有勾选任何目录。" }}
-                <template v-if="isSettingChanged('jav_wall_hidden_dirs')">
-                  <b>还没保存 —— 保存后生效。</b>
-                </template>
-                磁盘上真实存在的一级目录与各自的部数，在番号墙页头那颗「全部目录」按钮里能看到。
-              </p>
-            </div>
-          </template>
-        </SettingsRow>
       </SettingsCard>
     </template>
   </div>
 </template>
 
 <style scoped>
-.jav-hidden-dirs { display: flex; flex-direction: column; gap: 8px; }
-.jav-hidden-dirs__empty,
-.jav-hidden-dirs__hint { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.7; }
+/* 番号相关设置与通用元数据之间的分隔线。
+ *
+ * 用**两像素的品牌色实线**而不是常见的 1px 灰线：这里不是「同组里的分节」，
+ * 而是「换了一类设置」（番号那几项只在媒体类型选「番号影片」时才生效）。
+ * 1px 灰线在一屏表单里根本看不见，用户会以为番号那几项属于上面那一组。
+ * 上下各留 18px，把它从两侧的 SettingsRow 里"顶"出来。 */
+.strm-settings-divider {
+  height: 2px;
+  margin: 18px 0;
+  background: var(--brand);
+  opacity: 0.55;
+  border-radius: 1px;
+}
+
 .strm-meta-tip {
   border: none;
   padding: 0;

@@ -561,8 +561,8 @@ onMounted(async () => {
           <button
             type="button"
             class="tg-icon-btn"
-            title="TG 订阅设置"
-            aria-label="TG 订阅配置"
+            title="订阅设置"
+            aria-label="订阅设置"
             @click="configOpen = true"
           >
             <i class="fas fa-cog" aria-hidden="true" />

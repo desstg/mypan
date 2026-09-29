@@ -104,7 +104,7 @@ watch(
 <template>
   <AdminSettingsDrawer
     :open="open"
-    title="TG 订阅设置"
+    title="订阅设置"
     :saving="saving"
     :can-save="canSave"
     :hide-foot="!SAVEABLE_TABS.has(tab)"

@@ -19,7 +19,7 @@ const PROXY_TAB = "proxy";
 const ENHANCED_TAB = "enhanced";
 const BACKUP_TAB = "backup";
 const tabs = [
-  { key: SCRAPE_TAB, label: "STRM 刮削" },
+  { key: SCRAPE_TAB, label: "海报墙" },
   { key: ENHANCED_TAB, label: "增强工具" },
   { key: BACKUP_TAB, label: "备份管理" },
 ];

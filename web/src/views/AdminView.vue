@@ -64,11 +64,16 @@ const PAGE_TABS: Record<string, { defaultTab: string; tabs: Record<string, strin
   },
   tasks: {
     defaultTab: "strm",
+    // 键序**只影响面包屑的显示名**（按 key 取值，不按顺序），
+    // 与 tab 栏的排列顺序无关 —— 那一份在 TaskManagement.vue 的 tabs 数组里。
     tabs: { strm: "STRM 任务", cache: "缓存任务", organize: "目录整理", automation: "自动联动" },
   },
   tools: {
     defaultTab: "scrape",
-    tabs: { scrape: "STRM 刮削", enhanced: "增强工具", backup: "备份管理" },
+    // 「海报墙」是 STRM 刮削那一档的显示名（用户要求改的，功能不变）——
+    // 那一页现在的形态就是一面海报墙，叫「刮削」反而看不出它长什么样。
+    // key 仍是 scrape：路由 ?tab=scrape、组件名、后端端点一律不动。
+    tabs: { scrape: "海报墙", enhanced: "增强工具", backup: "备份管理" },
   },
   share: { defaultTab: "webdav", tabs: { webdav: "WebDAV", fuse: "本地挂载" } },
   "cross-transfer": { defaultTab: "plain", tabs: { plain: "跨盘普传", rapid: "跨盘秒传" } },

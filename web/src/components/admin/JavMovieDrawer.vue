@@ -426,6 +426,18 @@ async function load(refresh = false, local = true) {
       } else {
         void loadMagnets();
       }
+      // 「评论区分享」同理，而且判据更硬：服务端那份分享是拿**全部本地评论**
+      // 现算的（commentSharesLocal 读 ListByMovieAll），而 comments_count 数的
+      // 也是同一批 —— 所以本地只要有一条评论，分享就已经是完整的。
+      //
+      // 不置这一位的话，那一档会一直显示「正在获取…」：它的三态只看 sharesLoaded，
+      // 而那个标志以前只有 loadReviews / ensureShares 会置真（都是**点开那一档
+      // 之后**才跑的）。于是本地明明已经有链接，用户点进去却只看到转圈，还得再点
+      // 一次「评论」tab 才显示出来（loadReviews 顺手把它置真了）。
+      // 本地没评论时保持 false 是对的：那说明确实还没抓过，得去要一次。
+      if (detail.value.comments_count > 0) {
+        sharesLoaded.value = true;
+      }
     }
     syncDetailPoll();
   }

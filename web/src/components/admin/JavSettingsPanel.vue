@@ -749,8 +749,8 @@ onMounted(async () => {
           <SettingsRow>
             <template #info>
               <SettingsRowLabel
-                label="推送时写入元数据文件"
-                help-title="推送时写入元数据文件"
+                label="推送时写入 JSON 文件"
+                help-title="推送时写入 JSON 文件"
                 help-text="下载完成后，在资源所在的那一层目录里写一个 `<番号>.json`，含番号/演员/片商/标签/画质标记，以及封面、剧照、预告片的原始地址和落盘时的真实文件名。以后想建 nfo、改名、给 Emby 补封面图与剧照，读这个文件就有全部起点，不必再去抓一遍 JAVDB。它不额外请求上游，也不改推送行为；写失败只记日志，不会影响「已推送」这个结论。"
               />
             </template>

@@ -217,15 +217,60 @@ func ParseNFO(data []byte, hints NFOReadHints) (*MovieMeta, error) {
 // **仍然走 encoding/xml 而不是手写字符串扫描**：标题里有 `&amp;` 这类转义，
 // 手写扫描会把它原样显示在卡片上（`A &amp; B`）。
 func TitleAndNumber(data []byte) (title, number string, err error) {
-	var light struct {
-		XMLName xml.Name `xml:"movie"`
-		Title   string   `xml:"title"`
-		Num     string   `xml:"num"`
-	}
-	if err := xml.Unmarshal(data, &light); err != nil {
+	info, err := TitleNumberDates(data)
+	if err != nil {
 		return "", "", err
 	}
-	return strings.TrimSpace(light.Title), strings.TrimSpace(light.Num), nil
+	return info.Title, info.Number, nil
+}
+
+// JavNFOInfo 是一份 nfo 里「列卡片 + 排序」用得到的那几个字段。
+//
+// 比 MovieMeta 窄得多：只解 6 个元素，不建 genre/actor 切片 —— 海报墙冷启动要读
+// 几千份 nfo，这个差别是实打实的（见 TitleAndNumber 的说明）。
+type JavNFOInfo struct {
+	Title   string
+	Number  string
+	Release string // 发行日期 YYYY-MM-DD，缺失为空串
+	AddedAt string // 入库时间 `2006-01-02 15:04:05`，缺失为空串
+}
+
+// TitleNumberDates 一次解出「标题 / 番号 / 两个日期」。
+//
+// # 为什么把日期也带上
+//
+// 番号墙的「发行日期」与「添加时间」两种排序**一度是死的**：排序比较的是
+// `JavWallItem.ReleaseDate` / `.AddedAt`，而那两个字段从来没有被赋过值（列表这条路上
+// 只调 TitleAndNumber，日期在解析时就被丢掉了）。两个零值字符串恒等比较 → 稳定排序
+// 原序返回 → 三种日期排序**点下去毫无反应**，且不报错。
+//
+// 所以日期必须与标题一起解出来：排序发生在**读标题之前**（listJavWall 里
+// `sortJavWallRows` 先跑），那时 `titles(row)` 还没被调用，row 上必须有值。
+//
+// 日期用**字符串**而不是 time.Time：它们只参与字典序比较（`2006-01-02` 这种定长
+// 格式字典序 == 时间序），转成时间类型只多一次解析、多一处出错的地方。
+func TitleNumberDates(data []byte) (JavNFOInfo, error) {
+	var light struct {
+		XMLName     xml.Name `xml:"movie"`
+		Title       string   `xml:"title"`
+		Num         string   `xml:"num"`
+		Premiered   string   `xml:"premiered"`
+		ReleaseDate string   `xml:"releasedate"`
+		Release     string   `xml:"release"`
+		DateAdded   string   `xml:"dateadded"`
+	}
+	if err := xml.Unmarshal(data, &light); err != nil {
+		return JavNFOInfo{}, err
+	}
+	return JavNFOInfo{
+		Title:  strings.TrimSpace(light.Title),
+		Number: strings.TrimSpace(light.Num),
+		// 三个日期元素取**第一个非空**：生成器三个都写（`meta.go` 的
+		// premiered/releasedate/release），而别的工具生成的样本里只写了其中一两个
+		// （仓库根那份 JUR-019-U.nfo 三个都在，但 `91CM-109-cd1.nfo` 只有 premiered）。
+		Release: firstNonEmpty(light.Premiered, light.ReleaseDate, light.Release),
+		AddedAt: strings.TrimSpace(light.DateAdded),
+	}, nil
 }
 
 // letterFromNumber 从番号本体里推字母段（`NIMA-086` → `NIMA`）。
