@@ -441,6 +441,9 @@ async function load(refresh = false, local = true) {
         sharesLoaded.value = true;
       }
     }
+    // 首屏之后**至少还轮一跳**（见 pollMustTickOnce）：首屏那份可能是后台写入
+    // 之前的快照，没有再拉一次的话导演/片商/评分/标签会一直停在旧值。
+    if (first) pollMustTickOnce.value = true;
     syncDetailPoll();
   }
 }
@@ -456,6 +459,20 @@ const DETAIL_POLL_MS = 3000;
 // 用 number（`window.setTimeout` 的返回类型）而不是 `ReturnType<typeof setTimeout>`：
 // 这个项目里同时装了 @types/node，全局那个 setTimeout 返回的是 NodeJS.Timeout。
 let detailPollTimer: number | null = null;
+
+/**
+ * 首屏之后**至少**还轮一次。
+ *
+ * 这是「第一跳总是要打」的那道闸门，解决一个实测到的竞态（2026-09-29）：
+ * 首屏那次本地读可能拿到「后台写入**之前**」的快照（服务端刚被前一次操作触发过一轮
+ * 写入），于是导演/片商/评分/标签那几格停在旧值 —— 用户看到「演员、关联影片都有，
+ * 基本信息全是 —」，点一下「重新获取」才出来。
+ *
+ * 为什么不用「字段空着就继续轮」来兜：FC2 / 素人那类片**上游本来就没有**导演、片商、
+ * 系列、标签，那些判据永远为真，每打开一次要白轮 20 跳（60 秒）才停，观感上就是
+ * 「一直在转圈」。改成固定一跳之后，那类片只多一次本机读（毫秒级）。
+ */
+const pollMustTickOnce = ref(false);
 
 function detailStillMissing(): boolean {
   const d = detail.value;
@@ -491,14 +508,29 @@ function syncDetailPoll(round = 0) {
     clearTimeout(detailPollTimer);
     detailPollTimer = null;
   }
-  if (!props.open || !props.movieId || !(detailStillMissing() || refreshPending.value)) {
+  // mustTickOnce 让「首屏之后至少再拉一跳」成立 —— 见 pollMustTickOnce 的说明。
+  const wantPoll =
+    detailStillMissing() || refreshPending.value || (pollMustTickOnce.value && round === 0);
+  if (!props.open || !props.movieId || !wantPoll) {
     pollingActive.value = false;
     return;
   }
   if (round >= currentPollMax()) {
     // 到顶就停：已经问过一圈，缺的就是真缺（比如这片本来没有磁链），
     // 别再显示「加载中…」吊着用户。
+    //
+    // 但**再读一次本地**：最后一跳有可能正好落在后台写入之前，那样界面上会永远停在
+    // 那份旧快照上（用户看到的就是「明明有数据、格子却是空的」）。这一次是本地读，
+    // 毫秒级，代价可以忽略。
     pollingActive.value = false;
+    pollMustTickOnce.value = false;
+    void fetchJavMovie(props.movieId, false, true)
+      .then((last) => {
+        if (props.open && last.id === detail.value?.id) detail.value = last;
+      })
+      .catch(() => {
+        /* 失败就算了：已经轮过一整轮，不打扰用户 */
+      });
     return;
   }
   pollingActive.value = true;
@@ -522,6 +554,8 @@ function syncDetailPoll(round = 0) {
     } catch {
       /* 轮询失败静默：下一跳再试，不打扰用户 */
     }
+    // 这一跳已经打过了 —— 「首屏之后至少一跳」到此兑现。
+    pollMustTickOnce.value = false;
     schedulePushPoll();
     syncDetailPoll(round + 1);
   }, DETAIL_POLL_MS);
