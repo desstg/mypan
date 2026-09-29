@@ -102,7 +102,7 @@
 
 ## ▎ 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.5.2`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.5.3`
 
 ```yaml
 services:
