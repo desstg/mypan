@@ -44,9 +44,15 @@ type Watermark struct {
 //
 // **这个数是拿真图出样张挑出来的**：0.08 / 0.10 / 0.12 / 0.15 / 0.20 五档，
 // 0.20 那个左上角的「字幕」标会压到标题字上。用户先选 0.15、又定 0.18
-// （比 15% 略大一点，同时把贴边距收到 1/16 让它更靠边）。
+// （比 15% 略大一点，同时把贴边距收到 1/16 让它更靠边），
+// **2026-09-30 又提到 0.24**。
 // 设置项 jav_watermark_scale，用户可微调。
-const DefaultWatermarkScale = 0.18
+//
+// ⚠️ 改这里要连带改三处（它们是同一个默认值的四种写法）：
+// internal/jav/config.go 与 internal/strm/service.go 的 `watermarkDefaultScale = 24`、
+// settings/registry.go 那条 `Default: "24"`、前端 StrmSettingsPanel.vue 的兜底值。
+// 只改一处会出现「新装是 24、老库重置后是 18」这种最难查的不一致。
+const DefaultWatermarkScale = 0.24
 
 // 图标默认放在哪张图的哪个角 —— 与用户给的图标一一对应。
 //

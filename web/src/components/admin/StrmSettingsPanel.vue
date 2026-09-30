@@ -105,7 +105,9 @@ const {
     jav_metadata_items: DEFAULT_JAV_META_ITEMS,
     jav_watermark_enabled: false,
     jav_watermark_dir: "",
-    jav_watermark_scale: 18,
+    // 24 与后端同源（jav/config.go 的 watermarkDefaultScale、strm/service.go 的
+    // defaultWatermarkScale、registry.go 的 Default）—— 改一处要四处一起改。
+    jav_watermark_scale: 24,
     jav_watermark_margin: 2,
   },
   {
@@ -183,7 +185,7 @@ function applySettings(data: Awaited<ReturnType<typeof fetchStrmSettings>>) {
     jav_metadata_items: data.jav_metadata_items || DEFAULT_JAV_META_ITEMS,
     jav_watermark_enabled: !!data.jav_watermark_enabled,
     jav_watermark_dir: data.jav_watermark_dir ?? "",
-    jav_watermark_scale: parseSettingNumber(data.jav_watermark_scale) || 18,
+    jav_watermark_scale: parseSettingNumber(data.jav_watermark_scale) || 24,
     jav_watermark_margin: parseSettingNumber(data.jav_watermark_margin) || 0,
   });
 }

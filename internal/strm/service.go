@@ -928,8 +928,9 @@ func (s *Service) watermarkDir() string {
 }
 
 // 水印那两个百分数的默认值（与 jav.WatermarkScalePercent 的默认同源）。
+// 改默认值时四处一起改，见 internal/jav/config.go 那段注释。
 const (
-	defaultWatermarkScale  = 18
+	defaultWatermarkScale  = 24
 	defaultWatermarkMargin = 2
 )
 

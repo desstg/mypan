@@ -698,7 +698,7 @@ func defaultSpecs() []Spec {
 		// 水印：默认**关**（自动那条路不贴），大小 18%（真图出样张定的），
 		// 边距 6%（1/16）。两个数值都是百分数，前端滑杆直接用整数。
 		{Key: KeyJavWatermarkEnabled, Type: TypeBool, Default: "false", Hidden: true},
-		{Key: KeyJavWatermarkScale, Type: TypeInt, Default: "18", Min: intp(5), Max: intp(50), Hidden: true},
+		{Key: KeyJavWatermarkScale, Type: TypeInt, Default: "24", Min: intp(5), Max: intp(50), Hidden: true},
 		{Key: KeyJavWatermarkMargin, Type: TypeInt, Default: "2", Min: intp(0), Max: intp(20), Hidden: true},
 		{Key: KeyJavWatermarkDir, Type: TypeString, Default: "", Hidden: true},
 

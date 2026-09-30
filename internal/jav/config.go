@@ -650,7 +650,12 @@ func (s *Service) watermarkPercent(key string, def int) int {
 const (
 	// watermarkDefaultScale / watermarkDefaultMargin 与 emby 包的默认值同源
 	// （那里是浮点比例，这里是百分数）。改一处要一起改。
-	watermarkDefaultScale  = 18
+	//
+	// 24 是用户 2026-09-30 定的（此前 18）。**这个默认值要动就四个地方一起动**：
+	// 这里、internal/strm/service.go 的同名常量、settings/registry.go 那条
+	// Default: "18"、以及前端 StrmSettingsPanel.vue 的兜底值。
+	// 只改这里等于「新库是 24、老库重置后变回 18」，两边不一致最难查。
+	watermarkDefaultScale  = 24
 	watermarkDefaultMargin = 2
 )
 
