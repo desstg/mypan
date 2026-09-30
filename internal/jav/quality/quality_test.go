@@ -67,6 +67,10 @@ func TestDetectQualityTags(t *testing.T) {
 		{"SSIS-001-BluRay.mkv", false, false, true, false, false, false},
 		{"SSIS-001 中文字幕.mkv", false, false, false, false, true, false},
 		{"SSIS-001-cht.mkv", false, false, false, false, true, false},
+		// `-UC` 同时是破解与中字（见 reChinese 的注释：与本项目自己的
+		// `-UC` 命名对齐，是对源码的有意偏离）。这两行一起钉住「两个标记同时置位」。
+		{"SSIS-001-UC.mkv", false, false, false, false, true, false},
+		{"SSIS-444-UC-4K.mp4", false, false, true, true, true, false},
 		{"SSIS-001-导演剪辑版.mkv", false, false, false, false, false, true},
 		// 上游角标单独成立：名字里看不出来也要认。
 		{"SSIS-001.mkv", true, false, true, false, false, false},
@@ -245,13 +249,30 @@ func TestIsUncensoredBoundaries(t *testing.T) {
 	}
 }
 
+// TestIsChinese 钉住「名字里带中字标记」的判据。
+//
+// ⚠️ `-UC` 那一条是**有意偏离源码**的（见 tags.go 里 reChinese 的长注释）：
+// 发布组写 `UC` 是 Uncensored 的缩写，但用户 2026-09-30 拍板把它与本项目
+// 自己写的 `-UC`（= 破解 + 中字，见 javname.go 的 Marks）对齐。
+// 代价是实测 960 颗「上游没给任何中字信号」的磁链会被判成中字 —— 已知、已接受。
+// 这条用例存在的意义就是：将来有人看到那个正则觉得「uc 是误加的吧」，
+// 能立刻看到它是有决策、有代价、被钉住的行为，而不是手滑。
 func TestIsChinese(t *testing.T) {
-	for _, name := range []string{"SSIS-001-C.mkv", "SSIS-001-chs.mkv", "SSIS-001 中字.mkv", "SSIS-001 chinese.mkv"} {
+	for _, name := range []string{
+		"SSIS-001-C.mkv", "SSIS-001-chs.mkv", "SSIS-001 中字.mkv", "SSIS-001 chinese.mkv",
+		// 与 javname.go 的 ParseJavFileName 对齐：`-UC` = 破解 + 中字。
+		"SSIS-001-UC.mkv", "SSIS-001-uc.mkv", "SSIS-444-UC-4K.mp4",
+	} {
 		if !IsChinese(name) {
 			t.Errorf("IsChinese(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"SSIS-001.mkv", "SSIS-001-cat.mkv", ""} {
+	// 边界用例：c/u 后面必须跟非字母数字，否则就是普通单词。
+	// `-cat` / `-usa` 这类**必须**继续判否 —— 它们正是正则前后界存在的理由。
+	for _, name := range []string{
+		"SSIS-001.mkv", "SSIS-001-cat.mkv", "",
+		"SSIS-001-usa.mkv", "SSIS-001 lucky.mkv", "SSIS-001 success.mkv",
+	} {
 		if IsChinese(name) {
 			t.Errorf("IsChinese(%q) = true, want false", name)
 		}

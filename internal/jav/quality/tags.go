@@ -43,8 +43,26 @@ var (
 	// 分隔符或行边界 —— 这正是为了保护 "my-used-car" 这类词不被误判。
 	reUncensored = regexp.MustCompile(`(?i)(?:[-_]|^)(u|uc|restored)(?:[^a-z0-9]|$)`)
 
-	// 源码 javbus.py 的 _RE_CN。
-	reChinese = regexp.MustCompile(`(?i)(?:[-_]|^)(c|ch|chs|cht)(?:[^a-z0-9]|$)`)
+	// 源码 javbus.py 的 _RE_CN，**有意偏离一处**：多认一个 `uc` 分支。
+	//
+	// 为什么要多认它：`-UC` 在**发布组的磁链名**里只被 reUncensored 的 `uc` 分支
+	// 当成一个整体 token 吃掉，而 `c` 前面是字母 `u`、前界不成立，于是
+	// `SSIS-444-UC.mp4` 一直只判出「破解」、判不出「中字」——
+	// 与同一个包里 javname.go 的 `ParseJavFileName`（那里 `-UC` = 破解 + 中字）
+	// 恰好相反。两条路互不交叉（ParseJavFileName 只吃侧车文件名），所以
+	// 「同一个串两个含义」这件事一直没被触发过，只是让磁链那条路少认了一个标记。
+	//
+	// 2026-09-30 用户拍板对齐到「破解 + 中字」。**代价是已知且被接受的**：
+	// 实测真库 116220 颗磁链里有 1254 颗会因此翻面，其中 960 颗上游没给任何
+	// 中字信号（`has_sub=0`、名字里也没有别的中字证据，全是干净的 `番号-UC`）。
+	// 翻了之后连带的副作用见 emby/meta.go:118 —— 侧车说中字就会写出
+	// `<fileinfo><streamdetails><subtitle>` 元素，哪怕旁边一个字幕文件都没有
+	// （那个状态本来就有，样本里的 MIDA-241 就是：nfo 声明了、srt 没有）。
+	//
+	// ⚠️ 不要顺手把这个 `uc` 加进下面 chineseKeywords 兜底表：那是**无边界**的
+	// strings.Contains，`uc` 会在 lucky / document / reduce / success / secure
+	// 这些普通词上全线误报。正则的前后界正是为此存在的。
+	reChinese = regexp.MustCompile(`(?i)(?:[-_]|^)(c|ch|chs|cht|uc)(?:[^a-z0-9]|$)`)
 
 	// 源码 detect_quality_tags 里的三个 hd/uhd/sub/edited 正则。
 	//
