@@ -466,13 +466,29 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/mounts/{id}/unmount", h.unmountFuse)
 				})
 			})
-			// 番号（JAV）。目前只有配置与探活两组 —— 榜单/影库/订阅/推送
-			// 是后续阶段接上的，路由分组先立起来。
+			// 番号（JAV）。
 			//
 			// 注册顺序纪律：静态段必须排在同位置的 {id} 之前，
 			// 否则 "nodes" 会被当成一个 id。这里目前还没有 {id}，
 			// 但 /config/nodes 与 /config 是同一层的兄弟，顺序一样要守住。
 			r.Route("/jav", func(r chi.Router) {
+				// ⚠️ **顺序**：这两条 `Use` 必须保持 javUserActivity 在前。
+				// chi 的中间件按注册顺序入栈，而打点要在**鉴权之前**发生 ——
+				// 「需要管理员权限」那种 401/403 **也是用户在操作**（会话过期、
+				// 或在别处登录被顶掉）。把 javUserActivity 排到 requireAdmin 之后
+				// 不会报错，只会静默少打点，所以这条顺序必须写在注释里。
+				r.Use(h.javUserActivity)
+				// 鉴权用 **PublicOrAdmin** 而不是 requireAdmin：`/config` 与
+				// `/config/nodes*` 是「UI 配置由 store 下发」那一族，**不鉴权**
+				// （见 router.go 上方 /public 分组的说明）。这里以前没有任何
+				// 组级鉴权，各端点自己 `javReady` 一下就算 —— 加打点时顺带把整组
+				// 收进 PublicOrAdmin 不是本次改动的一部分，别顺手加 requireAdmin：
+				// 那会让番号页的基本配置读取对未登录者变成 401。
+				//
+				// 用户活动打点：后台三个 sweep 循环靠它避让（见 jav_activity.go）。
+				// 挂在这一组的最外层 —— 任何一条新端点漏挂，后台就可能在用户正在搜
+				// 的时候抢上游（那正是 2026-09-30 修的那个毛病）。
+
 				r.Get("/config", h.getJavConfig)
 				r.Put("/config", h.updateJavConfig)
 				r.Post("/config/login", h.loginJav)
@@ -499,7 +515,9 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/movies/{id}", h.javMovieDetail)
 				r.Post("/movies/{id}/ingest", h.javIngestMovie)
 				// 后台跑的用户主动刷新（立刻返回；状态搭 ?local=1 的详情回去）。
-				// 与上面那条 /ingest 的区别：这两条**不在请求里跑长链**，见 internal/jav/refresh.go。
+				// 这两条都不在请求里跑长链（见 internal/jav/refresh.go）；
+				// /ingest 自 2026-09-30 起也只抓详情、不跑补缺链，与它们的区别
+				// 只剩「是否顺带刷新磁链与评论」。
 				r.Post("/movies/{id}/refresh", h.javMovieRefresh)
 				r.Post("/movies/{id}/magnets/refresh", h.javMovieRefreshMagnets)
 				r.Get("/movies/{id}/magnets", h.javMovieMagnets)

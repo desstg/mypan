@@ -358,16 +358,22 @@ func (h *Handler) javMoviePreviewURL(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]string{"url": url})
 }
 
-// javIngestMovie 强制重新抓一次详情（**同步**，含补缺链）。
+// javIngestMovie 强制重新抓一次详情（**同步**）。
 //
 // ⚠️ 界面已不再调用它 —— 抽屉改走 `POST /movies/{id}/refresh`（后台，见 refresh.go），
-// 因为这条同步路实测 24~126 秒，挂在按钮上会被中间层切掉。
-// 留着是给 curl / 外部脚本的直通口（它带着补缺链，一次就能把简介与中文标题也补上）。
+// 因为那条同步路实测几十秒到两分钟，挂在按钮上会被中间层切掉。
+// 留着是给 curl / 外部脚本的直通口。
+//
+// ⚠️ 2026-09-30 起它**只抓 JAVDB 那份详情，不跑补缺链**（见下面调用的那个方法）。
+// 以前这里是 `h.jav.IngestMovie`（详情 + 补缺链，实测 24~126 秒），
+// 于是这个端点有两个问题：①外部脚本拿它当「取详情」用会莫名等两分钟；
+// ②它和用户路径抢同一条上游通道。补缺链现在只在后台跑
+// （summaryBackfillLoop + hydrate 队列），没有任何 HTTP 端点会触发它。
 func (h *Handler) javIngestMovie(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {
 		return
 	}
-	movie, err := h.jav.IngestMovie(r.Context(), chi.URLParam(r, "id"))
+	movie, err := h.jav.IngestMovieDetail(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err)
 		return

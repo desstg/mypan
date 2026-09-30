@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"litepan/internal/domain"
@@ -146,6 +147,22 @@ type Service struct {
 	// 与上面那个**故意分开**（串行队列 + 冷却 + 队头阻塞，三条都不合这里的语义）。
 	refreshOnce sync.Once
 	refresh     *refreshQueue
+
+	// userActiveAt 是**用户最后一次操作番号接口**的时刻（UnixNano）。
+	//
+	// 与 javdb.Client.LastUsedAt 的区别是「谁推动的」：
+	//   - LastUsedAt 由**所有**上游请求推动，后台自己发的也算 —— 拿它当
+	//     「用户在不在」的判据是错的。2026-09-30 实测：三个 sweep 循环的避让闸门
+	//     一次都没触发过（`grep 'paused (user active)'` 零条），而后台从 0 点到 9 点
+	//     每小时都在跑。根因在循环里那段 `mine = client.LastUsedAt()`：
+	//     检验窗口只有「这部片最后一次上游请求」到那一行的几微秒，而一部片的
+	//     补缺链实测要 138 秒 —— 结构性地永不命中。
+	//   - 这一个**只被 HTTP handler 推动**（后台循环不经过 handler，天然不沾），
+	//     所以它回答的正是「用户现在在不在用」。
+	//
+	// 用 atomic 而不是复用 s.mu：读它的地方是几个后台循环的紧循环（每部片一次），
+	// 而 s.mu 保护的是队列与客户端缓存那些要建对象的路径 —— 不该为一对时间戳竞争。
+	userActiveAt atomic.Int64
 }
 
 // JavdbClient 是 JAVDB 客户端的切面，供测试注入。
@@ -174,7 +191,15 @@ type JavdbClient interface {
 	// 那个参数是拿清单名去**模糊匹配影片标题**，不是清单成员 —— 搜「驾驶双马尾」
 	// 会返回《双子コー…》，条数永远只是页上限。留着它只会再被误用一次。
 	ListPage(ctx context.Context, listID string, page int) ([]javdb.Movie, int, error)
-	// LastUsedAt 是上一次向上游发请求的时刻。后台铺评论靠它避让正在用的人。
+	// LastUsedAt 是上一次向上游发请求的时刻 —— **由所有上游请求推动，含后台自己的**。
+	//
+	// ⚠️ 它**不是**「用户在不在用」的判据（这个实例是模块级共享的：hydrate 队列、
+	// refresh 队列、订阅检查打的都是它）。后台循环避让用户用的是
+	// `Service.UserActiveWithin`，见 jav_userActivity 的注释与 loops.go 的
+	// userActivityWindow —— 2026-09-30 之前这里写的就是「靠它避让正在用的人」，
+	// 而那个判据实测一次都没生效过。
+	//
+	// 现在唯一的用途是 `sweepUpstreamIdle`：问「上游通道自己凉了没有」。
 	LastUsedAt() time.Time
 }
 
@@ -340,6 +365,34 @@ func (s *Service) proxyURL() string {
 		return raw
 	}
 	return injectProxyAuth(raw, user, s.settings.StringAllowEmpty(settings.KeyProxyPassword))
+}
+
+// TouchUserActivity 记一次「用户正在用番号功能」。
+//
+// 由 API 层中间件调用（见 internal/api/jav_activity.go）—— **只有 HTTP 请求会推动它**，
+// 后台循环不经过 handler，所以它天然是「用户活动」而不是「上游活动」。
+// 这正是它与 javdb.Client.LastUsedAt 的分工，见 Service.userActiveAt 那段注释。
+func (s *Service) TouchUserActivity() {
+	if s == nil {
+		return
+	}
+	s.userActiveAt.Store(time.Now().UnixNano())
+}
+
+// UserActiveWithin 报告「用户在 d 之内动过番号功能」。
+//
+// 三个后台 sweep 循环（reviewSweep / magnetSweep / summaryBackfill）拿它当避让判据：
+// 为真就整轮不开工、或者一轮跑到一半立刻收手。零值（从没被推动过）恒为 false ——
+// 那正是「没人用过，随便跑」。
+func (s *Service) UserActiveWithin(d time.Duration) bool {
+	if s == nil || d <= 0 {
+		return false
+	}
+	last := s.userActiveAt.Load()
+	if last == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, last)) < d
 }
 
 // effectiveProxyLabel 描述抓取实际会走哪条路，供设置页显示。

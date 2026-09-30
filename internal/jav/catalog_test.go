@@ -138,8 +138,11 @@ func (s *stubJavdb) Related(context.Context, string, int) ([]javdb.RelatedList, 
 	return s.relatedResult, s.relatedErr
 }
 
-// LastUsedAt 报告「上次向上游发请求」的时刻。后台铺评论靠它避让正在用的人 ——
-// 桩里默认给一个很久以前的时刻，等于「一直闲着」，循环该开工就开工。
+// LastUsedAt 报告「上次向上游发请求」的时刻。桩里默认给一个很久以前的时刻，
+// 等于「上游通道一直闲着」—— 循环该开工就开工。
+//
+// 注意它**不是**「用户在不在用」的判据（那是 `Service.UserActiveWithin`，
+// 见 TestUserActivityGate）；这里只喂 loops.go 的 `sweepUpstreamIdle` 那一条。
 func (s *stubJavdb) LastUsedAt() time.Time {
 	if s.lastUsed.IsZero() {
 		return time.Now().Add(-time.Hour)
@@ -1392,6 +1395,12 @@ func TestRankingActorDefaultsType(t *testing.T) {
 // TestUserSharesSortedByReleaseDate 变慢的）。
 //
 // 需要测补全本身的用例显式 `f.svc.testDisableEnrich = false` 并注入桩 enricher。
+//
+// ⚠️ 2026-09-30 起这条闸门只对 `IngestMovie` 有意义：用户路径（搜索 / 详情 /
+// 番号直达 / 预览片 / 那个 /ingest 端点）全部改走 `ingestMovieDetailOnly`，
+// 它**结构上就不补**，用不着这道开关。所以真正该担心「单测偷偷打外网」的地方
+// 只剩后台那两条入口（hydrate 队列、订阅检查）—— 见
+// TestResolveSearchActorDoesNotRunEnrichChain 把这个边界钉住。
 func TestEnrichSkippedInTests(t *testing.T) {
 	f := newCatalogFixture(t)
 	if !f.svc.testDisableEnrich {
@@ -1409,5 +1418,83 @@ func TestEnrichSkippedInTests(t *testing.T) {
 	if got.Summary != "" || got.DirectorName != "" || got.Duration != 0 {
 		t.Errorf("关掉补全时不该有任何字段被填上：summary=%q director=%q duration=%d",
 			got.Summary, got.DirectorName, got.Duration)
+	}
+}
+
+// TestResolveSearchActorDoesNotRunEnrichChain 钉住 2026-09-30 那条收敛：
+// **演员搜索反查演员 id 时不跑补缺链**。
+//
+// 为什么值得一个用例：这是「搜索很慢 / 经常超时」的直接原因。`resolveSearchActor`
+// 对结果前 3 部各调一次取详情，而补缺链在这台机器上实测 60 秒（直连全超时）到
+// 148 秒（走代理）—— 最坏 3 部就是 7 分钟，全挂在搜索请求里，被前端 90 秒超时切掉。
+//
+// 判据用**计数型 enricher**（见 hydrate_test.go 的 countingJavEnricher）而不是看
+// `movieCalls` 的次数：这一条要验的是「补缺链没跑」，不是「详情没抓」——
+// 详情**该抓**（演员关联就在它里面，`ReplaceMovieActors` 在 enrich 门之前）。
+func TestResolveSearchActorDoesNotRunEnrichChain(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+
+	// 补缺那条路要打开，否则这个用例是「因为开关关着所以没跑」，等于没验到东西。
+	f.svc.testDisableEnrich = false
+	counter := &countingJavEnricher{}
+	f.svc.testEnrichers = []synopsis.Enricher{counter}
+
+	// 搜索结果：三部都没有本地演员关联（真库 13086 部里只有 1808 部有，
+	// 所以「本地没有」是常态，probeLimit 那 3 部全都会去抓详情）。
+	f.db.searchPages = [][]javdb.Movie{{
+		{ID: "m1", Number: "AAA-001", Title: "甲"},
+		{ID: "m2", Number: "AAA-002", Title: "乙"},
+		{ID: "m3", Number: "AAA-003", Title: "丙"},
+	}}
+	// 详情里带演员，名字与搜索词一致 —— 反查应当命中。
+	f.db.movieResult = javdb.Movie{
+		ID: "m1", Number: "AAA-001", Title: "甲",
+		Actors: []javdb.Actor{{ID: "a1", Name: "彩月七緒"}},
+	}
+
+	res, err := f.svc.Search(ctx, SearchParams{Keyword: "彩月七緒", Type: "actor", Page: 1})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if res.ActorID != "a1" {
+		t.Fatalf("演员反查应当命中（这是搜索功能的正常路径）：actor_id=%q", res.ActorID)
+	}
+	// 关键断言：一条补缺链都没跑。
+	if counter.n != 0 {
+		t.Errorf("演员搜索不该跑补缺链，enricher 被调了 %d 次（这就是搜索要几十秒到几分钟的原因）", counter.n)
+	}
+	// 顺带钉住「详情还是抓了」—— 别为了快把演员关联也一起省掉，
+	// 那会让「订阅该演员」那颗按钮永远不出现。
+	if len(f.db.movieCalls) == 0 {
+		t.Error("演员反查必须抓详情（演员关联只在详情里），一次都没抓")
+	}
+}
+
+// TestUserActivityGate 钉住后台避让用户的判据。
+//
+// 背景：2026-09-30 之前三个 sweep 循环用 `javdb.Client.LastUsedAt` 当判据，
+// 而那东西由**所有**上游请求推动（含后台自己的），于是避让闸门一次都没生效过
+// （日志里 `paused (user active)` 零条，后台从 0 点到 9 点每小时都在跑）。
+// 现在换成只被 HTTP 请求推动的 `Service.userActiveAt`，这个用例守住它的语义。
+func TestUserActivityGate(t *testing.T) {
+	f := newCatalogFixture(t)
+
+	// 零值：从没人用过 → 不避让（后台该跑）。
+	if f.svc.UserActiveWithin(time.Hour) {
+		t.Error("从没被推动过时不该算「用户在用」")
+	}
+	// 窗口为 0 或负数：永远不避让（防住「传个 0 就把后台永久停掉」）。
+	f.svc.TouchUserActivity()
+	if f.svc.UserActiveWithin(0) {
+		t.Error("窗口为 0 时不该算「用户在用」")
+	}
+	// 刚推动过 → 在窗口内。
+	if !f.svc.UserActiveWithin(time.Minute) {
+		t.Error("刚记过活动，1 分钟窗口内应当算「用户在用」")
+	}
+	// 负窗口 → 不避让（与 0 同一条，防住「算错了传个负数把后台永久停掉」）。
+	if f.svc.UserActiveWithin(-time.Second) {
+		t.Error("负窗口不该命中")
 	}
 }

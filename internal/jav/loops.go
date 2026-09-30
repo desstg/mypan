@@ -34,11 +34,8 @@ const (
 	//   - reviewSweepTick：多久**看一眼**要不要开工。看一眼很便宜（两次时间比较
 	//     加一次 SQL），真正决定开不开工的是下面那个 24 小时。
 	//   - reviewSweepInterval：**一天最多开始一轮**。铺不完不补时，剩下的明天再说。
-	//   - reviewSweepIdle：避让窗口 —— 上游 30 秒内被请求过就不开工；
-	//     一轮跑的中途用户来了也立刻收手。铺库绝不能拖慢你正常用。
 	reviewSweepTick     = 30 * time.Minute
 	reviewSweepInterval = 24 * time.Hour
-	reviewSweepIdle     = 30 * time.Second
 	// reviewSweepBatch 是一批铺几部。一批大约十几秒（走 500ms 限流），
 	// 批是连续跑的 —— 反正每个请求之间已经被限流拉开了。
 	reviewSweepBatch = 20
@@ -47,9 +44,50 @@ const (
 	//
 	// 与铺评论同一套规矩（一天一轮、只在空闲时跑、用户一活跃就收手），
 	// 只把批调小：磁链要打**两个**境外站（JAVDB + JAVBUS），一批比评论贵。
-	magnetSweepBatch = 10
-	// magnetSweepInterval 是两条循环之间的错开量，见 magnetSweepOffset。
+	//
+	// ⚠️ tick / interval 以前**复用 reviewSweep 那两个常量**，2026-09-30 拆成自己的
+	// 名字（值不变）。理由不是洁癖：这两条循环的上游开销差一倍，将来调评论的节奏时
+	// 顺手把磁链一起改掉是很容易发生的事，而症状要到「磁链怎么一直没补」才看得出来。
+	magnetSweepTick     = 30 * time.Minute
+	magnetSweepInterval = 24 * time.Hour
+	magnetSweepBatch    = 10
+	// magnetSweepOffset 是两条循环之间的错开量，见 magnetSweepOffset 那段说明。
 	magnetSweepOffset = 3 * time.Hour
+
+	// ————— 后台避让用户的窗口 —————
+	//
+	// 上面三个 sweep 循环（评论 / 磁链 / 补简介）共用这一条判据：**用户 d 之内动过
+	// 番号功能就不开工；一轮跑到一半用户来了也立刻收手**。
+	//
+	// 为什么不是原来的 30 秒（`reviewSweepIdle` / `summaryBackfillIdle`）：
+	// 那两个值的判据是 `javdb.Client.LastUsedAt`，而它由**所有**上游请求推动 ——
+	// 后台自己发的也算。2026-09-30 实测：避让闸门**一次都没触发过**
+	// （日志里 `paused (user active)` 零条），而后台从 0 点到 9 点每小时都在跑。
+	// 内层那段 `mine = client.LastUsedAt()` 把检验窗口压到了几微秒，而一部片的
+	// 补缺链要 138 秒 —— 结构性地永不命中。现在换成 `Service.UserActiveWithin`
+	// （只被 HTTP 请求推动，见 Service.userActiveAt 的注释）。
+	//
+	// 为什么是 5 分钟（不是「随便一个够大的数」）：它必须**盖过一次用户主动刷新**。
+	// 「重新获取」排的 refreshLoop 跑的是 `IngestMovie`（带补缺链），预算
+	// refreshBudget = 4 分钟、链内 enrichBudget = 3 分钟。用户点一次 → 窗口起算 →
+	// 刷新跑完 4 分钟 → 窗口刚好还剩 1 分钟才过期。**调到 4 分钟以下就会出这个毛病**：
+	// 刷新一结束窗口立刻过期，后台马上开工，跟刚回到页面的用户抢上游。
+	userActivityWindow = 5 * time.Minute
+
+	// sweepUpstreamIdle 是**另一条**判据：上游通道自己闲着吗。
+	//
+	// 与 userActivityWindow 分开、不合并，是因为两者问的不是一件事：
+	// 「上游 30 秒内没人打过」问的是通道凉没凉（含后台自己刚打完的），
+	// 「用户 5 分钟内动过」问的是人在不在。合并成一个表达式之后，
+	// 任何一方将来要调，另一方会跟着一起变 —— 而这次的教训正是这条判据被写坏了
+	// 却看不出来。两条都为真才开工。
+	//
+	// 值沿用原来那个 30 秒 —— 它本身没问题（后台自己的请求确实把通道占着，
+	// 该等），坏的是内层那个 `mine` 写法：它把「用户插进来的请求」也算成自己的。
+	// 30 秒这个数本身有依据：`jav_min_interval_ms` 默认 500ms，30 秒是它的 60 倍，
+	// 足够把「同一轮里刚发出去的那个请求」等凉。**别拿「一件活有多长」来调它** ——
+	// 它问的是通道，不是活。
+	sweepUpstreamIdle = 30 * time.Second
 )
 
 // startLoops 启动后台循环。
@@ -81,7 +119,8 @@ func (s *Service) startLoops(ctx context.Context) {
 // 四条规矩（前三条与 reviewSweepLoop 逐字同源，那一套是被真实使用打磨过的）：
 //
 //  1. **一天最多开始一轮**（下面那个 24 小时判断）；
-//  2. **只在空闲时跑**：上游 30 秒内被请求过就整轮跳过；跑的中途用户来了立刻收手；
+//  2. **只在空闲时跑**：上游闲着、且用户不在用（userActivityWindow）才开工；
+//     跑的中途用户来了立刻收手；
 //  3. **把结论记进台账**（jav_magnet_sweeps）—— **「这部确实没有磁链」也是结论**，
 //     不记的话那 6454 部每天都会被重新问一遍；失败/连不上**不记**，下一轮还会来；
 //  4. **与铺评论错开**（magnetSweepOffset）：两条循环都一天一轮、都抢同一条上游
@@ -102,7 +141,7 @@ func (s *Service) magnetSweepLoop(ctx context.Context, gate <-chan struct{}) {
 	// 所以第一轮**额外等 magnetSweepOffset** 才开始，之后照 24 小时一轮。
 	started := time.Now()
 	var lastRun time.Time
-	ticker := time.NewTicker(reviewSweepTick)
+	ticker := time.NewTicker(magnetSweepTick)
 	defer ticker.Stop()
 	for {
 		select {
@@ -118,19 +157,25 @@ func (s *Service) magnetSweepLoop(ctx context.Context, gate <-chan struct{}) {
 			if time.Since(started) < magnetSweepOffset {
 				continue // 第一轮等到错开窗口之后再开
 			}
-		} else if time.Since(lastRun) < reviewSweepInterval {
+		} else if time.Since(lastRun) < magnetSweepInterval {
 			continue
 		}
 		client, err := s.javdbClient()
 		if err != nil {
 			continue
 		}
-		if time.Since(client.LastUsedAt()) < reviewSweepIdle {
+		// 两条判据，语义不同，**不要合并**：
+		//   - 上游通道自己凉了吗（LastUsedAt 含后台自己的请求）；
+		//   - 用户在不在用（UserActiveWithin 只被 HTTP 请求推动）。
+		// 见 userActivityWindow 那段注释：2026-09-30 之前只有第一条，而它是错的。
+		if time.Since(client.LastUsedAt()) < sweepUpstreamIdle {
+			continue
+		}
+		if s.UserActiveWithin(userActivityWindow) {
 			continue
 		}
 		lastRun = time.Now()
 
-		var mine time.Time
 		total := 0
 		for {
 			select {
@@ -152,7 +197,8 @@ func (s *Service) magnetSweepLoop(ctx context.Context, gate <-chan struct{}) {
 					return
 				default:
 				}
-				if used := client.LastUsedAt(); used.After(mine) && time.Since(used) < reviewSweepIdle {
+				// 用户来了就立刻收手，这一批剩下的不铺了。
+				if s.UserActiveWithin(userActivityWindow) {
 					s.logInfo("jav magnet sweep paused (user active)", "done", total)
 					return
 				}
@@ -163,14 +209,12 @@ func (s *Service) magnetSweepLoop(ctx context.Context, gate <-chan struct{}) {
 					if errors.As(err, &ae) && ae.Code == domain.CodeNotFound {
 						// 上游说「这部没有磁链」—— 正常结论，记账走过了，不是失败。
 						total++
-						mine = client.LastUsedAt()
 						continue
 					}
 					s.logWarn("jav magnet sweep failed", "id", id, "err", err)
 				} else {
 					total++
 				}
-				mine = client.LastUsedAt()
 			}
 		}
 		if total > 0 {
@@ -193,7 +237,7 @@ func (s *Service) magnetSweepLoop(ctx context.Context, gate <-chan struct{}) {
 //  1. **一天最多开始一轮**（reviewSweepInterval）。醒来只做一件很便宜的事：
 //     看看够不够 24 小时、现在闲不闲。
 //  2. **只在空闲时铺**：铺评论和用户共用同一条限流通道（对的，对上游的总速率
-//     必须有上限），所以 30 秒内上游被请求过就整轮跳过；一轮跑到一半用户来了
+//     必须有上限），所以上游闲着、且**用户不在用**才开工；一轮跑到一半用户来了
 //     也立刻收手 —— 你点开一部片时，绝不会排在后台的请求后面。
 //
 // 被用户打断的那一轮不补时：剩下的明天再说，反正这是个慢慢长的后台活。
@@ -221,6 +265,17 @@ func (s *Service) reviewSweepLoop(ctx context.Context, gate <-chan struct{}) {
 		}
 		// 一天一轮。lastRun 在**开始**时就记：被打断也算用过这一天，
 		// 不然后半夜会反复重试。
+		//
+		// ⚠️ **已知取舍（2026-09-30 记下，未改）**：`paused (user active)` 那条路是
+		// `return`，而 lastRun 已经置位 —— 于是「半途被打断」= 这一天作废。
+		// 旧闸门从来没生效过（见 userActivityWindow 的注释），所以这条语义从没被真实
+		// 使用验过；换成有效的闸门之后，最常见的场景恰恰是「用户白天一直在用 →
+		// 每轮都在半途被打断」。
+		//
+		// 为什么先不改：把它改成「只在正常收尾时置位」会让后半夜反复重试，
+		// 而这三条循环**都抢同一条上游通道** —— 重试本身就会把用户的请求挤后。
+		// 真出现「连续几天补缺全停」再动，届时改法是给 paused 分支单列一个更短的
+		// 重开间隔（而不是删掉这行）。
 		if !lastRun.IsZero() && time.Since(lastRun) < reviewSweepInterval {
 			continue
 		}
@@ -229,17 +284,16 @@ func (s *Service) reviewSweepLoop(ctx context.Context, gate <-chan struct{}) {
 			continue
 		}
 		// 现在不闲就先不开这一轮，等下一个 tick —— 一天里总有闲的时候。
-		if time.Since(client.LastUsedAt()) < reviewSweepIdle {
+		// 两条判据的语义不同（通道 vs 人），见 sweepUpstreamIdle 那段。
+		if time.Since(client.LastUsedAt()) < sweepUpstreamIdle {
+			continue
+		}
+		if s.UserActiveWithin(userActivityWindow) {
 			continue
 		}
 		lastRun = time.Now()
 
 		// 一轮里分批铺，铺到没有待铺的、或用户来了为止。
-		//
-		// mine 是我们自己最后一次请求的时刻，用来把「自己发的请求」与
-		// 「用户插进来的请求」分开：throttle 把每次请求都记进 LastUsedAt，
-		// 所以 LastUsedAt 比 mine 晚就说明中间有别人用过。
-		var mine time.Time
 		total := 0
 		for {
 			select {
@@ -262,7 +316,7 @@ func (s *Service) reviewSweepLoop(ctx context.Context, gate <-chan struct{}) {
 				default:
 				}
 				// 用户来了就立刻收手，这一批剩下的不铺了。
-				if used := client.LastUsedAt(); used.After(mine) && time.Since(used) < reviewSweepIdle {
+				if s.UserActiveWithin(userActivityWindow) {
 					s.logInfo("jav review sweep paused (user active)", "done", total)
 					return
 				}
@@ -274,7 +328,6 @@ func (s *Service) reviewSweepLoop(ctx context.Context, gate <-chan struct{}) {
 				} else {
 					total++
 				}
-				mine = client.LastUsedAt()
 			}
 		}
 		if total > 0 {
@@ -668,9 +721,6 @@ const (
 	summaryBackfillBatch = 40
 	// summaryBackfillTick 醒来看看够不够一轮的间隔。与评论铺开同一个节奏。
 	summaryBackfillTick = 10 * time.Minute
-	// summaryBackfillIdle 上游在这个时间内被请求过就不开工（与评论铺开同一条规矩）：
-	// 后台绝不跟用户抢同一条限流通道。
-	summaryBackfillIdle = 30 * time.Second
 )
 
 // summaryBackfillLoop 给影库里**还没有简介**的片去别的站补一段。
@@ -683,12 +733,18 @@ const (
 // 三条规矩照抄评论铺开那一套（那一套是被真实使用打磨过的）：
 //
 //  1. **一天最多开始一轮**；
-//  2. **只在空闲时跑**：上游 30 秒内被请求过就整轮跳过，一轮跑到一半用户来了立刻收手；
+//  2. **只在空闲时跑**：上游闲着、且用户不在用（userActivityWindow）才开工，
+//     一轮跑到一半用户来了立刻收手；
 //  3. **成功才记账**：补到了写 `summary_source`，问过但没有也写（空串表示"问过"）——
 //     两者都不会再被挑中。**失败不记账**：失败多半是限流，记了就再也不会试。
 //
-// 与 `javdb.Client.LastUsedAt()` 的关系同评论：那是**共享的**上游节流通道，
-// 这里借它判"现在闲不闲"。
+// 避让判据的来历见 userActivityWindow 与 sweepUpstreamIdle 那两段注释：
+// 2026-09-30 之前这里用的是 `LastUsedAt` + 30 秒，实测**一次都没生效过**。
+//
+// ⚠️ 本循环是**全项目仅有的两个补缺链入口之一**（另一个是 hydrate 队列）——
+// 用户点出来的路径 2026-09-30 起全部不跑补缺链了（见 catalog.go 里那几处注释）。
+// 所以这条循环是「简介 / 中文标题」能不能慢慢补齐的**唯一希望**，它被避让闸门
+// 挡掉是可以的（明天再来），但它自己不能因为没人开工而废掉 —— 改动这里时留意。
 func (s *Service) summaryBackfillLoop(ctx context.Context, gate <-chan struct{}) {
 	if !startupwait.Ready(ctx, gate) {
 		return
@@ -717,7 +773,11 @@ func (s *Service) summaryBackfillLoop(ctx context.Context, gate <-chan struct{})
 		if err != nil {
 			continue
 		}
-		if time.Since(client.LastUsedAt()) < summaryBackfillIdle {
+		// 两条判据，语义不同，见 sweepUpstreamIdle 那段注释。
+		if time.Since(client.LastUsedAt()) < sweepUpstreamIdle {
+			continue
+		}
+		if s.UserActiveWithin(userActivityWindow) {
 			continue
 		}
 		if len(s.enrichers()) == 0 {
@@ -725,7 +785,6 @@ func (s *Service) summaryBackfillLoop(ctx context.Context, gate <-chan struct{})
 		}
 		lastRun = time.Now()
 
-		var mine time.Time
 		total, hit := 0, 0
 		for {
 			select {
@@ -748,12 +807,11 @@ func (s *Service) summaryBackfillLoop(ctx context.Context, gate <-chan struct{})
 				default:
 				}
 				// 用户来了立刻收手，这一批剩下的明天再说。
-				if used := client.LastUsedAt(); used.After(mine) && time.Since(used) < summaryBackfillIdle {
+				if s.UserActiveWithin(userActivityWindow) {
 					s.logInfo("jav summary backfill paused (user active)", "done", total)
 					return
 				}
 				found, err := s.backfillSummary(ctx, id)
-				mine = client.LastUsedAt()
 				if err != nil {
 					// 不记账 → 下轮还从它开始。
 					s.logWarn("jav summary backfill failed", "id", id, "err", err)

@@ -228,7 +228,26 @@ func (s *Service) resolveSearchActor(ctx context.Context, keyword string, movies
 		actors, err := s.movies.ListActors(ctx, m.ID)
 		if err != nil || len(actors) == 0 {
 			// 本地没有这部片的演员关联：抓一次详情把它补上（详情才带 actors）。
-			if _, ierr := s.IngestMovie(ctx, m.ID); ierr != nil {
+			//
+			// ⚠️ **只抓详情，不跑补缺链**（2026-09-30 改）。这里以前调的是
+			// `s.IngestMovie`，而带上补缺链之后这一趟实测要 60 秒（直连全超时）
+			// 到 148 秒（走代理），最坏 3 部就是 7 分钟 —— 全挂在**搜索请求**里。
+			// 前端 90 秒就掐（web/src/api/client.ts 的 defaultRequestTimeoutMs），
+			// 于是这个请求必被切，而**被切掉的不只是补缺**：紧跟着的
+			// `s.movies.ListActors`、以及 `Search` 末尾的 `libraryCodes`（本地读！
+			// 根本不该失败）会一起收到取消的 ctx，日志里就是 07:55:03 那三连
+			// 「补番号元数据失败 + 补中文标题失败 + jav load library codes failed」。
+			//
+			// 我们要的东西（演员关联）来自 **JAVDB 那份详情**，一次请求几百毫秒就到手，
+			// 它跟补缺链一点关系都没有（`ReplaceMovieActors` 只在 ingestMovie 里、
+			// 且在 enrich 之前，见 catalog.go:763）。简介 / 中文标题那些归后台
+			// （summaryBackfillLoop 与 hydrate 队列），不该由搜索的人陪着等。
+			//
+			// 代价（可接受）：搜一个从没抓过详情的演员时，那片可能来不及在本次反查出
+			// 演员 id，那颗「订阅该演员」按钮第一次不出现、再搜一次才出现。
+			// 与「搜索 7 分钟超时」相比这个代价小得多，而且按钮本来的判据
+			// （匹配不上就不给，见上面的注释）就允许它缺席。
+			if _, ierr := s.ingestMovieDetailOnly(ctx, m.ID); ierr != nil {
 				continue
 			}
 			if actors, err = s.movies.ListActors(ctx, m.ID); err != nil {
@@ -608,8 +627,11 @@ func (s *Service) rankCards(ctx context.Context, movies []javdb.Movie) []MovieCa
 // raw_json 是空的）。详情页走 DetailLocal()，上游补缺交给后台（见 hydrate.go）。
 //
 // 现在**界面已经一处都不调它了**（2026-09-29：「重新获取」也改成后台任务，
-// 见 refresh.go）。留着是给 curl / 外部脚本的直通口 —— `?refresh=1` 会顺带跑
-// 补缺链，一次把简介与中文标题也补上，这一点后台那条链做不到（它只跑补缺、不重取详情）。
+// 见 refresh.go）。留着是给 curl / 外部脚本的直通口。
+//
+// ⚠️ 2026-09-30 起 `?refresh=1` **不再跑补缺链**（见下面 needFetch 那段的注释）：
+// 补缺链只留后台（summaryBackfillLoop 定时跑、hydrate 队列在详情页打开时跑）。
+// 所以这个口子现在只重取 JAVDB 那份详情，一次请求几百毫秒。
 func (s *Service) Detail(ctx context.Context, id string, refresh bool) (*MovieDetail, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -622,7 +644,16 @@ func (s *Service) Detail(ctx context.Context, id string, refresh bool) (*MovieDe
 	// 留着它的代价是「本地明明有数据、还是要跑一趟上游」。
 	needFetch := refresh || err != nil || strings.TrimSpace(movie.RawJSON) == ""
 	if needFetch {
-		fetched, ferr := s.IngestMovie(ctx, id)
+		// ⚠️ **只抓详情，不跑补缺链**（2026-09-30 改，原来调的是 `s.IngestMovie`）。
+		//
+		// 这条路的调用方**当场要这个 HTTP 响应**（`?refresh=1` 是同步的，
+		// 见 api/jav.go 的 javMovieDetail）。而补缺链在这台机器上实测 60~148 秒，
+		// 前端 90 秒就掐 —— 请求被切之后连**这次已经抓到的 JAVDB 那份**都传不回去
+		// （服务端写响应时 ctx 已经取消），用户看到的是空白 / 报错，重试一次还是同样结局。
+		//
+		// 摘掉之后这条路的开销就是一次 JAVDB 请求（几百毫秒）。补缺归后台两处：
+		// summaryBackfillLoop（定时）与 hydrate 队列（详情页打开时排的活）。
+		fetched, ferr := s.ingestMovieDetailOnly(ctx, id)
 		if ferr != nil {
 			// 抓不到时如果本地有记录，就用本地那份 —— 详情页显示旧数据
 			// 远好过一个空白页。只有本地也什么都没有时才把错误抛出去。
@@ -644,7 +675,7 @@ func (s *Service) Detail(ctx context.Context, id string, refresh bool) (*MovieDe
 // 关联影片）就是空 —— 那正是首屏要的，补缺交给后台（见 Service.Hydrate）。
 //
 // 与 Detail 的三点差别，都是「不碰上游」的直接推论：
-//   - 不调 IngestMovie（那是几秒的活）；
+//   - 不调 ingestMovie（那是几秒到几分钟的活）；
 //   - 磁链只读本地（本地 0 颗就返回空，**不回落去抓**）—— 详情页那头两块
 //     改由各自的惰性端点拉（/magnets、/reviews）；
 //   - 评论只读本地（不调 ensureReviews，那有 45 秒预算）。
@@ -668,12 +699,17 @@ func (s *Service) DetailLocal(ctx context.Context, id string) (*MovieDetail, err
 //
 // 上游不通（限流、网络）时回落到库里那份：它也许还没过期；就算过期了，播放器上
 // 那个明确的失败也比「什么都没有」好排查。
+//
+// ⚠️ **只抓详情，不跑补缺链**（2026-09-30 改）。这是「用户点了播放」那条路，
+// 他在等播放器起来 —— 让这趟去跑 60~148 秒的补缺链，结果就是播放键点下去
+// 一分钟才有反应（或被前端 90 秒超时切掉）。要的只是一个新鲜签名，
+// 它跟补缺一点关系都没有。
 func (s *Service) FreshPreviewVideoURL(ctx context.Context, id string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return "", domain.Errorf(domain.CodeValidation, "影片 id 为空")
 	}
-	movie, err := s.IngestMovie(ctx, id)
+	movie, err := s.ingestMovieDetailOnly(ctx, id)
 	if err != nil {
 		s.logWarn("jav fresh preview url failed, serving cached", "id", id, "err", err)
 	} else if movie != nil && strings.TrimSpace(movie.PreviewVideoURL) != "" {
@@ -719,10 +755,25 @@ func (s *Service) IngestMovie(ctx context.Context, id string) (*domain.JavMovie,
 // 这是「重新获取」要的那件事：一次 JAVDB 请求（带重试），把那部片的封面、演员、
 // 发行日期、时长、评分、标签这些**JAVDB 口径**的字段更新回库。
 //
-// 简介与中文标题不在这里补 —— 它们是后台补缺循环的活（同一个函数 fillMissingFields
-// 在 IngestMovie 上仍然照跑，所以首次入库、搜索、订阅检查那些路一条都没变）。
+// ⚠️ **用户路径一律走它，不走 IngestMovie**（2026-09-30 收敛的）。演员关联
+// （`ReplaceMovieActors`）也在它里面 —— 那一步在 enrich 门**之前**，所以
+// 「按演员搜 → 反查演员 id」这条链完全不受影响。
+//
+// 简介与中文标题只有 IngestMovie 会补，而那条路现在只剩后台：入库队列
+// （hydrate.go）与订阅检查（check.go）。所以「补缺链」全项目只有这几个后台入口，
+// 用户点出来的请求里一趟都不跑。
 func (s *Service) ingestMovieDetailOnly(ctx context.Context, id string) (*domain.JavMovie, error) {
 	return s.ingestMovie(ctx, id, false)
+}
+
+// IngestMovieDetail 是 ingestMovieDetailOnly 的导出形态，给 API 层的
+// `POST /movies/{id}/ingest` 用（那条同步端点只该抓详情，见 api/jav.go 的注释）。
+//
+// 之所以要一个导出壳而不是把 IngestMovie 也改成不补缺：`IngestMovie` 是**后台**
+// 两条链的入口（hydrate 队列与订阅检查），它们要的正是「详情 + 补缺」。
+// 两个名字分开，调用点看一眼就知道自己会不会跑那条 138 秒的链。
+func (s *Service) IngestMovieDetail(ctx context.Context, id string) (*domain.JavMovie, error) {
+	return s.ingestMovieDetailOnly(ctx, id)
 }
 
 func (s *Service) ingestMovie(ctx context.Context, id string, enrich bool) (*domain.JavMovie, error) {
@@ -913,16 +964,20 @@ func (s *Service) IngestByNumber(ctx context.Context, number string) (*domain.Ja
 	}
 
 	// 搜索是模糊的，这里要的是**精确**那一条：番号大小写与分隔符都归一后比较。
+	//
+	// ⚠️ 两条出口都**只抓详情、不跑补缺链**（2026-09-30 改）。这是「用户直接敲了一个
+	// 番号」那条路，他等着看见结果；补缺链 60~148 秒会把这个请求一起拖死
+	// （前端 90 秒超时，见 api/client.ts）。补缺归后台两处，见 resolveSearchActor 的注释。
 	want := normalizeNumber(number)
 	for _, m := range movies {
 		if normalizeNumber(m.Number) == want {
-			return s.IngestMovie(ctx, m.ID)
+			return s.ingestMovieDetailOnly(ctx, m.ID)
 		}
 	}
 	// 没有精确命中时退回第一条 —— 用户已经明确输入了番号，
 	// 给他「未找到」不如给他最接近的那条让他自己判断。
 	if len(movies) > 0 {
-		return s.IngestMovie(ctx, movies[0].ID)
+		return s.ingestMovieDetailOnly(ctx, movies[0].ID)
 	}
 	return nil, domain.Errorf(domain.CodeNotFound, "没有找到番号 %s", number)
 }
