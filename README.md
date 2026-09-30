@@ -102,7 +102,7 @@
 
 ## ▎ 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.5.6`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.5.7`
 
 ```yaml
 services:
@@ -137,3 +137,10 @@ services:
 
 打开 `http://你的IP:5211`，默认管理员密码均为admin。  
 需要 FUSE 时请确保宿主机具备 `/dev/fuse` 权限。
+
+---
+
+## ▎ 联系方式
+
+- Telegram：[联系我](https://t.me/mypandesstg_bot)
+- GitHub：[desstg/mypan](https://github.com/desstg/mypan)（源码与问题反馈）

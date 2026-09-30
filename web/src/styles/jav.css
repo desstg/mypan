@@ -935,7 +935,19 @@
   transition: all 0.15s;
 }
 
-.jav-tab:hover {
+/* ⚠️ `:not(--active)` **不能省**（2026-09-30 修）。
+ *
+ * `.jav-tab:hover` 是「一个类 + 一个伪类」= 特异性 (0,2,0)，而 `.jav-tab--active`
+ * 只是一个类 = (0,1,0)。**`:hover` 永远打赢 `--active`**，跟书写顺序无关。
+ *
+ * 于是点完一颗胶囊、鼠标还停在上面的瞬间：背景被 `--active` 涂成品牌蓝，
+ * 文字却被 `:hover` 定成同一个品牌蓝 —— **蓝字蓝底，字看不见**；鼠标一移开
+ * 才恢复白字。用户报的「点完看不到文字，点一下别处才出来」就是这个。
+ *
+ * 判据是**排除**而不是「把 --active 写得更具体」：后者要在两处各写一遍
+ * 特异性更高的选择器，将来加一颗新胶囊（海报墙那排就是复用这个类的）很容易漏。
+ */
+.jav-tab:not(.jav-tab--active):hover {
   border-color: var(--brand);
   color: var(--brand);
 }
@@ -1133,7 +1145,10 @@
     color 0.15s;
 }
 
-.jav-sort-chip:hover {
+/* 同 `.jav-tab` 那处：`:hover` 的特异性高于 `--active`，不加 `:not()` 的话
+ * 选中的那颗排序胶囊会把 `color: var(--brand)` 压在 `--active` 的品牌色上 ——
+ * 品牌色叠品牌色，字看不清。 */
+.jav-sort-chip:not(.jav-sort-chip--active):hover {
   border-color: var(--brand);
   color: var(--text);
 }

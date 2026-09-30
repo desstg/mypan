@@ -527,8 +527,8 @@ onMounted(async () => {
       @update:model-value="onTabChange"
     >
       <template #actions>
-        <div style="display: flex; align-items: center; gap: 10px">
-          <div v-if="discoverVisible" style="width: 240px">
+        <div class="tg-tabbar-tools" :class="{ 'tg-tabbar-tools--jav': javVisible }">
+          <div v-if="discoverVisible" class="tg-tabbar-tools__search">
             <AppInput
               v-model="keywordInput"
               placeholder="搜索影片，回车或稍候自动搜索"
@@ -543,10 +543,10 @@ onMounted(async () => {
           <!-- 番号搜索框：类型下拉 + 输入框，与源码 base.html 的类型选择一致。
                只在番号分组里出现，与上面那个 TMDB 搜索框共用同一个位置。 -->
           <template v-if="javVisible">
-            <div style="width: 120px">
+            <div class="tg-tabbar-tools__type">
               <AppSelect v-model="javType" :options="JAV_SEARCH_TYPES.map((t) => ({ value: t.value, label: t.label }))" />
             </div>
-            <div style="width: 220px">
+            <div class="tg-tabbar-tools__search">
               <AppInput
                 v-model="javKeywordInput"
                 placeholder="搜索番号 / 演员 / 片商…"
@@ -658,3 +658,62 @@ onMounted(async () => {
     />
   </div>
 </template>
+
+<style scoped>
+/* ——————————————— Tab 栏右侧那排工具 ———————————————
+ *
+ * 这排东西（TMDB 搜索框 / 番号的类型下拉 + 输入框 / 清除 / 齿轮）以前全是**写死的
+ * 像素宽**（240 / 120 / 220 + gap），而外层 AppTabBar 的 `.tabbar__actions` 只有
+ * `display:flex`、**没有 flex-wrap**。于是在手机上它会作为一个整体硬撑出视口：
+ * 实测 390px 宽时右边界到 416px，超出 26px（三档搜索栏都中招，它们共用这一段）。
+ *
+ * 改成「宽度只由 CSS 给上限、窄屏收缩」：
+ *   - 桌面维持原来的视觉尺寸（上限就是原来那些写死的值）；
+ *   - 窄屏用 flex-basis + min-width:0 让它缩下来，输入框拿到剩余空间并允许被压到很小。
+ *
+ * 这里刻意**不**用 flex-wrap 折行 —— 折行会让这排控件在手机上顶出一行空白，
+ * 而且齿轮会跑到搜索框下面、离它很远。用户要的是「收成一条」。
+ * （AppTabBar 的 `.tabbar__actions` 也不加 wrap：整块在选项卡折行时跟着换行就够，
+ *  加 wrap 反而不受这一段的断点控制。）
+ */
+.tg-tabbar-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.tg-tabbar-tools__search {
+  flex: 1 1 auto;
+  /* 能压到很小 —— 没有它，输入框自带的最小内容宽度会顶住不让缩。 */
+  min-width: 0;
+  max-width: 240px;
+}
+.tg-tabbar-tools__type {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 120px;
+}
+
+/* 番号那三档（榜单 / 影库 / 订阅）多一个类型下拉，输入框宽一点更像桌面那版。 */
+.tg-tabbar-tools--jav .tg-tabbar-tools__search {
+  max-width: 220px;
+}
+
+/* 手机：搜索框尽管占满，类型下拉收到能显示短标签（全部 / 番号 / 演员…）的宽度。
+   齿轮跟着 AppTabBar 走，这里不管。 */
+@media (max-width: 640px) {
+  .tg-tabbar-tools {
+    gap: 8px;
+  }
+  .tg-tabbar-tools__search,
+  .tg-tabbar-tools--jav .tg-tabbar-tools__search {
+    /* 480px 只是「够宽就不再加宽」的上限；真正决定宽度的是 flex 分剩下的空间。 */
+    flex: 1 1 140px;
+    max-width: 480px;
+  }
+  .tg-tabbar-tools__type {
+    flex: 0 0 96px;
+    max-width: 96px;
+  }
+}
+</style>

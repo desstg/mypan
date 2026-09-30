@@ -87,7 +87,7 @@
 
 ## 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.5.6`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.5.7`
 
 ```yaml
 services:
@@ -128,7 +128,7 @@ services:
 | 标签 | 说明 |
 |---|---|
 | `latest` | 最新发布版 |
-| `v2.5.6` | 固定版本 |
+| `v2.5.7` | 固定版本 |
 
 **默认只构建 `linux/amd64`。** 绝大多数 NAS（群晖、威联通、自建 x86）都是这个架构。
 需要 ARM 版时请在 Actions 里手动触发并填写 `linux/amd64,linux/arm64` ——
@@ -138,3 +138,10 @@ arm64 走 QEMU 模拟，那一趟要一小时以上。
 
 见仓库的 LICENSE 文件。第三方组件与素材的说明见 ACKNOWLEDGEMENTS.md 与
 THIRD_PARTY_NOTICES.md。
+
+---
+
+## 联系方式
+
+- Telegram：[联系我](https://t.me/mypandesstg_bot)
+- GitHub：[desstg/mypan](https://github.com/desstg/mypan)（源码与问题反馈）

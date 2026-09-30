@@ -448,18 +448,29 @@ defineExpose(
         />
       </div>
 
-      <SettingsCard v-if="activeTab === TMDB_TAB" :accent="ORGANIZE_SETTINGS_ACCENT">
-        <template #head-aside>
-          <TmdbHostsHelpTip />
-        </template>
-        <template #head-actions>
-          <AppButton type="button" variant="secondary" size="sm" :disabled="tmdbTesting" @click="testTmdb">
-            {{ tmdbTesting ? "测试中…" : "测试连通性" }}
-          </AppButton>
-        </template>
+      <!-- ⚠️ 这一层 <template v-if> 是**必须**的：下面四张卡是同一档的两部分。
+           2026-09-30 之前 `v-if` 只挂在第一张卡（TMDB 设置）上，而后面那三张
+           （API 请求节流 / 文件识别与整理规则 / 媒体信息标签排序）是它的**兄弟**
+           且没有 v-if —— 于是切到「番号匹配规则设置」那一档时，第一张卡被藏起来，
+           那三张仍然显示，用户报的「两个 tab 里都看得到」就是这个。
 
-        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('tmdb_api_key')">
-          <template #info>
+           合并那一刻（2026-09-29 把三个独立 tab 并进 TMDB 页）的意图从注释看是
+           「并进这一页」，漏的就是把 v-if 的范围一起扩大。所以判据写在**外层包一层**
+           而不是给每张卡各加一遍 v-if：以后再加第五张卡不会再漏。
+           （当年那三张卡搬过来时留了个多缩进两格的痕迹，这次一并理顺。） -->
+      <template v-if="activeTab === TMDB_TAB">
+        <SettingsCard :accent="ORGANIZE_SETTINGS_ACCENT">
+          <template #head-aside>
+            <TmdbHostsHelpTip />
+          </template>
+          <template #head-actions>
+            <AppButton type="button" variant="secondary" size="sm" :disabled="tmdbTesting" @click="testTmdb">
+              {{ tmdbTesting ? "测试中…" : "测试连通性" }}
+            </AppButton>
+          </template>
+
+          <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('tmdb_api_key')">
+            <template #info>
             <div class="settings-row__label"><span>TMDB API Key</span></div>
           </template>
           <template #control>
@@ -508,8 +519,8 @@ defineExpose(
           <template #control>
             <AppInput v-model="settings.tmdb_image_host" placeholder="https://image.tmdb.org" />
           </template>
-        </SettingsRow>
-      </SettingsCard>
+          </SettingsRow>
+        </SettingsCard>
 
         <!-- 以下三块原先各自是一个 tab（API 请求节流 / 文件识别与整理规则 /
              媒体信息标签排序），2026-09-29 并进这一页。用带标题的 SettingsCard 分段，
@@ -680,6 +691,7 @@ defineExpose(
           </SettingsRow>
         </div>
       </SettingsCard>
+      </template>
     </template>
   </div>
 </template>
