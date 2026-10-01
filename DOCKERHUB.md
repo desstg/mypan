@@ -87,7 +87,60 @@
 
 ## 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.5.7`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.5.8`
+
+### 一、先确认共享挂载已开启（用到 FUSE 挂载才需要）
+
+mypan 用 fuse3 挂载云存储。**容器里的挂载要能在宿主机上看见**，宿主机那个目录的
+挂载传播属性必须是 `shared` —— 不是的话，容器里的挂载会直接失败并报「权限被拒绝」。
+
+先把下面路径换成你准备给容器用的那个目录，查一下：
+
+```bash
+findmnt -o TARGET,PROPAGATION /path/to/dir
+```
+
+`PROPAGATION` 那列写着 `shared` 就说明已经开着，**整节跳过**。
+精简系统里没有 `findmnt`，也可以直接看 `/proc`——输出里带 `shared:` 就是开着的：
+
+```bash
+grep ' / ' /proc/self/mountinfo
+```
+
+**这些系统默认就开着，查一下确认即可，别白改**：LibreELEC、CoreELEC、飞牛 fnOS。
+
+#### 没开的话，按 Docker 的运行方式选一个
+
+**选项 1 · Docker 以 systemd service 运行**
+
+```bash
+sudo mkdir -p /etc/systemd/system/docker.service.d/
+sudo cat <<EOF > /etc/systemd/system/docker.service.d/clear_mount_propagation_flags.conf
+[Service]
+MountFlags=shared
+EOF
+sudo systemctl restart docker.service
+```
+
+**选项 2 · Docker 不是以 systemd service 运行**
+
+在宿主机上直接给那个挂载点开共享（路径与上面查的是同一个）：
+
+```bash
+sudo mount --make-shared $(df -P /path/to/dir | tail -1 | awk '{ print $6 }')
+```
+
+**举个例子**：假如你把 mypan 装在 `/volume1/docker/mypan`，那 `df` 会告诉你它落在
+`/volume1` 这个挂载点上，所以命令就是：
+
+```bash
+sudo mount --make-shared /volume1
+```
+
+> ⚠️ **选项 2 重启后会失效** —— `mount --make-shared` 只在当前运行的系统里生效。
+> 想让 mypan 重启后自动可用，得把这条命令加进系统启动项。
+
+### 二、启动容器
 
 ```yaml
 services:
@@ -120,7 +173,10 @@ services:
     # 注意：也可以在程序内「目录整理 → TMDB 设置」填写反代主域名（自动补 /3 与 /t/p），与 hosts 二选一即可
 ```
 
-打开 `http://你的IP:5211`，默认管理员密码为 `admin`。
+### 三、打开界面
+
+访问 `http://你的IP:5211`，默认管理员密码为 `admin`。
+
 需要 FUSE 时请确保宿主机具备 `/dev/fuse` 权限。
 
 ## 标签
@@ -128,7 +184,7 @@ services:
 | 标签 | 说明 |
 |---|---|
 | `latest` | 最新发布版 |
-| `v2.5.7` | 固定版本 |
+| `v2.5.8` | 固定版本 |
 
 **默认只构建 `linux/amd64`。** 绝大多数 NAS（群晖、威联通、自建 x86）都是这个架构。
 需要 ARM 版时请在 Actions 里手动触发并填写 `linux/amd64,linux/arm64` ——

@@ -15,6 +15,10 @@ import { fetchMediaOrganizeTasks, type MediaOrganizeTask } from "@/api/mediaOrga
 import { fetchNotifications, fetchUnreadCount, type NotificationItem } from "@/api/notifications";
 import type { Account } from "@/api/types";
 import { fetchStrmTasks, type StrmTask } from "@/api/strm";
+import { fetchTGSubscriptions } from "@/api/tgSubscribe";
+import type { TGSubscription } from "@/types/tg-subscribe";
+import { fetchJavSubscriptions } from "@/api/jav";
+import type { JavSubscription } from "@/types/jav";
 import SectionTabBar from "@/components/admin/SectionTabBar.vue";
 import AppCardActionButton from "@/components/base/AppCardActionButton.vue";
 // 日志面板非默认 tab，按需加载,减小仪表盘首包。
@@ -46,6 +50,15 @@ const cacheRetentionStats = ref<CacheRetentionStats | null>(null);
 const fuseMounts = ref<FuseMount[]>([]);
 const strmTasks = ref<StrmTask[]>([]);
 const organizeTasks = ref<MediaOrganizeTask[]>([]);
+// 影片订阅：TMDB（电影/剧集）与番号**合成一条**显示（用户 2026-10-01 定）。
+// 两边的 status / last_* 字段同名同义（都取自同一个约定），所以合并只需要拼接。
+//
+// ⚠️ 番号那边**必须传 page_size=500**：端点默认只给 100 条，订阅超过 100 时
+// 「全部」会少算、进度条就永远差一截。500 是该端点的上限（jav_subscribe.go 会把
+// 超过 500 的夹回 100）。这个值不额外增加 SQL 次数 —— 列表里的封面与「已推数」
+// 都是**批量**补的（GetMany 一批 500 / 一条 GROUP BY），500 条正好一批装下。
+const tgSubscriptions = ref<TGSubscription[]>([]);
+const javSubscriptions = ref<JavSubscription[]>([]);
 const notifications = ref<NotificationItem[]>([]);
 const unreadCount = ref(0);
 const logStats = ref<LogStats | null>(null);
@@ -73,6 +86,25 @@ const enabledCacheCount = computed(() => {
 const enabledOrganizeCount = computed(
   () => organizeTasks.value.filter((task) => isOrganizeTaskEnabled(task)).length,
 );
+// —— 影片订阅（TMDB + 番号合一条）——
+//
+// 与上面三条**语义不同**，这一点值得写下来：那三条是「任务」（有启停开关，
+// 所以进度条画「启用 / 总数」），而订阅没有启停 —— 它有「推完没有」。
+// 所以这里进度条画**已推完 / 全部**，与订阅页卡片上那个状态是同一个口径。
+const subscriptionCount = computed(() => tgSubscriptions.value.length + javSubscriptions.value.length);
+const completedSubscriptionCount = computed(() => {
+  const done = (s: { status: string }) => s.status === "completed";
+  return tgSubscriptions.value.filter(done).length + javSubscriptions.value.filter(done).length;
+});
+/** 最近一次「看过一眼」的时间（两边取较晚的）。空串 = 从没跑过。 */
+const latestSubscriptionCheck = computed(() => {
+  const times = [
+    ...tgSubscriptions.value.map((s) => s.last_match_at ?? ""),
+    ...javSubscriptions.value.map((s) => s.last_checked_at),
+  ].filter((t) => t);
+  if (!times.length) return "";
+  return times.reduce((a, b) => (a > b ? a : b));
+});
 const enabledTaskCount = computed(
   () => enabledStrmCount.value + enabledCacheCount.value + enabledOrganizeCount.value,
 );
@@ -80,7 +112,8 @@ const totalTaskCount = computed(
   () =>
     strmTasks.value.length +
     (cacheRetentionStats.value?.total ?? cacheRetentionTasks.value.length) +
-    organizeTasks.value.length,
+    organizeTasks.value.length +
+    subscriptionCount.value,
 );
 const mountedFuseCount = computed(() => fuseMounts.value.filter((mount) => mount.state === "mounted").length);
 const totalFuseCount = computed(() => fuseMounts.value.length);
@@ -163,6 +196,19 @@ const taskSummaries = computed(() => [
     tone: "amber",
     updated: formatRelativeTimeAgo(latestOrganizeRun.value, "从未执行"),
   },
+  // 影片订阅：TMDB 与番号合一条（用户 2026-10-01 定）。
+  // 进度条画「已推完 / 全部」而不是「启用 / 总数」—— 订阅没有启停开关，
+  // 与上面三条的区别见 subscriptionCount 那段注释。
+  {
+    title: "影片订阅",
+    icon: "fa-heart",
+    count: subscriptionCount.value,
+    enabled: completedSubscriptionCount.value,
+    detail: `${completedSubscriptionCount.value} 个已推完`,
+    progress: taskProgress(completedSubscriptionCount.value, subscriptionCount.value),
+    tone: "green",
+    updated: formatRelativeTimeAgo(latestSubscriptionCheck.value, "从未检查"),
+  },
 ]);
 
 const organizeTaskDetail = computed(() => {
@@ -197,6 +243,14 @@ async function loadOverview() {
     }, errors),
     loadOverviewPart(sequence, fetchMediaOrganizeTasks(), (value) => {
       organizeTasks.value = value;
+    }, errors),
+    // 影片订阅：两个端点各拉一次。**失败不拖垮整页** —— 与上面几个同一条规矩
+    // （订阅拉不到只让那一条显示 0，不该让整个仪表盘报错）。
+    loadOverviewPart(sequence, fetchTGSubscriptions(), (value) => {
+      tgSubscriptions.value = value ?? [];
+    }, errors),
+    loadOverviewPart(sequence, fetchJavSubscriptions({ page_size: 500 }), (value) => {
+      javSubscriptions.value = value.items ?? [];
     }, errors),
     loadOverviewPart(sequence, fetchCacheStats(), (value) => {
       cacheStats.value = value;
@@ -1151,6 +1205,14 @@ onMounted(() => {
 .task-row__icon--amber {
   background: color-mix(in srgb, var(--warning) 10%, var(--surface));
   color: var(--warning);
+}
+
+/* 影片订阅那一行（2026-10-01 加）。绿用现成的 --success token —— 与
+   purple 那行写死 #8b5cf6 不同，这里刻意走 token：主题/皮肤切换时绿色会跟着变，
+   而紫色那个是当时没找到对应 token 才写死的（不是范例）。 */
+.task-row__icon--green {
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+  color: var(--success);
 }
 
 .task-row__main {

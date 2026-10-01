@@ -226,11 +226,22 @@ func TestResourceScoreUsesSizeBackedTier(t *testing.T) {
 	}
 }
 
+// TestIsUncensoredBoundaries 钉住「破解」判定的两个边界。
+//
+// ⚠️ 前界包含 `.` 是**有意偏离源码**的（见 tags.go 里 reUncensored 的长注释）：
+// 发布组会写 `名字.restored`，源码的前界只有 `-`/`_`/行首，于是漏判。
+// 实测真库 124856 颗磁链里这种漏判 19 颗，全是真破解。
+// 这条用例存在的意义：将来有人看到那个 `.` 觉得是误加、顺手删掉时，
+// 能立刻看到它是有依据、被钉住的行为。
 func TestIsUncensoredBoundaries(t *testing.T) {
 	yes := []string{
 		"SSIS-001-U.mkv", "SSIS-001-UC.mkv", "SSIS-001-restored.mkv",
 		"SSIS-001 破解版.mkv", "SSIS-001 无码.mp4", "SSIS-001 流出.mkv",
 		"SSIS-001 uncensored.mkv", "SSIS-001 无修正.mkv",
+		// 前界是 `.` 的形态（2026-10-01 新增支持）。
+		"www.98t.la@waaa-697.restored_prob4.mp4", "ABF-302.restored",
+		"IPX-633.restored", "2048.HK@CAWD-992.restored_prob4.mp4",
+		"SSNI-497.restored.mp4",
 	}
 	for _, name := range yes {
 		if !IsUncensored(name) {
@@ -238,9 +249,12 @@ func TestIsUncensoredBoundaries(t *testing.T) {
 		}
 	}
 	// 这几条是正则的边界用例：u/c 后面必须跟非字母数字，否则就是普通单词。
+	// **后界这条没放宽** —— `restoredxxx` / `usa` 这类必须继续判否。
 	no := []string{
 		"my-used-car.mkv", "Yu-Gi-Oh.mkv", "SSIS-001.mkv", "",
 		"SSIS-001-usa.mkv", "SSIS-001-cherry.mkv",
+		// 前界放宽到 `.` 之后新增的负样本：点号后面跟的不是完整 token。
+		"SSIS-001.restoredxxx.mkv", "SSIS-001.restore.mkv", "movie.used.mkv",
 	}
 	for _, name := range no {
 		if IsUncensored(name) {

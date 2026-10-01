@@ -39,9 +39,22 @@ const (
 const fourKSizeThreshold = 18 << 30
 
 var (
-	// 源码 javbus.py 的 _RE_UNCENSORED。注意它要求 u/uc/restored 前后是
-	// 分隔符或行边界 —— 这正是为了保护 "my-used-car" 这类词不被误判。
-	reUncensored = regexp.MustCompile(`(?i)(?:[-_]|^)(u|uc|restored)(?:[^a-z0-9]|$)`)
+	// 源码 javbus.py 的 _RE_UNCENSORED，**有意偏离一处**：前界多认一个 `.`。
+	//
+	// 为什么要多认它（2026-10-01）：发布组写「破解」还有 `名字.restored` 这种形态，
+	// 而源码的前界只有 `-` / `_` / 行首，`.` 不在里面 —— 于是
+	// `www.98t.la@waaa-697.restored_prob4.mp4` 判不出破解。实测真库 124856 颗磁链里
+	// 这种漏判有 **19 颗**（样本：`ABF-302.restored` / `IPX-633.restored` /
+	// `2048.HK@CAWD-992.restored_prob4.mp4`），全是发布组标的真破解，改完全部认出来。
+	//
+	// ⚠️ **`reChinese` 没有跟着放宽，这是刻意的**：同样的改动在中字那边只会新增
+	// 3 颗，其中 2 颗是误伤（`sexgeneral@D.C.CT-07(VD)` 里的 `C.` 与
+	// `37.c_120614-753-carib` 都不是中字标记）。两条正则判的是不同的事，
+	// 所以「前界不一致」不是缺陷 —— 别为了对称把中字也一起放宽。
+	//
+	// 后界仍要求非字母数字：`restored` 后面跟字母的（`restoredxxx`）不算，
+	// 这条与源码一致，保护 "my-used-car" 那类词的意图没有变。
+	reUncensored = regexp.MustCompile(`(?i)(?:[-_.]|^)(u|uc|restored)(?:[^a-z0-9]|$)`)
 
 	// 源码 javbus.py 的 _RE_CN，**有意偏离一处**：多认一个 `uc` 分支。
 	//
