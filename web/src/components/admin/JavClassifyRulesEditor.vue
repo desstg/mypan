@@ -197,7 +197,7 @@ function move(index: number, delta: number) {
             :model-value="rule.name"
             placeholder="例如：国外"
             :disabled="disabled"
-            @update:model-value="patch(index, { name: $event })"
+            @update:model-value="patch(index, { name: String($event) })"
           />
         </div>
 
@@ -207,7 +207,7 @@ function move(index: number, delta: number) {
             :model-value="rule.target_name"
             placeholder="移动到目标根目录下的哪个子目录，例如：国外AV"
             :disabled="disabled"
-            @update:model-value="patch(index, { target_name: $event })"
+            @update:model-value="patch(index, { target_name: String($event) })"
           />
         </div>
 
@@ -235,7 +235,7 @@ function move(index: number, delta: number) {
             :model-value="rule.pattern ?? ''"
             placeholder="例如 ^[A-Za-z]{2,6}-[A-Za-z]?\d{2,5}"
             :disabled="disabled"
-            @update:model-value="patch(index, { pattern: $event })"
+            @update:model-value="patch(index, { pattern: String($event) })"
           />
         </div>
 

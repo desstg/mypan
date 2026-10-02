@@ -283,7 +283,7 @@ defineExpose({
         </template>
         <template #control>
           <AppInput
-            v-model="toggles.small_file_mb"
+            v-model.number="toggles.small_file_mb"
             type="number"
             min="1"
             max="102400"
@@ -352,7 +352,7 @@ defineExpose({
         </template>
         <template #control>
           <AppInput
-            v-model="toggles.max_dirs"
+            v-model.number="toggles.max_dirs"
             type="number"
             min="10"
             max="100000"

@@ -273,7 +273,7 @@ defineExpose(
             />
           </template>
           <template #control>
-            <AppInput v-model="draft.poll_interval_sec" type="number" placeholder="600" />
+            <AppInput v-model.number="draft.poll_interval_sec" type="number" placeholder="600" />
           </template>
         </SettingsRow>
 
@@ -293,7 +293,7 @@ defineExpose(
             </SettingsRowLabel>
           </template>
           <template #control>
-            <AppInput v-model="draft.backfill_pages" type="number" placeholder="1" />
+            <AppInput v-model.number="draft.backfill_pages" type="number" placeholder="1" />
           </template>
         </SettingsRow>
 

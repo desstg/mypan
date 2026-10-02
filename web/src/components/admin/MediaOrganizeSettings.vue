@@ -532,7 +532,7 @@ defineExpose(
             <div class="settings-row__label"><span>API 额外补偿间隔（毫秒）</span></div>
           </template>
           <template #control>
-            <AppInput v-model="settings.api_request_interval_ms" type="number" min="100" max="10000" />
+            <AppInput v-model.number="settings.api_request_interval_ms" type="number" min="100" max="10000" />
           </template>
         </SettingsRow>
 
@@ -541,7 +541,7 @@ defineExpose(
             <div class="settings-row__label"><span>TMDB 请求间隔（毫秒）</span></div>
           </template>
           <template #control>
-            <AppInput v-model="settings.tmdb_request_interval_ms" type="number" min="100" max="5000" />
+            <AppInput v-model.number="settings.tmdb_request_interval_ms" type="number" min="100" max="5000" />
           </template>
         </SettingsRow>
       </SettingsCard>
@@ -577,7 +577,7 @@ defineExpose(
             </div>
           </template>
           <template #control>
-            <AppInput v-model="settings.max_works_per_run" type="number" min="0" max="10000" placeholder="50" />
+            <AppInput v-model.number="settings.max_works_per_run" type="number" min="0" max="10000" placeholder="50" />
           </template>
         </SettingsRow>
 

@@ -684,10 +684,10 @@ defineExpose({
         <template v-if="showAdvanced">
           <div class="fuse-form__row">
             <FormField label="UID">
-              <AppInput v-model="form.uid" type="number" />
+              <AppInput v-model.number="form.uid" type="number" />
             </FormField>
             <FormField label="GID">
-              <AppInput v-model="form.gid" type="number" />
+              <AppInput v-model.number="form.gid" type="number" />
             </FormField>
           </div>
           <div class="fuse-form__row">
@@ -804,7 +804,7 @@ defineExpose({
             </template>
             <template #control>
               <InputActionField>
-                <AppInput v-model="drawerForm.max_gb" type="number" min="1" max="500" />
+                <AppInput v-model.number="drawerForm.max_gb" type="number" min="1" max="500" />
               </InputActionField>
             </template>
           </SettingsRow>
@@ -822,7 +822,7 @@ defineExpose({
             </template>
             <template #control>
               <InputActionField>
-                <AppInput v-model="drawerForm.retention_days" type="number" min="1" max="90" />
+                <AppInput v-model.number="drawerForm.retention_days" type="number" min="1" max="90" />
               </InputActionField>
             </template>
           </SettingsRow>

@@ -625,7 +625,7 @@ async function submit() {
           </template>
           <template #control>
             <div class="field-num">
-              <AppInput v-model="securityForm.session_timeout" type="number" placeholder="2" />
+              <AppInput v-model.number="securityForm.session_timeout" type="number" placeholder="2" />
             </div>
           </template>
         </SettingsRow>
@@ -884,7 +884,7 @@ async function submit() {
                 </div>
 
                 <div v-else-if="it.type === 'int'" class="field-num">
-                  <AppInput v-model="form[it.key]" type="number" :placeholder="it.default" />
+                  <AppInput v-model.number="form[it.key]" type="number" :placeholder="it.default" />
                 </div>
 
                 <!-- 代理密码：后端只回传掩码，这里按「留空表示不修改」处理，

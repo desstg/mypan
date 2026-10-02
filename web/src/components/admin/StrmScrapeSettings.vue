@@ -220,7 +220,7 @@ defineExpose(
             </div>
           </template>
           <template #control>
-            <AppInput v-model="settings.tmdb_request_interval_ms" type="number" min="200" max="5000" />
+            <AppInput v-model.number="settings.tmdb_request_interval_ms" type="number" min="200" max="5000" />
           </template>
         </SettingsRow>
       </SettingsCard>

@@ -679,13 +679,13 @@ defineExpose({
             <AppSelect v-model="form.scan_depth" :options="scanDepthOptions" />
           </FormField>
           <FormField label="API 额外补偿间隔（毫秒）">
-            <AppInput v-model="form.api_interval" type="number" min="0" max="5000" />
+            <AppInput v-model.number="form.api_interval" type="number" min="0" max="5000" />
           </FormField>
         </div>
 
         <div class="retention-form__row">
           <FormField label="刷新间隔（分钟）">
-            <AppInput v-model="form.refresh_interval" type="number" min="1" max="1440" />
+            <AppInput v-model.number="form.refresh_interval" type="number" min="1" max="1440" />
           </FormField>
           <FormField label="执行时间段">
             <TimeWindowField

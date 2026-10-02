@@ -155,12 +155,12 @@ function setJavMetaItems(next: Record<string, boolean>) {
 
 function setNumberSetting(
   key: "min_file_size_mb" | "task_concurrency" | "metadata_max_size_mb" | "jav_watermark_scale" | "jav_watermark_margin",
-  raw: string,
+  raw: string | number,
 ) {
   settings[key] = parseSettingNumber(raw);
 }
 
-function setDefaultScanIntervalHours(raw: string) {
+function setDefaultScanIntervalHours(raw: string | number) {
   settings.default_scan_interval = Math.round(parseSettingNumber(raw) * MINUTES_PER_HOUR);
 }
 

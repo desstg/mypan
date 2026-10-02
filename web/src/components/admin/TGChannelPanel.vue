@@ -408,7 +408,7 @@ defineExpose({ load });
             </SettingsHelpTooltip>
           </label>
           <div class="tg-form__value" style="max-width: 140px">
-            <AppInput v-model="form.level" type="number" placeholder="10" />
+            <AppInput v-model.number="form.level" type="number" placeholder="10" />
           </div>
         </div>
         <div class="tg-form__field">
