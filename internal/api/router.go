@@ -553,6 +553,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Delete("/subscriptions/{id}", h.javDeleteSubscription)
 				r.Post("/subscriptions/{id}/status", h.javSetSubscriptionStatus)
 				r.Post("/subscriptions/{id}/check", h.javCheckSubscription)
+				// 检查是后台任务（见 jav_subscribe.go），跑完的结果靠这里轮询。
+				r.Get("/subscriptions/{id}/check-status", h.javCheckStatus)
 				r.Get("/subscriptions/{id}/candidates", h.javSubscriptionCandidates)
 				r.Get("/subscriptions/{id}/runs", h.javSubscriptionRuns)
 				r.Get("/subscriptions/{id}/movies", h.javSubscriptionMovies)

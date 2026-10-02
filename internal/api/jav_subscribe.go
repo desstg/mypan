@@ -159,7 +159,15 @@ func (h *Handler) javSetSubscriptionStatus(w http.ResponseWriter, r *http.Reques
 	writeOK(w, map[string]any{"ok": true})
 }
 
-// javCheckSubscription 立即跑一轮检查。
+// javCheckSubscription 排一轮订阅检查（**立刻返回，不等结果**）。
+//
+// 为什么是后台：这一轮实测 7 秒 ~ 707 秒（演员订阅要翻作品表 + 逐部抓详情 + 逐部判
+// 磁链），远超前端 90 秒的请求超时。挂在同步接口上的后果不只是「界面报超时」——
+// 前端 abort 会把后端那一轮一起掐死（写库用的是同一个 ctx），候选落不下去、
+// `last_checked_at` 不更新，下一轮还得从头跑。详见 internal/jav/check_queue.go 顶部。
+//
+// 返回的是**当前状态快照**（照本项目惯例，与 POST /movies/{id}/refresh 同形），
+// 前端拿 `state` 决定转不转圈，之后轮询 GET /subscriptions/{id}/check-status。
 func (h *Handler) javCheckSubscription(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {
 		return
@@ -169,12 +177,58 @@ func (h *Handler) javCheckSubscription(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	res, err := h.jav.CheckSubscription(r.Context(), id, "manual")
+	queued := h.jav.CheckSubscriptionAsync(id, "manual")
+	state, msg, res := h.jav.CheckStatus(id)
+	if !queued && state == "" {
+		// 后台循环没起来（测试 / 快照模式）。**不静默**：说清楚，
+		// 别让用户对着一个「按了没反应」的按钮。见 check_queue.go 的 enqueueCheck。
+		writeErr(w, domain.Errorf(domain.CodeInternal, "后台任务未启动，无法检查订阅"))
+		return
+	}
+	writeOK(w, map[string]any{
+		"queued":        queued,
+		"state":         state,
+		"error":         msg,
+		"matched_count": matchedOf(res),
+		"run_id":        runIDOf(res),
+	})
+}
+
+// javCheckStatus 读一条订阅这一轮检查的状态，给前端轮询用。
+//
+// 与 RefreshStatus 同形（GET /movies/{id}?local=1 里搭车回的那两个字段）：
+// state 为空 = 没点过 / 已过期 / 进程重启过，前端据此把「匹配中」收掉并停止轮询。
+func (h *Handler) javCheckStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.javReady(w) {
+		return
+	}
+	id, err := pathID(r)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeOK(w, res)
+	state, msg, res := h.jav.CheckStatus(id)
+	writeOK(w, map[string]any{
+		"state":         state,
+		"error":         msg,
+		"matched_count": matchedOf(res),
+		"run_id":        runIDOf(res),
+	})
+}
+
+// matchedOf / runIDOf 让 result 为 nil（还在跑 / 失败 / 没点过）时也有零值可读。
+func matchedOf(res *jav.CheckResult) int {
+	if res == nil {
+		return 0
+	}
+	return res.MatchedMovies
+}
+
+func runIDOf(res *jav.CheckResult) int64 {
+	if res == nil {
+		return 0
+	}
+	return res.RunID
 }
 
 // javSubscriptionCandidates 取候选。

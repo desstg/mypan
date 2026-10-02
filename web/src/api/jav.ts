@@ -1,6 +1,6 @@
 import { http } from "./client";
 import type {
-  JavCheckResult,
+  JavCheckTriggerResult,
   JavCommentShare,
   JavConfig,
   JavConfigInput,
@@ -255,8 +255,24 @@ export function setJavSubscriptionStatus(id: number, status: string) {
   return http.post<{ ok: boolean }>(`${BASE}/subscriptions/${id}/status`, { status });
 }
 
+/**
+ * 排一轮订阅检查（**立刻返回**）。
+ *
+ * 为什么不是同步的：这一轮实测 7 秒 ~ 707 秒（演员订阅要翻作品表 + 逐部抓详情 +
+ * 逐部判磁链），远超本项目的 90 秒请求超时（client.ts 的 defaultRequestTimeoutMs）。
+ * 挂在按钮上的后果不只是「界面报超时」—— 前端 abort 会把后端那一轮一起掐死
+ * （写库用的是同一个 ctx），候选落不下去，下一轮还得从头跑。
+ *
+ * 所以与「重新获取」同形：返回**当前状态快照**（queued 表示这次有没有真的排上，
+ * false = 已经在跑了，**不是错误**），之后轮询 fetchJavCheckStatus。
+ */
 export function checkJavSubscription(id: number) {
-  return http.post<JavCheckResult>(`${BASE}/subscriptions/${id}/check`, {});
+  return http.post<JavCheckTriggerResult>(`${BASE}/subscriptions/${id}/check`, {});
+}
+
+/** 读这一轮检查的状态。state 为空 = 没点过 / 已过期 / 后端重启过，前端据此停止轮询。 */
+export function fetchJavCheckStatus(id: number) {
+  return http.get<JavCheckTriggerResult>(`${BASE}/subscriptions/${id}/check-status`);
 }
 
 export function fetchJavCandidates(

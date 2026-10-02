@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import AppButton from "@/components/base/AppButton.vue";
 import AppInput from "@/components/base/AppInput.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
@@ -22,6 +22,7 @@ import {
   fetchJavBlacklist,
   fetchJavBlacklistMovies,
   fetchJavCandidates,
+  fetchJavCheckStatus,
   fetchJavCompletedMovies,
   fetchJavFollowedUsers,
   fetchJavSubscriptionMovies,
@@ -1073,25 +1074,108 @@ function onCardClick(sub: JavSubscription) {
 /**
  * 卡片上的检查按钮：转圈、不弹窗、跑完刷新。
  *
- * 与整屏 loading 分开：检查一条订阅要跑几秒，期间把整页变成「加载中」
- * 会让用户以为整个页面都卡住了。只让这一张卡的按钮转圈。
+ * 与整屏 loading 分开：检查一条订阅要跑几秒到十几分钟（见 api/jav.ts 的注释），
+ * 期间把整页变成「加载中」会让用户以为整个页面都卡住了。只让这一张卡的按钮转圈。
+ *
+ * **后端是异步的**（2026-10-02 改的）：POST 只把这一轮排进后台队列，立刻返回。
+ * 所以这里触发之后要**轮询**它跑完 —— 照 JavMovieDrawer 的 refresh 那套
+ * （syncDetailPoll / onRefreshFinished），规矩一样：
+ *
+ *   - 轮询期间**全程安静**（本项目规矩：轮询不弹提示）；
+ *   - 只在**完成边沿**（在跑 → 不跑了）toast 一次；
+ *   - 无论成功、失败、轮询到顶，都要把 id 从 checking 里摘掉 ——
+ *     留一个永远转圈的按钮是这个模块修过好几次的 bug。
  */
 async function silentCheck(sub: JavSubscription) {
   if (checking.value.has(sub.id)) return;
   checking.value = new Set(checking.value).add(sub.id);
   try {
-    await checkJavSubscription(sub.id);
-    toast.success("检查完成");
-    await load();
-    emit("changed");
+    const res = await checkJavSubscription(sub.id);
+    // queued=false 且 state=running：**已经在跑了**（去重），不是错误 ——
+    // 接着轮询同一个状态即可，别报错也别重复排。
+    if (res.state === "running") {
+      pollCheck(sub.id, 0);
+      return;
+    }
+    if (res.state === "") {
+      // 理论上到不了这里（排上了就一定是 running；没排上且没状态时后端会报错）。
+      // 真到了就当「没有可看的结果」收手，**别谎报一句「检查完成」**。
+      stopChecking(sub.id);
+      return;
+    }
+    // 已经出结果了（本轮极快，或上一次刚跑完还没过期）：直接收尾。
+    finishCheck(sub.id, res.state, res.error, res.matched_count);
   } catch (err) {
     toast.error(getApiErrorMessage(err, "检查失败"));
-  } finally {
-    const next = new Set(checking.value);
-    next.delete(sub.id);
-    checking.value = next;
+    stopChecking(sub.id);
   }
 }
+
+/** 轮询间隔与上限：一轮可能跑十几分钟，3 秒 × 200 = 10 分钟（与后端 checkBudget 同量级）。 */
+const CHECK_POLL_MS = 3000;
+const CHECK_POLL_MAX = 200;
+const checkTimers = new Map<number, number>();
+
+function stopChecking(id: number) {
+  const t = checkTimers.get(id);
+  if (t !== undefined) {
+    window.clearTimeout(t);
+    checkTimers.delete(id);
+  }
+  const next = new Set(checking.value);
+  next.delete(id);
+  checking.value = next;
+}
+
+/** 跑完那一跳：说一句结果，刷新列表。 */
+async function finishCheck(id: number, state: string, err?: string, matched = 0) {
+  stopChecking(id);
+  if (state === "failed") {
+    toast.error(err || "检查失败");
+  } else {
+    // 报出匹配数：用户点这颗按钮就是想知道「有几部」。
+    toast.success(matched > 0 ? `检查完成，匹配到 ${matched} 部` : "检查完成，没有匹配到资源");
+  }
+  await load();
+  emit("changed");
+}
+
+/** 轮询下一跳。 */
+function pollCheck(id: number, round: number) {
+  if (round >= CHECK_POLL_MAX) {
+    // 到顶就停：后端 10 分钟都没跑完，多半是卡住了（或页面被挂起很久）。
+    // 停掉轮询但**照实说**，别让用户对着一个永远转的按钮。
+    stopChecking(id);
+    toast.error("检查耗时过长，请稍后在订阅列表看结果");
+    return;
+  }
+  const timer = window.setTimeout(async () => {
+    checkTimers.delete(id);
+    try {
+      const res = await fetchJavCheckStatus(id);
+      if (res.state === "running") {
+        pollCheck(id, round + 1);
+        return;
+      }
+      if (res.state === "") {
+        // 空状态 = 没点过 / 已过期 / 后端重启过。再轮下去也不会有结果。
+        stopChecking(id);
+        return;
+      }
+      await finishCheck(id, res.state, res.error, res.matched_count);
+    } catch {
+      // 轮询失败静默：下一跳再试，不打扰用户。
+      pollCheck(id, round + 1);
+    }
+  }, CHECK_POLL_MS);
+  checkTimers.set(id, timer);
+}
+
+// 离开页面时清掉所有轮询：不然回调会在组件卸载后继续跑（并且没人清理 timer）。
+onBeforeUnmount(() => {
+  for (const t of checkTimers.values()) window.clearTimeout(t);
+  checkTimers.clear();
+});
 
 defineExpose({ openCreate, onPendingTarget, reload: load });
 

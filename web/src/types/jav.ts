@@ -339,6 +339,26 @@ export interface JavCheckResult {
   message: string;
 }
 
+/**
+ * 触发一轮检查（POST /subscriptions/{id}/check）与查它状态
+ * （GET /subscriptions/{id}/check-status）**同一个形状**。
+ *
+ * 检查是后台任务（实测一轮 7 秒 ~ 707 秒，见 api/jav.ts 的注释），所以触发端点
+ * 不再回 CheckResult，而是回这份状态快照；跑完的结论靠轮询拿。
+ *
+ * `state` 为空串 = 没点过 / 已过期 / 后端重启过 —— 前端据此把「匹配中」收掉
+ * 并停止轮询（与影片详情的 refresh_state 同一套读法）。
+ */
+export interface JavCheckTriggerResult {
+  /** 这次有没有真的排上。false = 已经在跑了（去重），**不是错误**。 */
+  queued?: boolean;
+  state: string;
+  error?: string;
+  /** 本轮匹配到的**影片**数（「检：N」那个数）。还在跑 / 失败时为 0。 */
+  matched_count: number;
+  run_id: number;
+}
+
 export interface JavRun {
   id: number;
   subscription_id: number;

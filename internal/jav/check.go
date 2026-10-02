@@ -68,6 +68,20 @@ type CandidateView struct {
 //
 // 逐条对应源码 subscriptions.SubscriptionCheckService.run_check：
 // 解析目标 → 判影片 → 判磁链 → 落候选 → 预下载兜底 → 刷新状态。
+//
+// ⚠️ **这是个后台入口，不许接在 HTTP 处理器上。**
+//
+// 它内部的写库（磁链 Upsert、候选 Create、runs.Finish、MarkChecked）全部吃调用方
+// 这个 ctx。从前它挂在同步接口上，而这一轮实测 7 秒~707 秒、远超前端 90 秒的请求
+// 超时（web/src/api/client.ts 的 defaultRequestTimeoutMs）—— 前端一 abort，
+// ctx 就取消，**后面的写库全废**：候选落不下去、`last_checked_at` 不更新，
+// 而 run 行是用同一个 ctx 建的、Finish 也写不进去，于是库里留一堆
+// `status='running'` 的僵尸行，「超时」在库里根本看不出来。
+//
+// 现在只有两个调用方，都从**不随请求取消**的 ctx 进来：
+//   - checkLoop（check_queue.go，用户点「检查」与调度器都走它）；
+//   - 单测与外部脚本的同步调用（它们自己控制 ctx）。
+// HTTP 层只调 CheckSubscriptionAsync / CheckStatus。
 func (s *Service) CheckSubscription(ctx context.Context, id int64, trigger string) (*CheckResult, error) {
 	sub, err := s.subs.Get(ctx, id)
 	if err != nil {
@@ -154,69 +168,94 @@ func (s *Service) runCheck(ctx context.Context, sub *domain.JavSubscription, run
 			res.MatchedMovies++
 		}
 
-		// emit 把一颗「磁链形状的东西」判成候选并落库。两条路（JAVBUS / 评论区）
-		// 共用它，否则同一颗资源从不同路进来结果会不一样。
-		emit := func(mg *domain.JavMagnet, allowUnknown bool) {
-			cand := s.buildCandidate(criteria, sub, mv, mg, movieOK, movieReasons, allowUnknown)
-			if cand == nil {
-				return
-			}
-			// 目标网盘推不了 ed2k 的那批：仍然落成候选（用户要在候选弹窗里
-			// 看到「评论区有这条」），但标成推不了 —— 自动推送就不挑它，
-			// 也不会在推送记录里留下一串「网盘不支持」的失败记录。
-			if !ed2kOK && uriScheme(mg.Magnet) == javKindEd2k {
-				cand.PushOK = false
-				cand.RejectionReasons = append(cand.RejectionReasons, quality.ReasonTargetUnsupported)
-			}
-			if _, dup := seenFP[cand.ResourceFingerprint]; dup {
-				return
-			}
-			seenFP[cand.ResourceFingerprint] = struct{}{}
-			// 候选必须挂在**本轮**运行上：唯一索引是 (check_run_id, 指纹)，
-			// 挂错 run 会让重跑检查时全部撞唯一键、一条也写不进去。
-			cand.CheckRunID = runID
-			if _, cerr := s.candidates.Create(ctx, cand); cerr != nil {
-				// 内存去重之后这里再撞唯一键已不是常态，可能是真的写库故障 ——
-				// 记一条，别再像从前那样静默丢掉。
-				s.logWarn("jav create candidate failed", "sub", sub.ID, "movie", mv.ID, "err", cerr)
-				return
-			}
-			if cand.Matched {
-				res.MatchedCount++
-				if !cand.PushOK {
-					if cur, ok := bestRejected[mv.ID]; !ok || betterCandidate(cand, cur) {
-						bestRejected[mv.ID] = cand
-					}
+		// ⚠️ **影片就不合格时，整部跳过，连磁链都不去抓。**
+		//
+		// 一条磁链要成为候选，前提是它所属的影片先合格（`buildCandidate` 里
+		// `Matched: movieOK`、`PushOK: movieOK && pushOK`）—— 所以影片不合格时
+		// 抓磁链**一个候选都不会多**，纯属白烧上游请求。
+		//
+		// 而这是**演员订阅耗时的大头**：实测「鮫島」一轮 189 秒里约 140 秒在这里
+		// （296 部逐部打 JAVDB + JAVBUS，走 500ms 限流）。演员订阅的日期窗
+		// 默认只开到当年 1 月 1 日，一部高产演员的作品表里**大多数片子都在窗外** ——
+		// 也就是说这 140 秒里绝大部分是在给「永远不会被推的片」问磁链。
+		//
+		// 跳过的是**本轮的抓取**，不是数据：本地已经有磁链的片照旧走下面那一段
+		// （`ensureMagnets` 本地有就不打上游），所以已有候选的呈现方式一个字节都没变。
+		// 评论区那条路也在跳过范围外 —— 它只读本地库、一个请求都不发，
+		// 而且「评论里有人分享过」恰恰更常出现在这些老片上（见下面那段注释）。
+		//
+		// 判据与 emit 里的 `cand.Matched` 同源（都是 movieOK），所以不会出现
+		// 「这里跳过了、那边其实还能出候选」的分家。
+		//
+		// ⚠️ **连带影响：影片不合格的片不再产生「被拒」候选行**，于是运行记录里
+		// 那个 rejected_count 会明显变小（实测「鮫島」从 3279 掉到 0）。
+		// 它只是**磁链粒度的拒收数**，界面上从来没有展示过（只有 `matched_count`
+		// 被前端读，见 types/jav.ts），所以这个变化对用户可见的部分没有影响 ——
+		// 但查日志时别把它当成「检查坏了」。
+		candidateOK := movieOK || sub.IncludeCommentLinks
+		if candidateOK {
+			emit := func(mg *domain.JavMagnet, allowUnknown bool) {
+				cand := s.buildCandidate(criteria, sub, mv, mg, movieOK, movieReasons, allowUnknown)
+				if cand == nil {
+					return
 				}
-			} else {
-				res.RejectedCount++
+				// 目标网盘推不了 ed2k 的那批：仍然落成候选（用户要在候选弹窗里
+				// 看到「评论区有这条」），但标成推不了 —— 自动推送就不挑它，
+				// 也不会在推送记录里留下一串「网盘不支持」的失败记录。
+				if !ed2kOK && uriScheme(mg.Magnet) == javKindEd2k {
+					cand.PushOK = false
+					cand.RejectionReasons = append(cand.RejectionReasons, quality.ReasonTargetUnsupported)
+				}
+				if _, dup := seenFP[cand.ResourceFingerprint]; dup {
+					return
+				}
+				seenFP[cand.ResourceFingerprint] = struct{}{}
+				// 候选必须挂在**本轮**运行上：唯一索引是 (check_run_id, 指纹)，
+				// 挂错 run 会让重跑检查时全部撞唯一键、一条也写不进去。
+				cand.CheckRunID = runID
+				if _, cerr := s.candidates.Create(ctx, cand); cerr != nil {
+					// 内存去重之后这里再撞唯一键已不是常态，可能是真的写库故障 ——
+					// 记一条，别再像从前那样静默丢掉。
+					s.logWarn("jav create candidate failed", "sub", sub.ID, "movie", mv.ID, "err", cerr)
+					return
+				}
+				if cand.Matched {
+					res.MatchedCount++
+					if !cand.PushOK {
+						if cur, ok := bestRejected[mv.ID]; !ok || betterCandidate(cand, cur) {
+							bestRejected[mv.ID] = cand
+						}
+					}
+				} else {
+					res.RejectedCount++
+				}
 			}
-		}
 
-		magnets, merr := s.ensureMagnets(ctx, mv)
-		if merr != nil {
-			// 一部片抓不到磁链不该中断整轮检查：演员订阅里有几百部，
-			// 其中几部两个来源都没有资源是常态。
-			s.logWarn("jav ensure magnets failed", "movie", mv.ID, "code", mv.Number, "err", merr)
-			// 但**开了评论区链接之后不能再整部跳过** —— 磁链抓不到是常态，
-			// 而评论里有人分享过恰恰是这些片子里更常见的事。评论那一轮只读本地库，
-			// 一个上游请求都不发，跳过它等于白白丢掉这批候选。
-			if !sub.IncludeCommentLinks {
-				continue
+			magnets, merr := s.ensureMagnets(ctx, mv)
+			if merr != nil {
+				// 一部片抓不到磁链不该中断整轮检查：演员订阅里有几百部，
+				// 其中几部两个来源都没有资源是常态。
+				s.logWarn("jav ensure magnets failed", "movie", mv.ID, "code", mv.Number, "err", merr)
+				// 但**开了评论区链接之后不能再整部跳过** —— 磁链抓不到是常态，
+				// 而评论里有人分享过恰恰是这些片子里更常见的事。评论那一轮只读本地库，
+				// 一个上游请求都不发，跳过它等于白白丢掉这批候选。
+				if !sub.IncludeCommentLinks {
+					continue
+				}
+				magnets = nil
 			}
-			magnets = nil
-		}
 
-		for _, mg := range magnets {
-			// 磁链表那条路：语义一个字节都不动（两个来源的条目在这里形状一致，
-			// 来源站名只留在 jav_magnets.source 上，不进候选表）。
-			emit(mg, false)
-		}
+			for _, mg := range magnets {
+				// 磁链表那条路：语义一个字节都不动（两个来源的条目在这里形状一致，
+				// 来源站名只留在 jav_magnets.source 上，不进候选表）。
+				emit(mg, false)
+			}
 
-		if sub.IncludeCommentLinks {
-			for _, mg := range s.commentMagnets(ctx, mv) {
-				// 评论那条路：缺的元数据跳过不判。
-				emit(mg, true)
+			if sub.IncludeCommentLinks {
+				for _, mg := range s.commentMagnets(ctx, mv) {
+					// 评论那条路：缺的元数据跳过不判。
+					emit(mg, true)
+				}
 			}
 		}
 	}
@@ -429,7 +468,15 @@ func (s *Service) resolveMovieTarget(ctx context.Context, sub *domain.JavSubscri
 	if mv, err := s.movies.Get(ctx, sub.TargetID); err == nil && strings.TrimSpace(mv.RawJSON) != "" {
 		return []*domain.JavMovie{mv}, "", nil
 	}
-	mv, err := s.IngestMovie(ctx, sub.TargetID)
+	// ⚠️ 用户路径**只抓详情，不跑补缺链**（2026-09-30 定的规矩，见 catalog.go 的
+	// ingestMovieDetailOnly）。这里以前调的是 IngestMovie（带补缺）—— 那条链要打
+	// 4~6 个外站、整条 24~126 秒，而订阅检查是**用户点出来的**路径。
+	//
+	// 从「本地没有完整记录」才走到这里看，影片订阅点一次「检查」就会先等一条
+	// 一两分钟的补缺链。检查现在挪到后台了（见 check_queue.go），
+	// 但让用户在后台任务里白等这件事本身仍然没有道理：
+	// 补缺是 summaryBackfillLoop / hydrate 队列的活，它们会自己补上。
+	mv, err := s.ingestMovieDetailOnly(ctx, sub.TargetID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -444,21 +491,31 @@ const (
 	// 「这一页不满就到底了」看起来还成立 —— 真正的判据是空页，见下。
 	actorFilmographyPageSize = 50
 
-	// actorFilmographyMaxPages 作品表最多翻几页（50×20 = 1000 部）。
+	// actorFilmographyMaxPages 作品表最多翻几页（50×8 = 400 部）。
 	//
 	// 封顶是为了**扫描**不至于无休止：一页一次搜索请求。终止条件是空页，
 	// 所以普通演员根本碰不到这个上限，只有高产演员才用得上。
 	// 贵的那部分（逐部抓详情）另有预算，见下。
-	actorFilmographyMaxPages = 20
-
-	// actorFilmographyIngestBudget 每轮最多给多少部**新**影片抓详情。
 	//
-	// 详情是这里唯一贵的东西：一部一次上游请求，实测约 1 秒。封顶是为了
-	// 一轮别跑太久 —— 手动「检查」是**同步**接口，而 vite 代理 120 秒就掐断
-	// （web/vite.config.ts 的 proxyTimeout），60 部 ≈ 60 秒，留一半余量。
+	// ⚠️ 2026-10-02 从 20 降到 8：实测「鮫島」有 842 部、翻满 20 页要 16.4 秒，
+	// 而这一轮后面还有几百部的磁链要判。20 页只对极少数高产演员用得上，
+	// 换来的却是每轮固定多十几秒 —— 而订阅要的是「新片别漏太久」，
+	// 400 部足够覆盖绝大多数演员的近期作品。被截断时**记一条 info**（见下），
+	// 别让它像从前那样静默少扫。
+	actorFilmographyMaxPages = 8
+
+	// actorFilmographyIngestBudget 每轮给「新影片抓详情」这件事的**时间**预算。
+	//
+	// 详情是这里唯一贵的东西：一部一次上游请求，实测约 0.5 秒（无码片的磁链接口
+	// 回的是 64 字节的空响应，很快），但上游慢起来没有上限。
+	//
+	// 以前这里按**条数**封顶（60 部），注释里写着「60 部 ≈ 60 秒」——
+	// 那个换算只在「一部一秒」时成立，而真实情况两头都可能偏（实测 0.5 秒，
+	// 慢的时候几秒）。按时间封顶才是「一轮别跑太久」这个意图的直接表达。
+	//
 	// 因此本地缺得多时也**不会一轮补完**，分几轮补齐；稳态下（没有新片）
-	// 这个预算花不掉。
-	actorFilmographyIngestBudget = 60
+	// 这个预算花不掉。到点只记 info（见下），不是错误。
+	actorFilmographyIngestBudget = 40 * time.Second
 )
 
 // resolveActorTarget 解析演员订阅覆盖的影片。
@@ -490,10 +547,23 @@ func (s *Service) resolveActorTarget(ctx context.Context, sub *domain.JavSubscri
 
 // refreshActorFilmography 把这个演员的作品表补齐到本地。
 //
-// 分两步：先翻页搜出作品清单（便宜，一次一页），再给**还没关联上的**那些
+// 分两步：先翻页搜出作品清单（便宜，一页一次搜索请求），再给**还没关联上的**那些
 // 抓详情（贵，一部一次）。第二步之所以只能靠详情，是因为搜索接口返回的
 // 影片里根本没有 actors 字段 —— 详情接口才带，而本地那张「演员 → 他的片」
 // 的关联表正是靠抓详情建立的。
+//
+// ⚠️ **日期窗外的片，在这一步就挡掉，连详情都不抓**（2026-10-02 加的）。
+// 依据与 runCheck 里那个「影片不合格就不抓磁链」是同一条：窗外的片过不了
+// `quality.MovieOK`，抓详情只是建立一条**永远不会被用到**的关联。
+//
+// 实测这一条是**这一轮最大的开销**：本地没关联上的那些片，一部一次详情请求，
+// 而高产演员的作品表里绝大多数都在窗外（真库「鮫島」410 部里 283 部在窗外）。
+// 不挡的话 40 秒的详情预算**每一轮都会花光**在它们身上，而真正该发现的新片
+// 排在作品表末尾、永远轮不到。
+//
+// 代价（有意）：**订阅日期窗改宽之后，那些片要等下一轮才会被关联上**。
+// 换来的是「本地没关联的片数」每轮真的在减少 —— 从前它永远减不到 0，
+// 于是「详情预算永远花光」这件事会一直持续下去。
 func (s *Service) refreshActorFilmography(ctx context.Context, sub *domain.JavSubscription) error {
 	client, err := s.javdbClient()
 	if err != nil {
@@ -509,13 +579,53 @@ func (s *Service) refreshActorFilmography(ctx context.Context, sub *domain.JavSu
 		}
 	}
 
+	// 日期窗：搜索返回里**带 release_date**（详情接口不给新的东西，它也有），
+	// 所以窗外那批不必抓详情就能判掉。窗为空时不做任何过滤。
+	var from, to string
+	if sub != nil {
+		from, to = strings.TrimSpace(sub.ReleaseDateFrom), strings.TrimSpace(sub.ReleaseDateTo)
+	}
+	outOfWindow := func(release string) bool {
+		if from == "" && to == "" {
+			return false
+		}
+		d := strings.TrimSpace(release)
+		// 上游没给日期：**不挡**（宁可多抓一次，也别因为缺一个字段少一批资源）。
+		if d == "" {
+			return false
+		}
+		if from != "" && d < from {
+			return true
+		}
+		if to != "" && d > to {
+			return true
+		}
+		return false
+	}
+
 	// 跨页会**重叠**（上游翻页如此，catalog.go 里实测过 6 页 300 条只有 280 个
 	// 不同 id），去重后 found 才是真数字。
 	seen := make(map[string]struct{}, actorFilmographyPageSize*actorFilmographyMaxPages)
 
-	found, ingested := 0, 0
+	// ingestStart 是「逐部抓详情」那一段的计时起点（见 actorFilmographyIngestBudget）。
+	ingestStart := time.Now()
+	// budgetHit / pagesHit 记「这一轮是不是被预算截断了」，末尾一次性说出来。
+	// 从前只在 ingested > 0 时记一条，于是「扫到了但没抓完」在日志里看不见 ——
+	// 属于「静默变空」那一族：用户报「新片怎么一直不进来」时无从查起。
+	budgetHit, pagesHit := false, false
+
+	found, ingested, skippedWindow := 0, 0, 0
+	// searchSpent / ingestSpent 分别累计**翻页**与**抓详情**真正花掉的时间。
+	//
+	// 为什么要分开记：这两段从前**一条日志都没有**，用户报「检查很久」时
+	// 完全看不出时间去哪了。第一版只记了「从进循环到出循环」的墙钟，
+	// 而两段是**交错**在同一个循环里的 —— 那样记出来的两个数几乎相等，
+	// 看着像「两段都很慢」，其实什么也没说明。所以这里逐次累加。
+	var searchSpent, ingestSpent time.Duration
 	for page := 1; page <= actorFilmographyMaxPages; page++ {
+		pageStart := time.Now()
 		batch, serr := client.Search(ctx, sub.TargetName, "actor", page, actorFilmographyPageSize)
+		searchSpent += time.Since(pageStart)
 		if serr != nil {
 			// 第一页就失败说明上游不通，整件事没意义；翻到一半失败则用已有的那批。
 			if page == 1 {
@@ -548,9 +658,16 @@ func (s *Service) refreshActorFilmography(ctx context.Context, sub *domain.JavSu
 			if _, ok := linked[m.ID]; ok {
 				continue
 			}
+			// 日期窗外的：不抓详情（理由见函数注释）。**放在预算判断之前** ——
+			// 它不是「这轮没轮到」，而是「这轮不需要」，不该占预算的名额。
+			if outOfWindow(m.ReleaseDate) {
+				skippedWindow++
+				continue
+			}
 			// 预算用完就只扫不抓：扫描便宜（一页一次请求），把作品表的真实
-			// 规模记下来，下一轮接着补。
-			if ingested >= actorFilmographyIngestBudget {
+			// 规模记下来，下一轮接着补。判据是**时间**不是条数，见常量那段注释。
+			if time.Since(ingestStart) >= actorFilmographyIngestBudget {
+				budgetHit = true
 				continue
 			}
 			// 详情**已经抓过、却没关联到本演员** —— 说明详情里根本没有他。
@@ -560,19 +677,61 @@ func (s *Service) refreshActorFilmography(ctx context.Context, sub *domain.JavSu
 			if existing, gerr := s.movies.Get(ctx, m.ID); gerr == nil && strings.TrimSpace(existing.RawJSON) != "" {
 				continue
 			}
+			itemStart := time.Now()
 			if _, ierr := s.IngestMovie(ctx, m.ID); ierr != nil {
+				ingestSpent += time.Since(itemStart)
 				// 某一部抓不到不该中断整张作品表。
 				s.logWarn("jav ingest actor movie failed", "movie", m.ID, "err", ierr)
 				continue
 			}
+			ingestSpent += time.Since(itemStart)
 			linked[m.ID] = struct{}{} // 也免得同一个 id 本轮再抓一次
 			ingested++
 		}
+
+		// 翻到最后一页还满页 —— 说明后面还有，是**页数**截断的。
+		if page == actorFilmographyMaxPages && len(batch) >= actorFilmographyPageSize {
+			pagesHit = true
+		}
 	}
+
+	// ⚠️ 实测提醒：`search_ms` 只算**搜索请求本身**，而这一段的墙钟远大于它。
+	// 「鮫島」实测 search_ms≈4.8s 而这一段实际约 70 秒 —— 差额是**逐条
+	// `IngestMovie` 的限流等待**（`jav_min_interval_ms` 默认 500ms，一部一次；
+	// 详情 + 补缺链的多个源又各要等自己的 gap）。
+	//
+	// 所以**调大 `jav_min_interval_ms` 会成倍拉长一轮检查**，而它不在
+	// `ingest_ms` 里（那一段只统计真正抓到详情的 2 部）。查「检查为什么慢」
+	// 时先看这两个数、再看这个设置。
 
 	if ingested > 0 {
 		s.logInfo("jav actor filmography refreshed",
 			"actor", sub.TargetName, "found", found, "ingested", ingested)
+	}
+	// 窗外的挡掉了多少 —— 这一条是「详情预算为什么花不完」的答案，
+	// 也是「改宽日期窗之后要等下一轮」这个代价的可见处。
+	if skippedWindow > 0 {
+		s.logInfo("jav actor filmography skipped out-of-window",
+			"actor", sub.TargetName, "found", found, "skipped", skippedWindow,
+			"window", from+"~"+to)
+	}
+	// 被预算截断要说出来：这一轮没补完，下一轮接着补（本地缺得多时是常态）。
+	if budgetHit {
+		s.logInfo("jav actor filmography ingest budget hit",
+			"actor", sub.TargetName, "found", found, "ingested", ingested,
+			"budget", actorFilmographyIngestBudget.String())
+	}
+	// 翻页花了多久 —— 与上面的 ingested 一起，把「这一轮的时间去哪了」说全。
+	// 两段相加 ≈ 这一轮作品表补齐的总耗时（抓详情那段见 budget / ingested）。
+	if found > 0 {
+		s.logInfo("jav actor filmography scanned",
+			"actor", sub.TargetName, "found", found, "ingested", ingested,
+			"search_ms", searchSpent.Milliseconds(),
+			"ingest_ms", ingestSpent.Milliseconds())
+	}
+	if pagesHit {
+		s.logInfo("jav actor filmography pages capped",
+			"actor", sub.TargetName, "found", found, "pages", actorFilmographyMaxPages)
 	}
 	return nil
 }

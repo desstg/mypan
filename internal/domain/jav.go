@@ -618,6 +618,12 @@ type JavRunRepository interface {
 	Finish(ctx context.Context, id int64, status string, matched, rejected int, errMsg string) error
 	Get(ctx context.Context, id int64) (*JavRun, error)
 	ListBySubscription(ctx context.Context, subscriptionID int64, limit int) ([]*JavRun, error)
+	// ListRunning 取所有还标着 running 的运行记录，给后台清理僵尸行用。
+	//
+	// 为什么需要：检查以前挂在同步接口上，前端 90 秒一 abort，ctx 就取消，
+	// runs.Finish 写不进去 —— 库里留下一堆永远 running 的行，「超时」在库里
+	// 根本看不出来（2026-10-02 排查订阅检查超时时踩到）。
+	ListRunning(ctx context.Context) ([]*JavRun, error)
 }
 
 // JavCandidateRepository 管理候选资源。

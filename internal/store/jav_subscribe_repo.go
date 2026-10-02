@@ -349,6 +349,40 @@ FROM jav_subscription_runs WHERE subscription_id=? ORDER BY id DESC LIMIT ?`,
 	return out, wrapDB(rows.Err())
 }
 
+// ListRunning 取所有还标着 running 的运行记录。
+//
+// 正常情况下这个集合是空的（每一轮都走到 Finish）。它非空只有两种可能：
+// 进程被杀在跑的中途，或者**从前那种同步接口被前端 abort**——
+// 后者会让 Finish 写不进去，留下一堆永远 running 的行。
+// 给后台清理用（见 loops.go 的 attemptSweeperLoop）。
+func (r *javRunRepo) ListRunning(ctx context.Context) ([]*domain.JavRun, error) {
+	rows, err := r.db.read.QueryContext(ctx, `
+SELECT id, subscription_id, trigger_type, matcher_version, status, matched_count, rejected_count,
+       error, started_at, finished_at
+FROM jav_subscription_runs WHERE status=? ORDER BY id ASC`, domain.JavRunRunning)
+	if err != nil {
+		return nil, wrapDB(err)
+	}
+	defer rows.Close()
+
+	out := make([]*domain.JavRun, 0)
+	for rows.Next() {
+		var (
+			run        domain.JavRun
+			startedAt  sql.NullString
+			finishedAt sql.NullString
+		)
+		if err := rows.Scan(&run.ID, &run.SubscriptionID, &run.TriggerType, &run.MatcherVersion, &run.Status,
+			&run.MatchedCount, &run.RejectedCount, &run.Error, &startedAt, &finishedAt); err != nil {
+			return nil, wrapDB(err)
+		}
+		run.StartedAt = parseTS(startedAt)
+		run.FinishedAt = parseTS(finishedAt)
+		out = append(out, &run)
+	}
+	return out, wrapDB(rows.Err())
+}
+
 // ——————————————————————— jav_subscription_candidates ———————————————————————
 
 type javCandidateRepo struct{ db *DB }

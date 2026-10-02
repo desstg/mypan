@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -740,12 +741,15 @@ func rawHasRelativeMovies(raw string) bool {
 
 // IngestMovie 抓一部影片的完整详情并入库（含演员关联 + **补缺链**）。
 //
-// 搜索、订阅检查、以及首次进详情都走它 —— 补缺链挂在这一层，一处覆盖全部。
+// ⚠️ **只剩两个调用方，都在后台**：hydrate 队列（hydrate.go）与订阅检查
+// （check.go 的 refreshActorFilmography）。
 //
-// ⚠️ 「重新获取」那颗按钮**不走这条**（走 ingestMovieDetailOnly）：它的补缺链要打
-// 4~6 个外站，实测整条 24~126 秒，挂在用户点的按钮上必然超时。简介与中文标题
-// 交给后台的补缺循环（summaryBackfillLoop / hydrate 队列），那颗按钮只管把
-// **JAVDB 自己的那份详情**重新取回来。详见 refresh.go 顶部的说明。
+// 2026-10-02 收窄过一轮：影片订阅那条路（resolveMovieTarget）也改走
+// ingestMovieDetailOnly 了 —— 它是**用户点出来的**路径（点一次「检查」），
+// 不该先等一条 24~126 秒的补缺链。
+//
+// ⚠️ 「重新获取」那颗按钮也**不走这条**（走 ingestMovieDetailOnly）：同样的理由，
+// 详见 refresh.go 顶部的说明。
 func (s *Service) IngestMovie(ctx context.Context, id string) (*domain.JavMovie, error) {
 	return s.ingestMovie(ctx, id, true)
 }
@@ -755,13 +759,13 @@ func (s *Service) IngestMovie(ctx context.Context, id string) (*domain.JavMovie,
 // 这是「重新获取」要的那件事：一次 JAVDB 请求（带重试），把那部片的封面、演员、
 // 发行日期、时长、评分、标签这些**JAVDB 口径**的字段更新回库。
 //
-// ⚠️ **用户路径一律走它，不走 IngestMovie**（2026-09-30 收敛的）。演员关联
-// （`ReplaceMovieActors`）也在它里面 —— 那一步在 enrich 门**之前**，所以
-// 「按演员搜 → 反查演员 id」这条链完全不受影响。
+// ⚠️ **用户路径一律走它，不走 IngestMovie**（2026-09-30 收敛，2026-10-02 补齐
+// 订阅检查那条路）。演员关联（`ReplaceMovieActors`）也在它里面 —— 那一步在
+// enrich 门**之前**，所以「按演员搜 → 反查演员 id」这条链完全不受影响。
 //
 // 简介与中文标题只有 IngestMovie 会补，而那条路现在只剩后台：入库队列
-// （hydrate.go）与订阅检查（check.go）。所以「补缺链」全项目只有这几个后台入口，
-// 用户点出来的请求里一趟都不跑。
+// （hydrate.go）与订阅检查里的演员作品表补齐（check.go）。
+// 所以「补缺链」全项目只有这两个后台入口，用户点出来的请求里一趟都不跑。
 func (s *Service) ingestMovieDetailOnly(ctx context.Context, id string) (*domain.JavMovie, error) {
 	return s.ingestMovie(ctx, id, false)
 }
@@ -1296,8 +1300,16 @@ func (s *Service) ingestMagnets(ctx context.Context, movie *domain.JavMovie) err
 		if client, err := s.javdbClient(); err != nil {
 			lastErr = err
 		} else if items, err := client.MagnetsByID(ctx, id); err != nil {
-			lastErr = upstreamErr(err)
-			s.logWarn("jav javdb magnets failed", "id", id, "code", code, "err", err)
+			// 明确回「没有」**不算失败**：冷门片、素人片、被下架的片都是这样，
+			// 而且这是常态（实测每轮都在刷 `jav javdb magnets failed`）。
+			// 混在 warn 里会让「上游真的挂了」看不出来 —— 与 JAVBUS 的 404
+			// 同一个规矩（那边早就这么分了）。
+			if isDefinitiveNoMagnets(err) {
+				s.logInfo("jav javdb magnets: 上游说这部没有磁链", "id", id, "code", code)
+			} else {
+				lastErr = upstreamErr(err)
+				s.logWarn("jav javdb magnets failed", "id", id, "code", code, "err", err)
+			}
 		} else {
 			for _, it := range items {
 				n, ok := javdb.NormalizeMagnet(it)
@@ -1329,7 +1341,26 @@ func (s *Service) ingestMagnets(ctx context.Context, movie *domain.JavMovie) err
 	}
 
 	// —— JAVBUS：按番号。它只对「有码」那一档有补充（另外三档的番号它没有页面）——
-	if code != "" {
+	//
+	// ⚠️ **只对「有码」发请求**（2026-10-02 加的）。JAVBUS 是日式**有码站**的库：
+	// 无码 / 欧美 / FC2 三档的番号它根本没有页面，去问必然是一次 404 ——
+	// 而一次 404 也要花掉一次请求 + 一次 `jav_request_gap_ms`（默认 1000ms）的
+	// 等待。真库里那三档占 1296/14991（8.6%），这一条是白送的。
+	//
+	// 判据用 `movie.Type`（入库时由 `javdb.MovieTypeOf` 定：上游 type 优先，
+	// 缺了按 FC2 前缀兜底，都没有才当有码），与本地「按档筛选」用的是同一个字段，
+	// 不会出现「筛选说有码、抓取说不抓」的分家。
+	//
+	// 反过来的风险是**漏抓**：如果哪天 JAVBUS 开始收无码片，这里会把它们挡在外面。
+	// 所以只在**明确不是有码**时才跳过 —— 空 Type 照抓（宁可多问一次，
+	// 也不要因为一个没填的字段少一批资源）。
+	//
+	// 跳过**不记日志**：与下面那个 404 一样属于「正常状态」，每部都记会把日志刷满。
+	// 而且跳过之后如果 JAVDB 那边也是空，会掉进 default 记账 —— 那**是对的**：
+	// 这三档本来就不在 JAVBUS 的库里，JAVDB 的答复就是全部事实。
+	if code != "" && movie.Type != domain.JavTypeCensored && movie.Type != "" {
+		// 什么都不做：JAVBUS 这三档没有页面。
+	} else if code != "" {
 		if client, err := s.javbusClient(); err != nil {
 			if lastErr == nil {
 				lastErr = err
@@ -1338,6 +1369,12 @@ func (s *Service) ingestMagnets(ctx context.Context, movie *domain.JavMovie) err
 			// 404 **不是失败**，是「这个番号在 JAVBUS 没有页面」—— 无码/欧美/FC2
 			// 三档必然如此，有码那档也常有漏网的。每一部片都记一条 warn 会把
 			// 日志刷满，而每一行说的都是正常状态；所以这一类静默跳过。
+			//
+			// ⚠️ 这里**不能**顺手记「这部确实没有磁链」的账（曾经想这么省事）：
+			// 只跳过它、让它掉进下面 `lastErr == nil` 的 default，就等于拿
+			// 「JAVBUS 说没有」当结论 —— 而 JAVBUS 恰恰是它独有的那批资源的
+			// 唯一来源（实测 SSIS-001 两边重叠只有 25/44）。那本账决定下一轮
+			// 还问不问这部，记错了就是**永久丢资源**。
 			if !errors.Is(err, javbus.ErrCodeNotFound) {
 				if lastErr == nil {
 					lastErr = upstreamErr(err)
@@ -1395,6 +1432,20 @@ func (s *Service) ingestMagnets(ctx context.Context, movie *domain.JavMovie) err
 		// 「没有找到  的磁链」。
 		return domain.Errorf(domain.CodeNotFound, "没有找到 %s 的磁链", orDefault(code, id))
 	}
+}
+
+// isDefinitiveNoMagnets 判断一个上游错误是不是「上游明确说这部没有磁链」。
+//
+// 判据是 **HTTP 404**：实测不存在的影片 id 上游回
+// `HTTP 404 {"success":0,"action":"ResourceNotFound","message":"资源未找到"}`，
+// 而 `client.do` 会把非 200 的响应包成带 Status 的 `APIError` ——
+// 于是它和网络错误、403 签名失效区分得开。
+//
+// 为什么要区分：这类「没有」在冷门片/素人片上是**常态**，以前一律记 warn，
+// 日志里一片红，真正的问题（签名失效、限流）反而看不见。
+func isDefinitiveNoMagnets(err error) bool {
+	var ae *javdb.APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusNotFound
 }
 
 // markMagnetSwept 记一笔「这部片的磁链问过了」。失败只记 warn ——

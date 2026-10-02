@@ -90,8 +90,61 @@ func TestCreateSubscriptionValidatesAndDedupes(t *testing.T) {
 	}
 }
 
-func TestSubscriptionModeIsDerivedNotStored(t *testing.T) {
+// TestRefreshActorFilmographySkipsOutOfWindow 演员作品表补齐时**日期窗外的片
+// 连详情都不抓**（2026-10-02）。
+//
+// 依据与 runCheck 里「影片不合格就不抓磁链」同源：窗外的片过不了 quality.MovieOK，
+// 抓详情只是建立一条永远不会被用到的关联。而它是**这一轮最大的开销** ——
+// 本地没关联上的片一部一次详情请求，高产演员的作品表里绝大多数都在窗外，
+// 不挡的话 40 秒的详情预算每一轮都会花光在它们身上，真正该发现的新片排在末尾、
+// 永远轮不到（实测「鮫島」410 部里 283 部在窗外）。
+//
+// 代价（有意）：**订阅日期窗改宽之后，那些片要等下一轮才会被关联上**。
+func TestRefreshActorFilmographySkipsOutOfWindow(t *testing.T) {
 	f := newCatalogFixture(t)
+	ctx := context.Background()
+
+	// 搜索给两部：一部窗内、一部窗外。两部都「本地没关联过」。
+	f.db.searchResult = []javdb.Movie{
+		{ID: "in", Number: "SSIS-001", Title: "新片", ReleaseDate: "2026-06-01"},
+		{ID: "out", Number: "SSIS-002", Title: "老片", ReleaseDate: "2020-01-01"},
+	}
+	f.db.movieResult = javdb.Movie{ID: "in", Number: "SSIS-001", Title: "新片",
+		ReleaseDate: "2026-06-01", Actors: []javdb.Actor{{ID: "a1", Name: "演员甲"}}}
+
+	sub := &domain.JavSubscription{
+		ID: 1, TargetType: "actor", TargetID: "a1", TargetName: "演员甲",
+		ReleaseDateFrom: "2026-01-01", ReleaseDateTo: "2026-12-31",
+	}
+	if err := f.svc.refreshActorFilmography(ctx, sub); err != nil {
+		t.Fatalf("refreshActorFilmography: %v", err)
+	}
+
+	// 只给窗内那部抓了详情。
+	if len(f.db.movieCalls) != 1 || f.db.movieCalls[0] != "in" {
+		t.Fatalf("只该给窗内那部抓详情，got %v", f.db.movieCalls)
+	}
+	if _, err := f.st.JavMovies.Get(ctx, "out"); err == nil {
+		t.Error("窗外那部不该被抓进本地")
+	}
+
+	// 窗为空时不做过滤 —— 窗外那部也会被抓。
+	// （「in」在第一轮已经关联上了，这轮不会被重复抓，所以这里只该看到 "out"。）
+	f.db.movieCalls = nil
+	f.db.movieResult = javdb.Movie{ID: "out", Number: "SSIS-002", Title: "老片",
+		ReleaseDate: "2020-01-01", Actors: []javdb.Actor{{ID: "a1", Name: "演员甲"}}}
+	open := &domain.JavSubscription{
+		ID: 1, TargetType: "actor", TargetID: "a1", TargetName: "演员甲",
+	}
+	if err := f.svc.refreshActorFilmography(ctx, open); err != nil {
+		t.Fatalf("refreshActorFilmography: %v", err)
+	}
+	if len(f.db.movieCalls) != 1 || f.db.movieCalls[0] != "out" {
+		t.Errorf("没有日期窗时窗外那部也该抓，got %v", f.db.movieCalls)
+	}
+}
+
+func TestSubscriptionModeIsDerivedNotStored(t *testing.T) {	f := newCatalogFixture(t)
 
 	pre := true
 	view := createSub(t, f, SubscriptionInput{
@@ -294,18 +347,23 @@ func TestCheckActorSubscriptionUsesReleaseWindow(t *testing.T) {
 	if res.Movies != 2 {
 		t.Fatalf("演员订阅应当解析出 2 部影片，got %d", res.Movies)
 	}
-	// 老片要被日期窗口挡下，且原因是「早于起始日期」。
-	var sawTooEarly bool
+	// 老片要被日期窗口挡下 —— 现在**在抓磁链那一步之前就挡掉了**（见 runCheck 里
+	// candidateOK 那段：影片不合格时抓磁链一个候选都不会多，所以整部跳过），
+	// 于是它连候选都不会产生，`res.Candidates` 里根本看不到它。
+	//
+	// 这条与「黑名单」那条同源：**判据在，呈现方式变了**。
+	// 想知道「这部为什么没推」，看订阅影片弹窗（`SubscriptionMovies` 里
+	// 现算 Eligible/RejectText）或候选弹窗里那部**有候选**的片。
 	for _, c := range res.Candidates {
-		if c.MovieID == "m2" && containsStr(c.ReasonsText, "早于") {
-			sawTooEarly = true
+		if c.MovieID == "m2" {
+			t.Errorf("日期窗外的影片不该产生候选（也不该白抓磁链），got %+v", c)
 		}
-		if c.MovieID == "m2" && c.PushOK {
-			t.Error("早于窗口的影片不该产生合格候选")
+		if !c.PushOK {
+			t.Errorf("窗内那部应当是合格候选，got %+v", c)
 		}
 	}
-	if !sawTooEarly {
-		t.Errorf("老片应当以「早于起始日期」被拒，候选=%+v", res.Candidates)
+	if len(res.Candidates) == 0 {
+		t.Error("窗内那部应当有候选")
 	}
 }
 
@@ -335,8 +393,14 @@ func TestBlacklistBlocksMatching(t *testing.T) {
 	if res.MatchedCount != 0 {
 		t.Fatalf("黑名单里的影片不该匹配上，got %d", res.MatchedCount)
 	}
-	if len(res.Candidates) == 0 || !containsStr(res.Candidates[0].ReasonsText, "黑名单") {
-		t.Errorf("应当给出黑名单原因，got %+v", res.Candidates)
+	// 被拉黑的影片**整部跳过**（连磁链都不抓），所以它不会有候选 ——
+	// 从前那条「应当给出黑名单原因」的候选行不再产生。
+	//
+	// 这是有意的取舍：判据（黑名单）在，只是不再为它白烧一趟上游。
+	// 想知道「为什么没推」，去订阅影片弹窗看（`SubscriptionMovies` 现算
+	// Eligible/RejectText，黑名单原因在那儿照样给得出来）。
+	if len(res.Candidates) != 0 {
+		t.Errorf("黑名单影片不该产生任何候选，got %+v", res.Candidates)
 	}
 }
 

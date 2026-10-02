@@ -106,6 +106,8 @@ func (s *Service) startLoops(ctx context.Context) {
 	// 「重新获取 / 刷新磁链」那两颗按钮排的活（见 refresh.go）。**与上面那个分开**：
 	// 那条是串行 + 带冷却的补缺，这条是用户主动点的、不许被冷却挡掉的长活。
 	go s.refreshLoop(ctx)
+	// 订阅检查（见 check_queue.go）。以前它是同步接口，90 秒必被前端切掉。
+	go s.checkLoop(ctx)
 	// 给影库里**没有磁链**的片后台补磁链（见 magnetSweepLoop）。
 	go s.magnetSweepLoop(ctx, gate)
 }
@@ -449,7 +451,14 @@ func (s *Service) subscriptionLoop(ctx context.Context, gate <-chan struct{}) {
 		minKey := now.Format("200601021504")
 
 		// —— 检查 ——
-		if s.settings.Bool(settings.KeyJavSubCheckEnabled) {
+		//
+		// 排队而不是跑：一轮检查可能几十分钟（演员订阅几百部，逐部打上游），
+		// 同步跑会把整个 tick 循环占住。见 check_queue.go。
+		//
+		// `s.checkPending() > 0` 是**积压门控**：上一轮还没跑完时跳过这一次触发。
+		// 队列本身会按订阅去重（同一订阅不会排两遍），但每轮都白扫一遍
+		// jav_subscriptions 没意义，而且积压时再排一批会让「谁先跑」变得难解释。
+		if s.settings.Bool(settings.KeyJavSubCheckEnabled) && s.checkPending() == 0 {
 			daily := s.timeList(settings.KeyJavSubDailyTimes)
 			switch {
 			case len(daily) > 0:
@@ -457,7 +466,7 @@ func (s *Service) subscriptionLoop(ctx context.Context, gate <-chan struct{}) {
 				// 源码界面上那句提示写的就是这件事。
 				if containsString(daily, hm) && minKey != lastCheckKey {
 					lastCheckKey = minKey
-					s.checkAllSubscriptions(ctx)
+					s.enqueueAllChecks(ctx)
 				}
 			default:
 				interval := time.Duration(s.settings.Int(settings.KeyJavSubCheckIntervalMin)) * time.Minute
@@ -466,7 +475,7 @@ func (s *Service) subscriptionLoop(ctx context.Context, gate <-chan struct{}) {
 				}
 				if lastIntervalRun.IsZero() || now.Sub(lastIntervalRun) >= interval {
 					lastIntervalRun = now
-					s.checkAllSubscriptions(ctx)
+					s.enqueueAllChecks(ctx)
 				}
 			}
 		}
@@ -481,22 +490,27 @@ func (s *Service) subscriptionLoop(ctx context.Context, gate <-chan struct{}) {
 	}
 }
 
-// checkAllSubscriptions 检查全部启用的订阅（不推送）。
-func (s *Service) checkAllSubscriptions(ctx context.Context) {
+// enqueueAllChecks 把全部启用的订阅排进检查队列（**不跑**，立刻返回）。
+//
+// 以前这里是 `checkAllSubscriptions`：同步一条条跑完才返回，于是一个 tick 里
+// 几十条订阅要跑几十分钟，把整个 tick 循环占住。现在只排队，跑是 checkLoop 的事
+// （见 check_queue.go）—— 触发类型仍是 "scheduled"，与用户手点的 "manual" 分开。
+//
+// 日志说的是**真的排上了几条**：在跑/在队的会被去重挡掉，所以它可能小于订阅总数。
+func (s *Service) enqueueAllChecks(ctx context.Context) {
 	subs, err := s.subs.ListActive(ctx)
 	if err != nil {
 		s.logWarn("jav list active subscriptions failed", "err", err)
 		return
 	}
+	queued := 0
 	for _, sub := range subs {
-		if ctx.Err() != nil {
-			return
-		}
-		if _, err := s.CheckSubscription(ctx, sub.ID, "scheduled"); err != nil {
-			s.logWarn("jav scheduled check failed", "sub", sub.ID, "err", err)
+		if s.enqueueCheck(sub.ID, "scheduled") {
+			queued++
 		}
 	}
-	s.logInfo("jav scheduled check done", "subscriptions", len(subs))
+	// 措辞别写「done」：这时一轮都还没跑。被去重挡掉几条也如实说出来。
+	s.logInfo("jav scheduled check queued", "subscriptions", len(subs), "queued", queued)
 }
 
 // pushAllSubscriptions 对全部启用的订阅执行一次推送。
@@ -675,6 +689,32 @@ func (s *Service) attemptSweeperLoop(ctx context.Context, gate <-chan struct{}) 
 				}
 			}
 			s.logInfo("jav attempt timed out", "sub", a.SubscriptionID, "attempt", a.ID)
+		}
+
+		// —— 顺带清僵尸运行记录 ——
+		//
+		// 检查挪到后台之后，正常情况下每一轮都会走到 runs.Finish，这个集合应当是空的。
+		// 它非空只有两种可能：进程被杀在跑的中途，或者**从前那种同步接口被前端 abort**
+		// （那种情况下 Finish 写不进去，行会永远停在 running —— 2026-10-02 排查
+		// 「检查经常超时」时，失败的那几次恰恰在库里查不出来，就是这么来的）。
+		//
+		// 判据用 checkBudget（比链的物理上限宽），所以不会误伤真正在跑的那一轮：
+		// 那种行是**进程内存里**的活，本进程刚建的，started_at 不会超。
+		runs, rerr := s.runs.ListRunning(ctx)
+		if rerr != nil {
+			s.logWarn("jav list running runs failed", "err", rerr)
+			continue
+		}
+		for _, run := range runs {
+			if now.Sub(run.StartedAt) < checkBudget {
+				continue
+			}
+			if err := s.runs.Finish(ctx, run.ID, domain.JavRunFailed, 0, 0,
+				"检查未完成（进程中断或请求被中断）"); err != nil {
+				s.logWarn("jav finish stuck run failed", "run", run.ID, "err", err)
+				continue
+			}
+			s.logInfo("jav run timed out", "sub", run.SubscriptionID, "run", run.ID)
 		}
 	}
 }

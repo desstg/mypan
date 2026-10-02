@@ -148,6 +148,13 @@ type Service struct {
 	refreshOnce sync.Once
 	refresh     *refreshQueue
 
+	// check 是「订阅检查」队列（见 check_queue.go）。
+	//
+	// 检查这一轮实测 7 秒到 707 秒，挂在同步 HTTP 上必被 90 秒的请求超时切掉，
+	// 而且断开还会把写库一起掐死 —— 所以与 refresh 一样挪到后台，触发端点只排队。
+	checkOnce sync.Once
+	check     *checkQueue
+
 	// userActiveAt 是**用户最后一次操作番号接口**的时刻（UnixNano）。
 	//
 	// 与 javdb.Client.LastUsedAt 的区别是「谁推动的」：
