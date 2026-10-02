@@ -256,6 +256,17 @@ type TGSubscriptionRepository interface {
 	ClearPending(ctx context.Context, id int64) error
 	MarkMatched(ctx context.Context, id int64, at time.Time) error
 	MarkPushed(ctx context.Context, id int64, at time.Time, qualityScore float64) error
+	// UnmarkPushed 回退一次 MarkPushed：推送计数减一（不为负）。
+	//
+	// 用在「记录说推送成功、离线任务其实失败了」的对账上。不回退的话
+	// pushed_count 虚高，maybeComplete 会把电影误判成「已入库」标记完成 ——
+	// 而盘上什么都没有，订阅从此不再参与匹配。
+	//
+	// 刻意**不**回退 best_quality_score（洗版基线只升不降）：基线调低会让
+	// 同一部片的所有旧版本重新变成「值得洗版」，而它们其实早被推过了 ——
+	// 那会变成一轮无意义的重推。单条推送失败带来的基线偏高，
+	// 代价只是「下次洗版的门槛稍高一点」，比误重推温和得多。
+	UnmarkPushed(ctx context.Context, id int64) error
 	MarkError(ctx context.Context, id int64, message string) error
 }
 
@@ -276,6 +287,12 @@ type TGMatchRecordRepository interface {
 	ListRetryable(ctx context.Context, now time.Time, limit int) ([]*TGMatchRecord, error)
 	// GetByOfflineTaskID 按离线任务 ID 反查记录（下载完成事件带回的就是这个 ID）。
 	GetByOfflineTaskID(ctx context.Context, taskID string) (*TGMatchRecord, error)
+	// ListByOfflineTask 列出所有「记成已推送、但带着离线任务 ID」的记录。
+	//
+	// 这些是等待下载完成的在途记录。失败对账要拿它们去比对离线任务的真实状态 ——
+	// 因为 offlinedownload **只在成功时发事件**，「任务失败了」这件事根本没有出口，
+	// 不对账的话记录会永远停在 pushed（实测：侠女内莉）。
+	ListByOfflineTask(ctx context.Context) ([]*TGMatchRecord, error)
 	CountByStatus(ctx context.Context) (map[string]int, error)
 	// CountByChannel 按频道统计匹配记录数。
 	//

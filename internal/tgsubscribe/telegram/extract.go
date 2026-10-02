@@ -22,6 +22,28 @@ const (
 	ResourceKindShare115   = "share_115"
 	ResourceKindShareQuark = "share_quark"
 	ResourceKindHTTP       = "http"
+
+	// 以下这些**只识别、不投递**（没有对应的 Deliverer）。
+	//
+	// 加它们的目的是「看得见」：实测频道里夸克/阿里/百度的分享链占了相当比例，
+	// 而过去它们连一条记录都不产生 —— 用户看到的是「这个频道抓不到东西」，
+	// 却不知道抓到了什么。识别出来之后，匹配历史与频道体检里能看到
+	// 「已识别到百度网盘，当前版本只记录、不支持投递」，据此还能决定
+	// 「以后先补哪个网盘」。
+	//
+	// 安全性由投递链自己保证：delivererFor 对新 kind 返回 nil →
+	// partitionByDeliverable 标成 unsupported → **不误推、不报错、界面上看得见**。
+	ResourceKindShareAliyun   = "share_aliyun"   // 阿里云盘
+	ResourceKindShareBaidu    = "share_baidu"    // 百度网盘
+	ResourceKindShareXunlei   = "share_xunlei"   // 迅雷云盘
+	ResourceKindShareUC       = "share_uc"       // UC 网盘
+	ResourceKindShare123      = "share_123"      // 123 网盘
+	ResourceKindShare189      = "share_189"      // 天翼云盘
+	ResourceKindSharePikPak   = "share_pikpak"   // PikPak
+	ResourceKindShareLanzou   = "share_lanzou"   // 蓝奏云
+	ResourceKindShareGDrive   = "share_gdrive"   // Google Drive
+	ResourceKindShareOneDrive = "share_onedrive" // OneDrive
+	ResourceKindShareMega     = "share_mega"     // MEGA
 )
 
 // 资源来源，用于排查「为什么这条没抽到」。
@@ -49,6 +71,7 @@ type ResourceRef struct {
 	//	http 直链  "http:<sha1(规范化 URL) 40 位 hex>"
 	//	115 分享    "115:<share code>"
 	//	夸克分享    "quark:<share code>"
+	//	其他分享    "<网盘名>:<share code 或 URL 路径>"（见 shareSpecs 的 prefix）
 	//
 	// 各类型的值域两两不相交，所以能共用一个唯一索引而不会互相撞键。
 	//

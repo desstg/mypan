@@ -186,6 +186,32 @@ func TestWalkPagesStopsOnNoPrev(t *testing.T) {
 	}
 }
 
+// 「无结果空页」要当成翻到头了正常收工，而不是报错。
+//
+// 这条是配合 preview.parsePage 放宽松之后加的：Telegram 在「打开成功但一条帖子
+// 都没有」时渲染一个 No posts found 提示块，parsePage 现在把那种页面返回成空页
+// 而不是 ErrStructureChanged。walkPages 必须接得住。
+func TestWalkPagesStopsOnEmptyPage(t *testing.T) {
+	var calls []int64
+	fetch := feedFetcher(t, map[int64]*preview.Page{
+		0: {Username: "ch", Posts: nil},
+	}, &calls)
+
+	got, err := walkPages(context.Background(), fetch, "ch", -100, 1, catchUpOptions{MaxPages: hardCatchUpPages}, 0)
+	if err != nil {
+		t.Fatalf("空页不该报错: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Errorf("请求页数 = %d, want 1（空页就该停）", len(calls))
+	}
+	if got.Truncated {
+		t.Error("空页不是截断")
+	}
+	if len(got.Posts) != 0 {
+		t.Errorf("帖子数 = %d, want 0", len(got.Posts))
+	}
+}
+
 // 相邻两页在边界 id 上重复时不能产出两条。
 func TestWalkPagesDedupesBoundaryOverlap(t *testing.T) {
 	page1 := fakePage(-100, 130, 111, 111)

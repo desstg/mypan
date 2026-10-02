@@ -114,6 +114,18 @@ type Service struct {
 	// lastPollOK 用于「只在状态跳变时发通知」，避免连接不上时把通知中心刷爆。
 	lastPollOK  bool
 	lastPollErr string
+	// lastReconcile 是「记录 vs 离线任务」对账的节流时间戳（见 reconcile.go）。
+	lastReconcile time.Time
+	// autoPushFn 覆盖「自动推送开关」的取值，仅供测试 —— 生产代码永远不设它。
+	// 不抽这一层的话，测「候选顶上」就得先起一个真的设置服务，
+	// 把一条控制流测试变成装配测试。
+	autoPushFn func() bool
+	// listTasks 取某个账号当前的离线任务，默认就是 offline.List。
+	//
+	// 抽成函数字段只为一件事：让对账那段能在测试里注入假的任务表 ——
+	// offline 是具体类型（*offlinedownload.Service），没法直接替身，
+	// 而"任务失败了"这个分支不测就等于没做。
+	listTasks func(ctx context.Context, accountID int64) ([]offlinedownload.Task, error)
 	// channelPosts 记录各频道最近一次收到帖子的时间，用于 bot 失权探测。
 	channelPosts map[int64]time.Time
 
@@ -180,6 +192,12 @@ func New(opts Options) *Service {
 	}
 	s.pusher = &Pusher{svc: s}
 	s.shareSaver = &ShareSaveDeliverer{svc: s}
+	// 对账默认走真离线服务；测试会把它换成桩（见 reconcile_test.go）。
+	if s.offline != nil {
+		s.listTasks = func(ctx context.Context, accountID int64) ([]offlinedownload.Task, error) {
+			return s.offline.List(ctx, accountID, false)
+		}
+	}
 	// 顺序即优先级：Pusher 只管离线下载能投的那几种（kindSchemes 覆盖到的），
 	// 分享链它明确返回 false，落到 shareSaver 手里。
 	s.deliverers = []Deliverer{s.pusher, s.shareSaver}
@@ -283,7 +301,14 @@ func (s *Service) botEnabled() bool {
 // autoPush 报告是否允许自动推送。默认关（观察模式）—— 用户先看一天匹配历史，
 // 确认判定符合预期，再打开自动推送。
 func (s *Service) autoPush() bool {
-	if s == nil || s.settings == nil {
+	if s == nil {
+		return false
+	}
+	// 测试注入口优先（见 autoPushFn 的字段注释）。
+	if s.autoPushFn != nil {
+		return s.autoPushFn()
+	}
+	if s.settings == nil {
 		return false
 	}
 	return s.settings.Bool(settings.KeyTGBotAutoPush)

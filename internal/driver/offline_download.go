@@ -27,6 +27,14 @@ type OfflineAddResult struct {
 	Name           string
 	Success        bool
 	Message        string
+	// AlreadyExists 表示网盘明确说「这颗种子已经在任务列表里了」
+	// （115 的 10008「任务已存在，请勿输入重复的链接地址」）。
+	//
+	// 与 Success 分开是有意的：Success=true 会让公共层当成「新任务已创建」，
+	// 而这条根本没有新的 task id 可跟。公共层看到这个标记应当记成
+	// 「已在网盘，等待它的完成事件」，而不是一次推送失败 ——
+	// 真机踩到过：文件好好地在网盘上，记录却写着「推送失败：任务已存在」。
+	AlreadyExists bool
 }
 
 // OfflineTaskRef 是公共层持久化后传给驱动刷新的最小引用。

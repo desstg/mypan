@@ -206,15 +206,28 @@ func TestShareBracketBalance(t *testing.T) {
 
 func TestShareKinds(t *testing.T) {
 	kinds := ShareExtractor{}.Kinds()
-	if len(kinds) != 2 {
-		t.Fatalf("Kinds() = %v", kinds)
-	}
 	seen := map[string]bool{}
 	for _, k := range kinds {
+		if seen[k] {
+			t.Fatalf("Kinds() 里有重复项：%v", kinds)
+		}
 		seen[k] = true
 	}
-	if !seen[ResourceKindShare115] || !seen[ResourceKindShareQuark] {
-		t.Fatalf("Kinds() = %v", kinds)
+	// 115 是唯一能投递的，它必须在。
+	if !seen[ResourceKindShare115] {
+		t.Fatalf("Kinds() 里没有 115：%v", kinds)
+	}
+	// 只识别不投递的也必须在 —— 否则实测频道里占大头的百度/迅雷链
+	// 连一条记录都不产生，「这个频道抓不到东西」就没法解释。
+	for _, want := range []string{
+		ResourceKindShareQuark, ResourceKindShareBaidu, ResourceKindShareXunlei,
+		ResourceKindShareAliyun, ResourceKindShareUC, ResourceKindShare123,
+		ResourceKindShare189, ResourceKindSharePikPak, ResourceKindShareLanzou,
+		ResourceKindShareGDrive, ResourceKindShareOneDrive, ResourceKindShareMega,
+	} {
+		if !seen[want] {
+			t.Errorf("Kinds() 里没有 %s：%v", want, kinds)
+		}
 	}
 }
 

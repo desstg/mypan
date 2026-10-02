@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -54,7 +55,15 @@ const (
 // Service 拉取并缓存公告。
 type Service struct {
 	resolve func() string
-	client  *http.Client
+	// resolveProxy 返回当前该用的代理地址（空串 = 直连）。与 resolve 同款：
+	// 每次拉取时现取，供后台设置热更新。注入成回调而不是直接吃 settings，
+	// 是因为本包是叶子包 —— 让它 import settings 会把依赖方向倒过来。
+	resolveProxy func() string
+
+	transport *http.Transport
+	// client 是按当前地址与代理现算出来的。两者任一变化都要重建，
+	// 见 applyTransport。
+	client *http.Client
 
 	mu       sync.Mutex
 	cached   *Announcement
@@ -63,6 +72,8 @@ type Service struct {
 	// activeURL 是上次实际使用的地址。地址一变，上面的缓存与失败冷却都属于上一个地址，
 	// 必须一起作废，否则换了地址还要等满 cacheTTL 才生效，表现为「改了没用」。
 	activeURL string
+	// activeProxy 同理：代理换了，记在旧代理上的失败冷却不该继续挡着新代理。
+	activeProxy string
 }
 
 // New 构造固定地址的公告服务。
@@ -74,9 +85,24 @@ func New(url string) *Service {
 // NewDynamic 构造地址可变的公告服务：每次拉取时调 resolve 取当前地址，
 // 供后台的「公告地址」设置项热更新使用。
 func NewDynamic(resolve func() string) *Service {
+	return NewDynamicWithProxy(resolve, nil)
+}
+
+// NewDynamicWithProxy 在 NewDynamic 之上再接一个「当前代理地址」的取值回调。
+//
+// resolveProxy 为 nil 或返回空串时直连 —— 不引入开关，**填了代理就走代理**。
+// 这条规则对「后台小功能」才成立，见 fetchBody 里的失败回落：代理填错时
+// 会自动退回直连再试一次，所以宁可多试一条路，也不要静默地什么都拉不到。
+func NewDynamicWithProxy(resolve func() string, resolveProxy func() string) *Service {
+	transport := &http.Transport{}
 	return &Service{
-		resolve: resolve,
-		client:  &http.Client{Timeout: fetchTimeout},
+		resolve:      resolve,
+		resolveProxy: resolveProxy,
+		transport:    transport,
+		// **必须显式挂上 transport**：只建 `&http.Client{Timeout: …}` 的话它用的是
+		// http.DefaultTransport，applyTransport 往 s.transport 上装的代理根本不会生效
+		// —— 而且是静默的（照常直连、照常失败），这条路踩过一次。
+		client: &http.Client{Timeout: fetchTimeout, Transport: transport},
 	}
 }
 
@@ -87,6 +113,46 @@ func (s *Service) currentURL() string {
 	}
 	return strings.TrimSpace(s.resolve())
 }
+
+// currentProxy 返回当前生效的代理地址；没配时为空串（直连）。
+func (s *Service) currentProxy() string {
+	if s.resolveProxy == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.resolveProxy())
+}
+
+// applyTransport 按代理地址（重新）装配 transport，代理没变时什么都不做。
+//
+// **必须每次调用**，不能只在构造时配一次：用户在设置页填上代理之后，
+// 下一次拉取就该走上它，而不是等到重启。
+//
+// 直接给 http.ProxyURL 而不是拼 Transport 的其它字段：ProxyURL 会原样返回
+// 已经解析好的 URL，也支持带账号密码的形式（settings 那边已经把凭据拼进去了）。
+func (s *Service) applyTransport(proxy string) {
+	if proxy == s.activeProxy {
+		return
+	}
+	s.activeProxy = proxy
+	if proxy == "" {
+		s.transport.Proxy = nil
+		return
+	}
+	parsed, err := url.Parse(proxy)
+	if err != nil || parsed.Host == "" {
+		// 地址写错时按直连走，而不是把 client 弄成一个必然失败的形态 ——
+		// fetchBody 的失败回落会再兜一次底，但能在这里就判掉更好。
+		s.transport.Proxy = nil
+		return
+	}
+	s.transport.Proxy = http.ProxyURL(parsed)
+}
+
+// URL 返回当前生效的公告地址（未配置时为空串）。
+//
+// 与 Enabled 一样是「问一句现在是什么」，供调用方在拉不到内容时把地址记进日志 ——
+// 失败原因基本都在这个地址上，光记「拉取失败」等于什么都没说。
+func (s *Service) URL() string { return s.currentURL() }
 
 // Enabled 返回公告服务是否配置了远端文件。
 func (s *Service) Enabled() bool {
@@ -106,6 +172,12 @@ func (s *Service) Fetch(ctx context.Context) (*Announcement, error) {
 		s.activeURL = url
 		s.cached = nil
 		s.cachedAt = time.Time{}
+		s.failedAt = time.Time{}
+	}
+	// 代理换过了同理：旧代理上的失败不该挡住新代理。同样要按当前值现装，
+	// 用户刚填上代理时下一次拉取就得生效。
+	if proxy := s.currentProxy(); proxy != s.activeProxy {
+		s.applyTransport(proxy)
 		s.failedAt = time.Time{}
 	}
 	if s.cached != nil && now.Sub(s.cachedAt) < cacheTTL {
@@ -146,13 +218,53 @@ func (s *Service) Fetch(ctx context.Context) (*Announcement, error) {
 	return item, nil
 }
 
+// fetchBody 取远端公告正文。**代理失败会自动回落直连** —— 见 fetchOnce 的说明。
 func (s *Service) fetchBody(ctx context.Context, url string) ([]byte, error) {
+	body, err := s.fetchOnce(ctx, url)
+	if err == nil {
+		return body, nil
+	}
+	// 回落：只有「这次确实走了代理」才值得再试一条路。
+	//
+	// 为什么必须有这条：规则是「填了代理就走代理、不看开关」，而用户填的代理
+	// 完全可能只对 TMDB 有效（那种按域名分流的代理很常见）。没有回落的话，
+	// 一个对 GitHub 无效的代理会把公告整个打死 —— 而失败是**静默**的
+	// （见包注释的降级设计），表现就是「公告莫名其妙不弹了」，
+	// 比原来「没代理所以拉不到」更难查。公告是个几 KB 的小文件，
+	// 多试一次直连的代价可以忽略。
+	if s.currentProxy() == "" {
+		return nil, err
+	}
+	direct, directErr := s.fetchDirect(ctx, url)
+	if directErr != nil {
+		return nil, err // 报代理那一次的错误：它才是用户该看到的原因
+	}
+	return direct, nil
+}
+
+// fetchOnce 用**当前** transport（可能带代理）请求一次。
+func (s *Service) fetchOnce(ctx context.Context, url string) ([]byte, error) {
+	return s.do(ctx, s.client, url)
+}
+
+// fetchDirect 明确绕开代理请求一次，供代理失败时回落。
+//
+// 用一次性 client（Proxy 显式置 nil）而不是把共享 transport 的代理改掉：
+// 后者会与正在并发进行的其它拉取打架。
+func (s *Service) fetchDirect(ctx context.Context, url string) ([]byte, error) {
+	return s.do(ctx, &http.Client{
+		Timeout:   fetchTimeout,
+		Transport: &http.Transport{Proxy: nil},
+	}, url)
+}
+
+func (s *Service) do(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "LitePan/1.0")
-	resp, err := s.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

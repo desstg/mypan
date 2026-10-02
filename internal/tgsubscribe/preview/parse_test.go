@@ -290,11 +290,50 @@ func TestParsePostFallsBackWhenDataViewMissing(t *testing.T) {
 	}
 }
 
-// 一条帖子都解析不出来时报 ErrStructureChanged，而不是静默返回空页。
+// 一条帖子都解析不出来、页面上也没有 Telegram 的「No posts found」提示时，
+// 报 ErrStructureChanged，而不是静默返回空页。
 func TestParsePageNoPosts(t *testing.T) {
 	_, err := parsePage([]byte(`<html><body><p>啥也没有</p></body></html>`), "ch")
 	if !errors.Is(err, ErrStructureChanged) {
 		t.Fatalf("err = %v, want ErrStructureChanged", err)
+	}
+}
+
+// 页面带「No posts found」标记时返回**空页**而不是错误。
+//
+// 这是实测抓到的真实形态（2026-10-01，QukanMovie 搜一个不存在的关键词）：
+//
+//	<div class="tgme_widget_message_wrap js-widget_message_wrap">
+//	  <div class="tgme_widget_message_centered">
+//	    <div class="tme_no_messages_found">No posts found</div>
+//
+// 不区分的话，频道内搜索每搜一个没命中的关键词都会报「Telegram 改了页面，
+// 请升级 LitePan」—— 一次搜索能刷出一屏假警报。
+func TestParsePageNoMessagesFound(t *testing.T) {
+	body := `<html><body>
+	  <main class="tgme_main" data-url="/QukanMovie">
+	    <section class="tgme_channel_history js-message_history">
+	      <div class="tgme_widget_message_wrap js-widget_message_wrap">
+	        <div class="tgme_widget_message_centered">
+	          <div class="tme_no_messages_found">No posts found</div>
+	        </div>
+	      </div>
+	    </section>
+	  </main>
+	</body></html>`
+
+	page, err := parsePage([]byte(body), "QukanMovie")
+	if err != nil {
+		t.Fatalf("err = %v, want nil（无结果是正常结果，不是结构变更）", err)
+	}
+	if page == nil {
+		t.Fatal("page 为 nil")
+	}
+	if len(page.Posts) != 0 {
+		t.Fatalf("Posts = %d 条，want 0", len(page.Posts))
+	}
+	if page.Username != "QukanMovie" {
+		t.Errorf("Username = %q, want QukanMovie", page.Username)
 	}
 }
 

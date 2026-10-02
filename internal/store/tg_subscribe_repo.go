@@ -346,7 +346,11 @@ func (r *tgSubscriptionRepo) SetStatusBatch(ctx context.Context, ids []int64, st
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	args := make([]any, 0, len(ids)+2)
 	args = append(args, status, tsValue(time.Time{}))
-	if status == domain.TGSubStatusActive {
+	// **只有暂停**清窗口：completed 仍然参与匹配与派发（见 ListPending 的注释），
+	// 清了等于把已经攒好的候选丢掉。
+	// active 与 completed 都设成 NULL —— NULL 在 ListPending 里是「不派发」，
+	// 而这两者本来就该由「有没有候选在窗口里」决定，不该被这里强行清掉。
+	if status == domain.TGSubStatusActive || status == domain.TGSubStatusCompleted {
 		args[1] = nil
 	}
 	for _, id := range ids {
@@ -362,11 +366,18 @@ WHERE id IN (`+placeholders+`)`, args...)
 	return n, wrapDB(err)
 }
 
+// ListPending 返回 pending_deadline_at 已到期的订阅，供 dispatcher 消费。
+//
+// ⚠️ completed **也要捞**。它和 active 的区别只是「自动收尾过一次」，
+// 不代表用户不想再要新版本 —— 排除掉的话，一部片推成功之后
+// （maybeComplete 立刻标完成）后续的洗版/新集永远进不了派发。
+// **paused 才是用户主动暂停**，那个确实不派发。
 func (r *tgSubscriptionRepo) ListPending(ctx context.Context, now time.Time) ([]*domain.TGSubscription, error) {
 	rows, err := r.db.read.QueryContext(ctx, `
 SELECT `+tgSubscriptionColumns+` FROM tg_subscriptions
-WHERE pending_deadline_at IS NOT NULL AND pending_deadline_at <= ? AND status=?
-ORDER BY pending_deadline_at ASC`, now.UTC().Format(tsLayout), domain.TGSubStatusActive)
+WHERE pending_deadline_at IS NOT NULL AND pending_deadline_at <= ? AND status IN (?, ?)
+ORDER BY pending_deadline_at ASC`,
+		now.UTC().Format(tsLayout), domain.TGSubStatusActive, domain.TGSubStatusCompleted)
 	if err != nil {
 		return nil, wrapDB(err)
 	}
@@ -410,6 +421,14 @@ func (r *tgSubscriptionRepo) MarkPushed(ctx context.Context, id int64, at time.T
 UPDATE tg_subscriptions SET last_push_at=?, pushed_count=pushed_count+1,
        best_quality_score=MAX(best_quality_score, ?), last_error='', updated_at=CURRENT_TIMESTAMP
 WHERE id=?`, tsValue(at), qualityScore, id)
+	return wrapDB(err)
+}
+
+// UnmarkPushed 回退一次 MarkPushed。见 domain 接口上的说明。
+func (r *tgSubscriptionRepo) UnmarkPushed(ctx context.Context, id int64) error {
+	_, err := r.db.write.ExecContext(ctx, `
+UPDATE tg_subscriptions SET pushed_count=MAX(pushed_count-1, 0), updated_at=CURRENT_TIMESTAMP
+WHERE id=?`, id)
 	return wrapDB(err)
 }
 
@@ -696,6 +715,33 @@ func (r *tgMatchRecordRepo) GetByOfflineTaskID(ctx context.Context, taskID strin
 		`SELECT `+tgMatchRecordColumns+` FROM tg_match_records WHERE offline_task_id=? ORDER BY id DESC LIMIT 1`,
 		taskID)
 	return scanTGMatchRecord(row)
+}
+
+// ListByOfflineTask 列出所有记成已推送、且带着离线任务 ID 的记录。
+//
+// 这些是「等下载完成」的在途记录。调用方（dispatcher 里那条对账）拿它们的
+// task ID 去比对离线任务的真实状态 —— 离线任务失败时不会发事件，
+// 不对账就会永远停在 pushed。
+//
+// 只取 pushed/upgraded：failed/superseded 那些本来就没在等在途结果。
+func (r *tgMatchRecordRepo) ListByOfflineTask(ctx context.Context) ([]*domain.TGMatchRecord, error) {
+	rows, err := r.db.read.QueryContext(ctx, `
+SELECT `+tgMatchRecordColumns+` FROM tg_match_records
+ WHERE offline_task_id <> '' AND status IN (?, ?)
+ ORDER BY id ASC`, domain.TGRecordPushed, domain.TGRecordUpgraded)
+	if err != nil {
+		return nil, wrapDB(err)
+	}
+	defer rows.Close()
+	out := make([]*domain.TGMatchRecord, 0)
+	for rows.Next() {
+		m, err := scanTGMatchRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, wrapDB(rows.Err())
 }
 
 func (r *tgMatchRecordRepo) CountByStatus(ctx context.Context) (map[string]int, error) {

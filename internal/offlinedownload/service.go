@@ -265,6 +265,19 @@ func (s *Service) AddURLs(ctx context.Context, p AddURLParams) ([]Task, error) {
 				message = "离线下载任务创建失败"
 				errText = message
 			}
+			// ⚠️ 但**网盘说「这颗种子已经在任务列表里了」**的那种不算失败
+			// （115 的 10008，驱动用 btih 反查补上了 hash 并打了 AlreadyExists）。
+			// 东西本来就在网盘上，重投一次还是同一个结果 —— 按失败记账会让用户
+			// 看到「推送失败：任务已存在」，而文件其实好好地在网盘上（真机踩到过）。
+			//
+			// 记成 pending：等它的完成事件回来，对账那条路会把它接上。
+			if result.AlreadyExists {
+				status = driver.OfflineStatusPending
+				errText = ""
+				if message == "" {
+					message = "该种子已在网盘的任务列表里"
+				}
+			}
 		} else if message == "" {
 			message = "已提交到网盘"
 		}

@@ -38,6 +38,35 @@ func (s *Service) onOfflineDownloadCompleted(ctx context.Context, event eventbus
 		return
 	}
 
+	// 下载「完成」不等于文件真的在。事件带的 TargetParentID 就是这次投递的目标目录
+	// （离线通道的 DeliveredFolderID），拿它复核一遍再记账。
+	//
+	// 不验的后果：一次「任务标成功、目录里什么都没有」会被记成已入库、推进订阅
+	// 进度、还发一条「已入库」通知 —— 用户要等自己翻网盘才发现。
+	//
+	// ⚠️ 判空是**确定性失败**：同一个种子重投一次还会是空的，重试只是白调上游。
+	// 所以不设 NextRetryAt，留给用户在匹配历史里手动处理。
+	if err := s.verifyDeliveredNotEmpty(ctx, event.AccountID, event.TargetParentID, event.TargetDisplayPath); err != nil {
+		// ⚠️ 标 failed 而不是 unretryable：**推送本身是成功的**，失败在这里的是
+		// 「下载完成后目录里没有文件」这一步，用户重推一次是合理操作
+		// （换个种子往往就好了）。
+		//
+		// 但必须清掉 NextRetryAt —— 不设的话 ListRetryable 会立刻把它捞出来，
+		// pushRecord 重推一次又拉出一个新的离线任务，而它同样会下载「成功」
+		// 却不落文件，如此循环。留给用户在匹配历史里自己决定。
+		s.log.Warn("tg subscribe offline download delivered nothing",
+			"record", rec.ID, "sub", rec.SubscriptionID, "task", event.TaskID, "err", err)
+		rec.Status = domain.TGRecordFailed
+		// 说清楚「推送本身是成功的」：不然用户看到 failed 会以为推送就没成，
+		// 去重推一次，结果还是空的。
+		rec.Reason = "已推送成功，但下载完成后目标目录里没有文件：" + err.Error()
+		rec.NextRetryAt = time.Time{}
+		if uerr := s.records.Update(ctx, rec); uerr != nil {
+			s.log.Warn("tg subscribe mark empty delivery failed", "record", rec.ID, "err", uerr)
+		}
+		return
+	}
+
 	s.applyDeliveryProgress(ctx, sub, rec, deliveredInfo{
 		TaskID:     event.TaskID,
 		AccountID:  event.AccountID,

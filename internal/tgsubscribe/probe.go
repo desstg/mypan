@@ -40,7 +40,16 @@ type ProbeResourceCount struct {
 }
 
 // probeKindOrder 是报告里资源类型的固定展示顺序（与 newRegistry 的优先级一致）。
-var probeKindOrder = []string{KindMagnet, KindED2K, KindHTTP, KindShare115, KindShareQuark}
+//
+// 能投递的排前面，只识别不投递的按实测出现频率排 —— 频道的「体检」报告
+// 是要给人看的，顺序本身就在回答「这个频道的资源主要是什么形态」。
+var probeKindOrder = []string{
+	KindMagnet, KindED2K, KindHTTP, KindShare115, KindShareQuark,
+	// 以下只识别、不投递。实测频率：夸克/百度最多，其次迅雷、阿里。
+	KindShareBaidu, KindShareXunlei, KindShareAliyun, KindShareUC,
+	KindShare123, KindShare189, KindSharePikPak, KindShareLanzou,
+	KindShareGDrive, KindShareOneDrive, KindShareMega,
+}
 
 // probeScan 是对一页帖子跑一遍抽取的汇总。
 type probeScan struct {

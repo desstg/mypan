@@ -911,8 +911,12 @@ func (s *Service) SetSubscriptionStatus(ctx context.Context, id int64, status st
 		return err
 	}
 	sub.Status = status
-	if status != domain.TGSubStatusActive {
-		// 状态不再是 active 时窗口里的候选没有意义了，清掉避免下一轮又被捞出来。
+	if status == domain.TGSubStatusPaused {
+		// **只有暂停**才清窗口：暂停是用户明确的「别动这部片」，
+		// 窗口里的候选没有意义了，留着会让下一轮又被捞出来。
+		//
+		// 标记完成**不清**：completed 仍然参与匹配与派发（见 RecallCandidates
+		// 与 ListPending 的注释），清了窗口等于把已经攒好的候选丢掉。
 		sub.PendingDeadlineAt = time.Time{}
 	}
 	if err := s.subs.Update(ctx, sub); err != nil {
@@ -1229,7 +1233,12 @@ func (s *Service) ManualPush(ctx context.Context, recordID, subscriptionID int64
 	if err != nil {
 		return nil, err
 	}
-	if sub.Status == domain.TGSubStatusCompleted || sub.Status == domain.TGSubStatusPaused {
+	// ⚠️ **只拦 paused**。completed 仍然可以手动推送 ——
+	// 它与 active 的区别只是「自动收尾过一次」，不是用户说的「别动这部片」。
+	// 拦着的话，用户在匹配历史里看到一条好资源却推不出去，只能先去改订阅状态，
+	// 而那次改动又会立刻被 maybeComplete 覆盖回 completed（电影推成功后必然如此）——
+	// 一个用户绕不出去的循环。**paused 才是真的别动**。
+	if sub.Status == domain.TGSubStatusPaused {
 		return nil, domain.Errorf(domain.CodeValidation, "订阅「%s」当前是%s状态，请先恢复订阅", sub.Title, statusLabelText(sub.Status))
 	}
 

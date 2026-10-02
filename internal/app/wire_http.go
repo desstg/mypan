@@ -162,9 +162,14 @@ func wireHTTPServer(cfg config.Config, logs *logx.Manager, st *storeBundle, core
 		AuthSched:        core.sched,
 		AdminAuth:        adminauth.New(st.store.Configs, core.secret, logs.For(logx.ModuleAPI)),
 		Notifications:    notifySvc,
-		Announcement: announcement.NewDynamic(func() string {
-			return st.settings.String(settings.KeyAnnouncementURL)
-		}),
+		Announcement: announcement.NewDynamicWithProxy(
+			func() string { return st.settings.String(settings.KeyAnnouncementURL) },
+			// 「填了代理就走代理」，不看全局「启用代理」开关：那个开关是给
+			// TMDB / TG 那几条主链路用的，公告这种后台小功能漏在开关之外时
+			// 会静默失效（实测群晖那台就是 —— 填了代理、开关也开着，但公告
+			// 用的是默认 transport，永远拉不到 raw.githubusercontent.com）。
+			func() string { return settings.ConfiguredProxyURL(st.settings) },
+		),
 		BackupRestore:     backupRestoreSvc,
 		SpaceCleanup:      spaceCleanupSvc,
 		CoverExtract:      coverExtractSvc,

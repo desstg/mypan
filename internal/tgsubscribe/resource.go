@@ -23,6 +23,21 @@ const (
 	KindShare115   = telegram.ResourceKindShare115
 	KindShareQuark = telegram.ResourceKindShareQuark
 	KindHTTP       = telegram.ResourceKindHTTP
+
+	// 以下这些**只识别、不投递**（没有对应的 Deliverer）。详见 telegram/share.go
+	// 的 shareSpecs：加它们的目的是「看得见」，实测频道里夸克/百度/迅雷的分享链
+	// 占了大部分，过去连记录都不产生。
+	KindShareAliyun   = telegram.ResourceKindShareAliyun
+	KindShareBaidu    = telegram.ResourceKindShareBaidu
+	KindShareXunlei   = telegram.ResourceKindShareXunlei
+	KindShareUC       = telegram.ResourceKindShareUC
+	KindShare123      = telegram.ResourceKindShare123
+	KindShare189      = telegram.ResourceKindShare189
+	KindSharePikPak   = telegram.ResourceKindSharePikPak
+	KindShareLanzou   = telegram.ResourceKindShareLanzou
+	KindShareGDrive   = telegram.ResourceKindShareGDrive
+	KindShareOneDrive = telegram.ResourceKindShareOneDrive
+	KindShareMega     = telegram.ResourceKindShareMega
 )
 
 // Extractor 从一条频道消息里抽出一类可下载资源。
@@ -75,9 +90,13 @@ type deliverabilityChecker interface {
 type DeliverRequest struct {
 	AccountID int64
 	// ProviderKind 是离线下载通道（native / builtin），分享转存类投递器会忽略它。
-	ProviderKind      string
-	Resource          Resource
-	TargetParentID    string
+	ProviderKind string
+	Resource     Resource
+	// TargetParentID 是**投递目标**：专属子目录建出来就是它，退回了父目录就还是父目录。
+	// 网盘接口（离线下载、分享转存）用它。
+	TargetParentID string
+	// TargetDisplayPath 是投递目标的展示路径（期望值，不代表它真的存在）。
+	// 失败收尾时要靠它的基名复核「要删的是不是预期的那个目录」。
 	TargetDisplayPath string
 	FileName          string
 }
@@ -90,6 +109,16 @@ type DeliverResult struct {
 	ProviderKind string
 	// Reason 是补充说明（例如「网盘不支持磁力，已自动降级到内置下载器」）。
 	Reason string
+	// FolderID 是**本次新建**的专属子目录 ID；复用的、或退回父目录的都为空白。
+	// 投递失败时 pushRecord 靠它把刚建的空目录删掉 —— 不删就是用户抱怨的
+	// 「只有一个文件夹，里面什么都没有」。
+	FolderID string
+	// DeliveredFolderID 是这次投递**落到**的目录 ID（新建的、复用的都算），
+	// 退回父目录时为空白。投递成功后靠它复核目录里是不是真的有东西。
+	//
+	// 与 FolderID 分开是有意的：那个回答「这次建的能不能删」，
+	// 这个回答「东西该在哪儿」，两个问题的答案在「复用已有目录」时正好相反。
+	DeliveredFolderID string
 }
 
 // newRegistry 构造抽取器集合。新增资源类型只改这里。
@@ -210,6 +239,31 @@ func labelKind(kind string) string {
 		return "ed2k 链接"
 	case KindHTTP:
 		return "直链"
+
+	// 以下都是「只识别、不投递」。文案统一带上网盘名 —— 它会被拼进
+	// 「已识别到 X，当前版本只记录、不支持投递」，用户要能一眼看出是哪个盘。
+	case KindShareAliyun:
+		return "阿里云盘分享"
+	case KindShareBaidu:
+		return "百度网盘分享"
+	case KindShareXunlei:
+		return "迅雷云盘分享"
+	case KindShareUC:
+		return "UC 网盘分享"
+	case KindShare123:
+		return "123 网盘分享"
+	case KindShare189:
+		return "天翼云盘分享"
+	case KindSharePikPak:
+		return "PikPak 分享"
+	case KindShareLanzou:
+		return "蓝奏云分享"
+	case KindShareGDrive:
+		return "Google Drive 分享"
+	case KindShareOneDrive:
+		return "OneDrive 分享"
+	case KindShareMega:
+		return "MEGA 分享"
 	}
 	return kind
 }

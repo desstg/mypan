@@ -50,10 +50,19 @@ type MatchDecision struct {
 //
 // 订阅清单本身就是用户明确表达的意图，是**最强的过滤条件** —— 所以这里不做
 // 任何 TMDB 反查，只按年份与类型做两把粗筛，然后交给打分。
+//
+// ⚠️ **completed 也要参与**。订阅被自动收尾（maybeComplete）之后又来了新版本
+// 是常态 —— 电影出了更高码率的、剧集播到新一集。过去这里把 completed 排除掉，
+// 于是「自动完成」=「从匹配清单里消失」，而用户的原话是
+// 「订阅是我表达要这部片的意图」。**paused 才是不参与**（那是用户主动暂停）。
+//
+// 为什么不是「完成后自动恢复 active」：恢复会与 maybeComplete 来回抖动
+// （推一条 → 标完成 → 恢复 → 再推…）。让 completed 留在候选池里，
+// 由画质基线与「这一集有没有入库」去挡重复，语义更准也更省事。
 func RecallCandidates(rel ReleaseName, subs []*domain.TGSubscription) []*domain.TGSubscription {
 	out := make([]*domain.TGSubscription, 0, 8)
 	for _, sub := range subs {
-		if sub == nil || sub.Status == domain.TGSubStatusCompleted {
+		if sub == nil || sub.Status == domain.TGSubStatusPaused {
 			continue
 		}
 		if !typeCompatible(rel, sub) {

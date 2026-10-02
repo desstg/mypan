@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"litepan/internal/announcement"
 	"litepan/internal/settings"
 )
 
@@ -98,5 +99,32 @@ func TestMarkAnnouncementReadRejectsEmptyVersion(t *testing.T) {
 
 	if response.Code == http.StatusOK {
 		t.Fatalf("空公告版本应拒绝: body=%s", response.Body.String())
+	}
+}
+
+// 拉不到公告时**必须在日志里留痕**：前端那边「拉取失败」和「本来就还没发公告」
+// 长得一模一样（都是「暂无公告」），实测群晖那台就是靠翻代码才定位到。
+func TestGetAnnouncementLogsWhenFetchFails(t *testing.T) {
+	// 一个必然拉不到的地址：端口上没人监听。
+	unreachable := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := unreachable.URL
+	unreachable.Close()
+
+	var logOutput strings.Builder
+	handler := &Handler{
+		announcement: announcement.NewDynamic(func() string { return url }),
+		log:          slog.New(slog.NewTextHandler(&logOutput, nil)),
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/announcement", nil)
+	response := httptest.NewRecorder()
+	handler.getAnnouncement(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	logged := logOutput.String()
+	if !strings.Contains(logged, "拉取失败") || !strings.Contains(logged, url) {
+		t.Fatalf("拉取失败应当留下带地址的日志，实际：%q", logged)
 	}
 }

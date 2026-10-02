@@ -39,7 +39,7 @@ func (p *ShareSaveDeliverer) Deliver(ctx context.Context, req DeliverRequest) (D
 
 	// 先建「片名 (年份)」子目录，与离线下载通道保持一致 —— 同一条订阅的不同版本
 	// 落在同一个子目录里，洗版前后不会散成两处。
-	folderID, folderPath, created, err := p.svc.ensureTargetFolder(ctx, req)
+	folder, err := p.svc.ensureTargetFolder(ctx, req)
 	if err != nil {
 		return DeliverResult{}, err
 	}
@@ -51,8 +51,8 @@ func (p *ShareSaveDeliverer) Deliver(ctx context.Context, req DeliverRequest) (D
 	// （建目录失败回退到父目录）时返回的路径只是「期望值」而非实际值，
 	// 拿它去比会误报，所以那种情况下不核对。
 	expectPath := ""
-	if created {
-		expectPath = folderPath
+	if folder.LocatedID != "" {
+		expectPath = folder.Path
 	}
 
 	var received driver.ShareReceiveResult
@@ -64,7 +64,7 @@ func (p *ShareSaveDeliverer) Deliver(ctx context.Context, req DeliverRequest) (D
 		got, err := receiver.ReceiveShare(ctx, driver.ShareReceiveRequest{
 			ShareCode:   share.code,
 			ReceiveCode: share.password,
-			TargetCID:   folderID,
+			TargetCID:   folder.TargetID,
 			TargetPath:  expectPath,
 		})
 		if err != nil {
@@ -74,10 +74,18 @@ func (p *ShareSaveDeliverer) Deliver(ctx context.Context, req DeliverRequest) (D
 		return nil
 	})
 	if err != nil {
-		return DeliverResult{}, err
+		// ⚠️ 这里**不删**目录，只把「刚建的目录 ID」带回去。
+		//
+		// 收尾由 pushRecord 统一做：两条通道各删一次的话，第二个调用会对着
+		// 已经删掉的目录再跑一遍列目录/查详情 —— 白打网盘，还会写一条误导的日志。
+		return DeliverResult{FolderID: folder.CreatedID}, err
 	}
 
-	return DeliverResult{Reason: describeShareSave(received, folderPath)}, nil
+	return DeliverResult{
+		Reason: describeShareSave(received, folder.Path),
+		// 复用的目录同样算「落到了专属子目录」：东西确实在里面，该核对就得核对。
+		DeliveredFolderID: folder.LocatedID,
+	}, nil
 }
 
 // Deliverability 报告这个账号现在能不能转存 115 分享。

@@ -117,6 +117,15 @@ func (s *Service) effectiveWebSearchBase(configured time.Duration, subCount int)
 }
 
 // subsNeedingSearch 返回「还没收齐、值得再搜一轮」的订阅。
+//
+// ⚠️ 这里刻意**只看 active**，与 `RecallCandidates` / `ListPending` 的
+// 「completed 也算」不一样，是有意的：
+//
+//   - 自动收尾过的订阅已经从外部站拿到过资源了，继续反复搜同一批结果
+//     只是白打那个站点（它有配额，实测 429 是常态）；
+//   - 频道抓取那条路对 completed 是放行的（新帖里出现更高画质会推），
+//     外部搜索不是唯一入口；
+//   - 用户真想再搜，手动点「搜网盘」即可 —— 那条路不看状态。
 func (s *Service) subsNeedingSearch(ctx context.Context) []*domain.TGSubscription {
 	subs, err := s.subs.List(ctx, domain.TGSubStatusActive)
 	if err != nil {

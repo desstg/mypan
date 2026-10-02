@@ -51,7 +51,7 @@ func (p *Pusher) Deliver(ctx context.Context, req DeliverRequest) (DeliverResult
 			"离线下载通道不支持%s", labelKind(req.Resource.Kind))
 	}
 
-	parentID, displayPath, _, err := p.svc.ensureTargetFolder(ctx, req)
+	folder, err := p.svc.ensureTargetFolder(ctx, req)
 	if err != nil {
 		return DeliverResult{}, err
 	}
@@ -63,14 +63,17 @@ func (p *Pusher) Deliver(ctx context.Context, req DeliverRequest) (DeliverResult
 		FileName:     req.FileName,
 		// ⚠️ TargetDisplayPath 必须传对：它会被 offlinedownload 一路带到交棒上传
 		// 任务上，最终靠它匹配「自动联动」的 offline_download 触发器。传错就静默失效。
-		TargetParentID:    parentID,
-		TargetDisplayPath: displayPath,
+		TargetParentID:    folder.TargetID,
+		TargetDisplayPath: folder.Path,
 	})
 	if err != nil {
-		return DeliverResult{}, err
+		// 离线任务没建起来，专属子目录里不可能有东西 —— 把刚建的目录 ID 带回去，
+		// 由 pushRecord 统一删。
+		return DeliverResult{FolderID: folder.CreatedID}, err
 	}
 	if len(tasks) == 0 {
-		return DeliverResult{}, domain.Errorf(domain.CodeDriverError, "离线下载任务未创建")
+		return DeliverResult{FolderID: folder.CreatedID},
+			domain.Errorf(domain.CodeDriverError, "离线下载任务未创建")
 	}
 	// ⚠️ AddURLs 在网盘明确拒绝时**不返回 error**，只把任务标成 failed。
 	// 不在这里拦一道的话，被网盘拒绝的推送会被记成「已推送」，用户看到的是一条
@@ -83,12 +86,21 @@ func (p *Pusher) Deliver(ctx context.Context, req DeliverRequest) (DeliverResult
 		if msg == "" {
 			msg = "网盘拒绝了这次离线下载"
 		}
-		return DeliverResult{}, domain.Errorf(domain.CodeDriverError, "%s", msg)
+		return DeliverResult{FolderID: folder.CreatedID},
+			domain.Errorf(domain.CodeDriverError, "%s", msg)
 	}
 
 	// 降级文案由 resolveProvider 负责（它才知道是不是降级），这里不重复生成 ——
 	// 两处各写一份的话，改一处就会漏一处。
-	return DeliverResult{TaskID: tasks[0].TaskID, ProviderKind: req.ProviderKind}, nil
+	return DeliverResult{
+		TaskID:       tasks[0].TaskID,
+		ProviderKind: req.ProviderKind,
+		// FolderID 只填「本次真新建」的那个（撞名复用时为空，失败不许删）；
+		// DeliveredFolderID 填投递目标 —— 离线通道建目录撞名时会复用已有目录，
+		// 那时两者不同：东西落在复用来的目录里，但那个目录不能删。
+		FolderID:          folder.CreatedID,
+		DeliveredFolderID: folder.TargetID,
+	}, nil
 }
 
 // pushRecord 把一条命中记录推送到它订阅的目标位置。
@@ -120,17 +132,37 @@ func (s *Service) pushRecord(ctx context.Context, sub *domain.TGSubscription, re
 
 	fileName := buildDeliverFileName(sub, rec)
 
-	result, err := deliverer.Deliver(ctx, DeliverRequest{
+	// 专属子目录在投递器内部建，这里拿不到它的 ID —— 投递器把结果填回
+	// DeliverResult.FolderID / DeliveredFolderID 带出来。
+	req := DeliverRequest{
 		AccountID:         accountID,
 		ProviderKind:      providerKind,
 		Resource:          resourceFromRecord(rec),
 		TargetParentID:    parentID,
 		TargetDisplayPath: displayPath,
 		FileName:          fileName,
-	})
-	if err != nil {
-		return err
 	}
+	result, err := deliverer.Deliver(ctx, req)
+	if err != nil {
+		// 投递失败。**这一次推送刚建的**专属子目录会留在盘上成为空目录 ——
+		// 正是用户抱怨的「只有一个文件夹，里面什么都没有」。删掉它再报错。
+		//
+		// 只删「本次新建」的那一个：复用来的目录可能是上一次成功推送留下的，
+		// 里面装着东西，删掉就是删用户的资源。
+		//
+		// ⚠️ 收尾统一放在这里、投递器自己不删：两条通道各删一次的话，
+		// 第二个调用会对着已经删掉的目录再跑一遍列目录/查详情，纯属白打网盘。
+		note := s.discardCreatedFolder(ctx, accountID, result.FolderID, buildFolderName(fileName))
+		return withNote(err, note)
+	}
+
+	// ⚠️ 这里**不能**核对「目录里有没有东西」。
+	//
+	// 离线下载是刚提交的：文件还在网盘那边下着，目录当然是空的。在这里判空
+	// 会把每一次正常的磁力推送都判成失败。离线通道的核对在**下载完成事件**里
+	// （events.go 的 onOfflineDownloadCompleted）—— 那时候才谈得上「该有东西了」。
+	//
+	// 只有分享转存这类**同步落盘**的投递才在这里验：它返回成功时文件已经进去了。
 
 	reason := result.Reason
 	if reason == "" {
@@ -146,6 +178,9 @@ func (s *Service) pushRecord(ctx context.Context, sub *domain.TGSubscription, re
 	}
 	rec.OfflineTaskID = result.TaskID
 	rec.AccountID = accountID
+	// ⚠️ 记的是**投递目标**（parentID），不是 result.FolderID。
+	// 离线下载的完成事件回来时 target_parent_id 要与它匹配（automation 的联动规则）；
+	// 退回父目录的情况下投递目标本来就是父目录。
 	rec.TargetParentID = parentID
 	rec.ProviderKind = result.ProviderKind
 	rec.Reason = strings.TrimSpace(strings.Join(nonEmpty(rec.Reason, reason), "；"))
@@ -166,7 +201,17 @@ func (s *Service) pushRecord(ctx context.Context, sub *domain.TGSubscription, re
 	// 分享转存这类投递**不产生离线任务**，因此永远等不到下载完成事件 ——
 	// 订阅进度（剧集入库、通知、自动收尾）必须在这里补跑一遍。
 	// 不补的话表现是「转存成功了但订阅进度不动」，而且完全没有报错。
+	//
+	// ⚠️ 这一步必须放在「已记账」**之后**：上面那些是「投递确实成功了」的记录，
+	// 而下面这次复核只决定「要不要当成功来推进订阅进度」。放到前面的话，
+	// 一次「网盘报成功但目录空」会把已经成功的投递反过来抹成失败，
+	// 而投递本身是真的成功了 —— 用户看到的状态反而与事实不符。
 	if strings.TrimSpace(result.TaskID) == "" {
+		if err := s.verifyDeliveredNotEmpty(ctx, accountID, result.DeliveredFolderID, displayPath); err != nil {
+			s.log.Warn("tg subscribe share save delivered nothing",
+				"record", rec.ID, "sub", sub.ID, "err", err)
+			return nil
+		}
 		s.applyDeliveryProgress(ctx, sub, rec, deliveredInfo{
 			TaskID:     "",
 			AccountID:  accountID,
@@ -346,28 +391,46 @@ func containsAnyFold(list []string, wants []string) bool {
 	return false
 }
 
-// ensureTargetFolder 在目标目录下建「片名 (年份)」子目录，返回它的 ID 与显示路径。
+// targetFolder 是「推送要落到哪儿」的一次解析结果。
+//
+// 三个 ID 字段各自回答不同的问题，**不能合并**（合并就会在某个分支上答错）：
+//   - TargetID：投递目标，网盘接口收的就是它。退回父目录时它等于父目录。
+//   - LocatedID：定位到的**专属子目录**（本次新建的，或撞名复用的）。
+//     退回父目录时为空 —— 拿父目录当专属目录去核对内容，会把用户整个库当目标。
+//   - CreatedID：**本次真的新建出来**的那个。复用来的、退回父目录的都为空 ——
+//     空目录收尾只许删新建的，复用来的那个可能装着上一次推送的资源。
+type targetFolder struct {
+	TargetID  string
+	Path      string
+	LocatedID string
+	CreatedID string
+}
+
+// ensureTargetFolder 在目标目录下建「片名 (年份)」子目录。
 //
 // 建一层专属子目录有两个好处：多版本（洗版前后）不会和别的片混在一起，
 // 目录整理/STRM 也能按作品正确分组。
 //
-// 返回的 created 表示「这个专属子目录确实是本次新建/已存在的那个」，
-// 而不是退回到父目录的结果 —— 分享转存要靠它判断能不能拿返回的路径去核对目录。
-//
 // 两种投递方式共用它（离线下载与分享转存），所以它挂在 Service 上：
 // Pusher 与 ShareSaveDeliverer 各持一份 singleflight 组的话，
 // 两条通道同时推同一部片就会建出两个同名目录。
-func (s *Service) ensureTargetFolder(ctx context.Context, req DeliverRequest) (string, string, bool, error) {
+func (s *Service) ensureTargetFolder(ctx context.Context, req DeliverRequest) (targetFolder, error) {
 	folderName := buildFolderName(req.FileName)
 	childPath := joinDisplayPath(req.TargetDisplayPath, folderName)
+	// 退回父目录时的结果：没有专属目录，因此两个 ID 都为空。
+	fallback := targetFolder{TargetID: req.TargetParentID, Path: childPath}
 
 	if s.folders == nil || folderName == "" {
-		return req.TargetParentID, childPath, false, nil
+		return fallback, nil
 	}
 
-	// singleflight 把同一 key 的并发请求合并成一次。
+	// singleflight 把同一 key 的并发请求合并成一次。它的返回值里**无法**区分
+	// 「我建的」和「别人建了我搭顺风车」—— 所以用 mine 自己盯着：
+	// 空目录收尾只许删本次新建的那一个，复用来的可能装着东西。
 	key := fmt.Sprintf("%d:%s:%s", req.AccountID, req.TargetParentID, folderName)
+	var mine bool
 	item, err := s.folderGroup.DoCtx(ctx, key, func(callCtx context.Context) (*domain.FileItem, error) {
+		mine = true
 		return s.folders.CreateFolder(callCtx, req.AccountID, req.TargetParentID, folderName)
 	})
 	if err != nil {
@@ -380,17 +443,73 @@ func (s *Service) ensureTargetFolder(ctx context.Context, req DeliverRequest) (s
 		if found := s.findChildFolder(ctx, req.AccountID, req.TargetParentID, folderName); found != "" {
 			s.log.Info("tg subscribe reuse existing target folder",
 				"account", req.AccountID, "parent", req.TargetParentID, "folder", folderName)
-			return found, childPath, true, nil
+			// 复用来的不算新建：它可能装着上一次推送的资源，失败时不许删。
+			return targetFolder{TargetID: found, Path: childPath, LocatedID: found}, nil
 		}
 		// 确实找不到（建目录失败另有原因）：退回到父目录继续，总比把资源丢掉强。
 		s.log.Warn("tg subscribe create target folder failed, falling back to parent",
 			"account", req.AccountID, "parent", req.TargetParentID, "folder", folderName, "err", err)
-		return req.TargetParentID, childPath, false, nil
+		return fallback, nil
 	}
 	if item == nil || item.ID == "" {
-		return req.TargetParentID, childPath, false, nil
+		return fallback, nil
 	}
-	return item.ID, childPath, true, nil
+	// 并发合并：目录是**另一次调用**建的，这次只是搭了个顺风车，不能算本次新建。
+	created := ""
+	if mine {
+		created = item.ID
+	}
+	return targetFolder{TargetID: item.ID, Path: childPath, LocatedID: item.ID, CreatedID: created}, nil
+}
+
+// withNote 把一句补充说明接在错误后面。
+//
+// 保留原来的错误链（用 %w），不然 isPermanentDeliveryError 拿不到那个 AppError，
+// 一条确定性失败会被退回去重试 5 次。
+func withNote(err error, note string) error {
+	if err == nil || strings.TrimSpace(note) == "" {
+		return err
+	}
+	return fmt.Errorf("%w；%s", err, note)
+}
+
+// verifyDeliveredNotEmpty 复核「投递报告成功之后，目录里到底有没有东西」。
+//
+// 这是用户「经常下载空的资源，只有一个文件夹，里面什么都没有」的直接对策。
+// 不验的话，一次「网盘收下了、实际什么都没落」的投递会被记成 pushed、
+// 推进订阅进度、还发一条「已入库」通知 —— 用户要等自己翻网盘才发现。
+//
+// 判据（用户已定）：**目录里没有文件就算空**。
+//
+// 两条入口共用它（离线下载完成事件 / 分享转存这种无 TaskID 的投递），
+// 分开写迟早分家 —— 一边改了、另一边还是老判据，正是要避免的。
+//
+// ⚠️ 拿不到结论时一律放行（返回 nil）：列目录失败可能是账号在退避、网络抖动。
+// 把这种情况判成「空」，会把一次本来成功的投递钉成失败，比漏判糟得多。
+func (s *Service) verifyDeliveredNotEmpty(
+	ctx context.Context,
+	accountID int64,
+	folderID, displayPath string,
+) error {
+	folderID = strings.TrimSpace(folderID)
+	if s == nil || s.folders == nil || folderID == "" || accountID <= 0 {
+		return nil
+	}
+	items, err := s.folders.List(ctx, accountID, folderID, true)
+	if err != nil {
+		s.log.Warn("tg subscribe verify delivered folder failed",
+			"account", accountID, "folder", folderID, "err", err)
+		return nil
+	}
+	if len(items) > 0 {
+		return nil
+	}
+	s.log.Warn("tg subscribe delivered folder is empty",
+		"account", accountID, "folder", folderID, "path", displayPath)
+	// 判成确定性失败：目录是空的，重试这次投递也不会让文件自己长出来 ——
+	// 重试只会白调上游。
+	return domain.Errorf(domain.CodeValidation,
+		"网盘报告投递成功，但目标目录里没有文件（%s）", strings.TrimSpace(displayPath))
 }
 
 // findChildFolder 在父目录里按名字找一个子目录，找不到返回空串。
@@ -417,6 +536,78 @@ func (s *Service) findChildFolder(ctx context.Context, accountID int64, parentID
 		}
 	}
 	return ""
+}
+
+// discardCreatedFolder 删掉一个「刚建出来、里面确定什么都没有」的专属子目录，
+// 返回一句给用户看的说明（没删就返回空串）。
+//
+// 只在投递**确定失败**时调用（网盘拒了链接、离线任务没建起来、分享转存报错）。
+// 三个前提同时成立才真删：
+//  1. folderID 非空（且只传「本次新建」的那个 ID，复用来的不传）；
+//  2. List 用 forceRefresh 复核后**确实为空** —— 不赌，网盘说空才空；
+//  3. Info 复核目录名与 expectName 一致 —— 防的是「同名复用」把别人的目录删了。
+//
+// 三条缺一条就只记日志：删网盘目录不可逆，宁可留个空目录让用户自己收拾。
+//
+// ⚠️ 绝不能拿投递目标当候选：退回父目录时那正是用户的库根，
+// 一次误删就是灾难。这也是 ensureTargetFolder 要把「新建的 ID」单独返回的原因。
+// ⚠️ expectName 必须由调用方按「本该建出来的目录名」给出，不能从 TargetDisplayPath
+// 推导 —— 那是父目录的路径，基名是父目录名，拿它比对必然不符（踩过）。
+func (s *Service) discardCreatedFolder(
+	ctx context.Context,
+	accountID int64,
+	folderID, expectName string,
+) string {
+	folderID = strings.TrimSpace(folderID)
+	if folderID == "" || s == nil || s.folders == nil {
+		return ""
+	}
+
+	want := strings.TrimSpace(expectName)
+	if want == "" {
+		s.log.Warn("tg subscribe skip folder cleanup: 目录名不可用",
+			"account", accountID, "folder", folderID)
+		return ""
+	}
+
+	items, err := s.folders.List(ctx, accountID, folderID, true)
+	if err != nil {
+		s.log.Warn("tg subscribe skip folder cleanup: 列目录失败",
+			"account", accountID, "folder", folderID, "err", err)
+		return ""
+	}
+	if len(items) != 0 {
+		s.log.Info("tg subscribe folder cleanup skipped: 目录非空，保留",
+			"account", accountID, "folder", folderID, "count", len(items))
+		return ""
+	}
+
+	if !s.folderMatchesName(ctx, accountID, folderID, want) {
+		s.log.Warn("tg subscribe skip folder cleanup: 目录名与预期不符，可能被复用",
+			"account", accountID, "folder", folderID, "want", want)
+		return ""
+	}
+
+	if err := s.folders.DeleteFiles(ctx, accountID, []string{folderID}, ""); err != nil {
+		s.log.Warn("tg subscribe cleanup empty folder failed",
+			"account", accountID, "folder", folderID, "err", err)
+		return ""
+	}
+	s.log.Info("tg subscribe cleaned empty folder after failed push",
+		"account", accountID, "folder", folderID, "name", want)
+	return "已清掉这次推送建出来的空目录「" + want + "」"
+}
+
+// folderMatchesName 用文件详情复核一个目录 ID 的名字。
+func (s *Service) folderMatchesName(ctx context.Context, accountID int64, folderID, want string) bool {
+	if s.folders == nil {
+		return false
+	}
+	item, err := s.folders.Info(ctx, accountID, folderID)
+	if err != nil || item == nil {
+		return false
+	}
+	return item.IsDir && strings.TrimSpace(item.Name) == want
 }
 
 // buildFolderName 生成作品子目录名。

@@ -28,6 +28,17 @@ func (h *Handler) getAnnouncement(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if item == nil {
+		// 拉取失败是**静默降级**的（见 announcement 包注释）：前端只会看到
+		// 「暂无公告」，和「本来就还没发公告」长得一模一样。实测群晖那台
+		// 就是靠翻代码才定位到「是拉不到远端」。这里补一条日志，
+		// 不改前端行为，但下次再出这种事日志里一眼可见。
+		//
+		// 地址一起记下来：绝大多数失败原因都在那个地址本身
+		// （默认的 raw.githubusercontent.com 在国内常常不可达）。
+		h.log.Warn("后台公告拉取失败，本次无内容可展示",
+			"url", h.announcement.URL())
+	}
 	read := false
 	if item != nil {
 		read = isAnnouncementVersionRead(h.settings, item.Version)

@@ -30,7 +30,15 @@ const (
 	// recentRescanPosts 是每轮额外重扫的最新帖子数，用于兜住「先发占位、
 	// 几分钟后补上磁链」这种编辑场景。它们在最新页里，不产生额外请求，
 	// 代价只是几条会被唯一索引挡掉的重复落库。
-	recentRescanPosts = 3
+	//
+	// 从 3 提到 30 的原因：实测频道一轮 10 分钟能发十几条，3 条的回看窗口
+	// 根本盖不住「发帖 → 补链」的时间差 —— 帖子早被游标推过去了。
+	// 参考项目也是往回多看一截，靠去重兜重复。
+	//
+	// 一页是 20 条，所以 30 会跨到第二页 —— 但**只在轮询间隔内帖子超过一页时**
+	// 才会真的多打一次请求（正常情况下 walkPages 第 2 页是断档才翻）。
+	// 对 t.me 的压力可以接受，换来的是不再永久漏掉那一帖。
+	recentRescanPosts = 30
 )
 
 // pageFetcher 抽成函数类型，让翻页逻辑能在测试里用假数据驱动，不碰网络。
@@ -137,7 +145,12 @@ func walkPages(ctx context.Context, fetch pageFetcher, username string, expectCh
 		//
 		// ⚠️ 判据必须是 <= 而不是 == lastMessageID+1：帖子被删除会在 id 序列上
 		// 留下永久空洞，要求严格 +1 会永远翻不到头（每轮都白翻到硬上限）。
-		if oldestOnPage <= lastMessageID {
+		//
+		// ⚠️ 也要算上 RecentRescan：回看窗口里的帖子 id 是 **大于** lastMessageID
+		// 的（它们上一轮就处理过了，这一轮是刻意重扫），只跟 lastMessageID 比
+		// 会永远接不上 —— 表现是每轮都白翻到硬上限，把 t.me 打疼。
+		// 真机验证时差点漏掉这条：回看从 3 提到 30 之后，窗口比一页还宽。
+		if oldestOnPage <= lastMessageID-int64(opt.RecentRescan) {
 			break
 		}
 		if page.PrevBefore == 0 {

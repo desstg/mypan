@@ -30,7 +30,6 @@ func (s *Service) dispatchLoop(ctx context.Context) {
 		}
 	}
 }
-
 func (s *Service) dispatchOnce(ctx context.Context) {
 	now := time.Now()
 
@@ -53,6 +52,12 @@ func (s *Service) dispatchOnce(ctx context.Context) {
 	for _, rec := range rows {
 		s.retryOne(ctx, rec)
 	}
+
+	// 阶段 3：对账「记录说已推送、离线任务其实失败了」。
+	//
+	// 这条防的是 offlinedownload 只在成功时发事件、失败没有出口 ——
+	// 不对账的话记录会永远停在 pushed（见 reconcile.go）。
+	s.reconcileOfflineTasks(ctx)
 }
 
 // flushWindow 处理一个到期的聚合窗口。
@@ -78,7 +83,18 @@ func (s *Service) flushWindow(ctx context.Context, sub *domain.TGSubscription) {
 	}
 
 	// 订阅被删/暂停/标记完成时，窗口内的候选统一作废。
-	if sub.Status != domain.TGSubStatusActive {
+	//
+	// ⚠️ **已完成的订阅是个例外**：自动收尾（maybeComplete）之后又来了新版本
+	// 是常态 —— 电影出了更高码率的、剧集播到新一集。用户的原话是
+	// 「订阅是我表达要这部片的意图」。过去这里把 completed 归进「统一作废」，
+	// 于是**订阅自动完成后就再也不推任何东西**，窗口里的候选被静默标成 ignored。
+	//
+	// 处理成「放行」而不是「自动恢复 active」：恢复 active 会让
+	// maybeComplete 下一轮又把它标完成，来回抖动；而放行只影响这一次窗口，
+	// 语义是「有更好的东西来了，推一条」—— 之后要不要继续追，由订阅状态说了算。
+	//
+	// 一直在追的剧集同理：推送本身不改变订阅状态，它只是把这一条投出去。
+	if sub.Status != domain.TGSubStatusActive && sub.Status != domain.TGSubStatusCompleted {
 		for _, rec := range pending {
 			rec.Status = domain.TGRecordIgnored
 			rec.Reason = "订阅已" + statusLabelText(sub.Status) + "，候选作废"
@@ -131,29 +147,55 @@ func (s *Service) flushWindow(ctx context.Context, sub *domain.TGSubscription) {
 		return
 	}
 
-	if err := s.pushRecord(ctx, sub, winner); err != nil {
-		s.log.Warn("tg subscribe push failed", "sub", sub.ID, "record", winner.ID, "err", err)
-		s.markPushFailure(ctx, winner, err)
-		if winner.Status == domain.TGRecordUnretryable {
-			// 确定性失败：这条候选已经判死，但同窗口里剩下的还有机会
-			// （例如分享失效、另一条磁力仍然可用），所以清窗口收工，
-			// 不要在这里退避重试。
-			_ = s.subs.ClearPending(ctx, sub.ID)
-			return
+	// 逐个试，直到有一条推成功为止。
+	//
+	// **为什么不只试胜出的那条**：窗口里的候选常常是同一部片的不同来源
+	// （网盘搜索一次就带回十几条）。胜出的那条分享链可能已经被取消、
+	// 磁力可能没源 —— 过去一判死就 `ClearPending` + return，
+	// 同窗口剩下的好候选被一起丢掉，用户看到的是「明明有其他链接，却什么都没推」。
+	//
+	// 语义澄清：这里放弃的是「让一次用户可见失败去触发退避重试」——
+	// 被跳过的候选已经按失败记账（failed/unretryable，会进重试队列或被用户手动处理），
+	// 没有丢；而一旦某条推成功，剩下的才标 superseded。
+	//
+	// 顺序就是 RankCandidates 给的画质排序，所以「试下一条」永远是从好到差。
+	for i := range ranked {
+		rec := ranked[i].Record
+		err := s.pushRecord(ctx, sub, rec)
+		if err != nil {
+			s.log.Warn("tg subscribe push failed, trying next candidate",
+				"sub", sub.ID, "record", rec.ID, "err", err)
+			s.markPushFailure(ctx, rec, err)
+			if uerr := s.records.Update(ctx, rec); uerr != nil {
+				s.log.Warn("tg subscribe update failed record", "record", rec.ID, "err", uerr)
+			}
+			continue
 		}
-		_ = s.subs.MarkError(ctx, sub.ID, err.Error())
-		// 其余候选留在 pending，等重试成功后由下一轮窗口处理。
-		_ = s.subs.TouchPending(ctx, sub.ID, time.Now().Add(dispatchInterval))
+
+		// 赢家产出了：同窗口内剩下的候选标 superseded。
+		for j := range ranked {
+			if j == i {
+				continue
+			}
+			other := ranked[j].Record
+			// 上面那些已经按失败记过账了（都在 i 之前），别再覆盖成 superseded ——
+			// 否则用户看不到「这条为什么没推成」。
+			if other.Status == domain.TGRecordFailed || other.Status == domain.TGRecordUnretryable {
+				continue
+			}
+			other.Status = domain.TGRecordSuperseded
+			other.Reason = DescribeSupersede(rec, other)
+			_ = s.records.Update(ctx, other)
+		}
+		_ = s.subs.ClearPending(ctx, sub.ID)
 		return
 	}
 
-	// 胜出者已推送，同窗口内剩下的候选标 superseded。
-	for _, item := range ranked[1:] {
-		rec := item.Record
-		rec.Status = domain.TGRecordSuperseded
-		rec.Reason = DescribeSupersede(winner, rec)
-		_ = s.records.Update(ctx, rec)
-	}
+	// 全窗口都推失败：记错误、留窗口等下一轮（重试队列此刻已经挂上了这些记录，
+	// 下一轮 dispatchOnce 的阶段 2 会按退避把它们捞回来）。
+	s.log.Warn("tg subscribe all candidates failed to push",
+		"sub", sub.ID, "title", sub.Title, "count", len(ranked))
+	_ = s.subs.MarkError(ctx, sub.ID, "本窗口的候选都没能推出去，稍后重试")
 	_ = s.subs.ClearPending(ctx, sub.ID)
 }
 

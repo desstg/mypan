@@ -204,12 +204,29 @@ func TestMissingYearStillRecalled(t *testing.T) {
 	}
 }
 
-func TestRecallSkipsCompletedSubscriptions(t *testing.T) {
+// 已完成的订阅**仍然参与匹配** —— 这是刻意的反转。
+//
+// 自动收尾（maybeComplete）在电影推成功后立刻把订阅标完成，而「之后又出了
+// 更高码率的版本」是常态。过去这里排除 completed，等于「推一次就再也不看这部片」，
+// 与用户的原话「订阅是我表达要这部片的意图」正相反。
+//
+// 挡重复靠画质基线与「这一集有没有入库」，不靠状态。
+func TestRecallKeepsCompletedSubscriptions(t *testing.T) {
 	sub := movieSub(1, "沙丘", "Dune", 2021)
 	sub.Status = domain.TGSubStatusCompleted
 	rel := ParseReleaseName("Dune.2021.1080p.WEB-DL.H.264")
+	if recalled := RecallCandidates(rel, []*domain.TGSubscription{sub}); len(recalled) != 1 {
+		t.Fatalf("已完成订阅仍然该参与匹配，实际 %v", subIDs(recalled))
+	}
+}
+
+// **暂停的才是不参与** —— 那是用户主动说的「别动这部片」。
+func TestRecallSkipsPausedSubscriptions(t *testing.T) {
+	sub := movieSub(1, "沙丘", "Dune", 2021)
+	sub.Status = domain.TGSubStatusPaused
+	rel := ParseReleaseName("Dune.2021.1080p.WEB-DL.H.264")
 	if recalled := RecallCandidates(rel, []*domain.TGSubscription{sub}); len(recalled) != 0 {
-		t.Fatalf("已完成订阅不该参与匹配，实际 %v", subIDs(recalled))
+		t.Fatalf("暂停的订阅不该参与匹配，实际 %v", subIDs(recalled))
 	}
 }
 

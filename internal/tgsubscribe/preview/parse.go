@@ -27,6 +27,15 @@ const (
 	clsInlineBtn   = "tgme_widget_message_inline_button"
 	clsChannelName = "tgme_channel_info_header_title" // 页面右上角的频道标题
 	clsChannelUser = "tgme_channel_info_header_username"
+	// clsNoMessages 是「打开成功但一条帖子都没有」时 Telegram 在页面正中渲染的
+	// 提示块（实测 2026-10-01：`<div class="tme_no_messages_found">No posts found</div>`）。
+	//
+	// 它把两种「零帖子」分开了：
+	//   - 带它 → 频道确实没有可展示的内容（搜索无结果、空频道、翻到历史尽头）；
+	//   - 不带它 → 页面结构变了，解析不出帖子。
+	// 不分开的话，搜一个频道里没有的片名会被报成「Telegram 改了页面」，
+	// 用户被告知去升级 LitePan —— 一次搜索能刷出一屏假警报。
+	clsNoMessages = "tme_no_messages_found"
 )
 
 // dataView 是 data-view 属性 base64 解码后的内容。
@@ -57,9 +66,19 @@ func parsePage(body []byte, username string) (*Page, error) {
 	}, &wrappers)
 
 	if len(wrappers) == 0 {
-		// 一条帖子都没有：可能是频道真的没内容，也可能是 Telegram 改了结构。
-		// 单页无法区分，所以这里返回 ErrStructureChanged，由上层的全局判据
-		// （一轮里所有频道都 0 帖）来决定报哪一边。
+		// 一条帖子都没有。两种原因必须分开，否则「搜不到」会被误报成
+		// 「Telegram 改了页面」（见 clsNoMessages 的注释）。
+		if hasNoMessagesMarker(doc) {
+			// 频道确认「No posts found」—— 这是正常结果，不是错误。
+			// 返回空页让调用方自己决定：追新循环会当成「翻到头了」直接收工，
+			// 频道内搜索会当成「这个关键词没有命中」。
+			//
+			// ChannelID 保持 0：这个页面上没有 data-view 可取（它是帖子才带的），
+			// 而 walkPages 对 0 是放行的，不会误报「地址指向了另一个频道」。
+			return page, nil
+		}
+		// 没有那个标记，也没有任何帖子 —— 分不清是空频道还是结构变了。
+		// 保守按结构变更报，由上层的全局判据（一轮里所有频道都 0 帖）决定最终口径。
 		return nil, ErrStructureChanged
 	}
 
@@ -236,6 +255,15 @@ func parseInlineKeyboard(w *html.Node) (*telegram.InlineKeyboardMarkup, int, int
 		return nil, urlCount, bareCount
 	}
 	return markup, urlCount, bareCount
+}
+
+// hasNoMessagesMarker 报告页面上有没有 Telegram 的「No posts found」提示块。
+//
+// 它是「零帖子」两种成因的唯一区分依据，所以单独一个函数、单独测。
+func hasNoMessagesMarker(doc *html.Node) bool {
+	return findFirst(doc, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && hasClass(n, clsNoMessages)
+	}) != nil
 }
 
 // parseChannelTitle 取页面右上角的频道标题，失败返回空串。

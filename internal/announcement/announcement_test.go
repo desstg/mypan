@@ -2,6 +2,7 @@ package announcement
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -337,6 +338,138 @@ func TestDynamicURLChangeClearsFailureCooldown(t *testing.T) {
 	item, err := s.Fetch(ctx)
 	if err != nil || item == nil || item.Title != "新地址通了" {
 		t.Fatalf("换地址应重置失败冷却: item=%v err=%v", item, err)
+	}
+}
+
+// proxyRecorder 是一个最小可用的 HTTP 代理：记下被代理过的请求，
+// 自己去取目标内容再回给客户端。
+//
+// 用真代理而不是桩：这里要验的正是「请求到底走没走代理」，用桩验证不了这件事。
+//
+// 每条路径第一次请求成功、之后才开始失败，好让「同一进程内先走通一次、
+// 再让它坏掉」这种用例写得出来。
+type proxyRecorder struct {
+	server *httptest.Server
+	hits   atomic.Int32
+	broken atomic.Bool
+}
+
+func newProxyRecorder(t *testing.T) *proxyRecorder {
+	t.Helper()
+	p := &proxyRecorder{}
+	p.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.hits.Add(1)
+		if p.broken.Load() {
+			http.Error(w, "proxy exploded", http.StatusBadGateway)
+			return
+		}
+		resp, err := http.DefaultTransport.RoundTrip(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	t.Cleanup(p.server.Close)
+	return p
+}
+
+func serveAnnouncement(t *testing.T, title string) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"notice_version":"` + title + `","dialog_title":"` + title + `"}`))
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// 填了代理就必须走代理 —— 不看任何开关，这是「有代理就走代理」那条规则的正面用例。
+func TestConfiguredProxyIsUsed(t *testing.T) {
+	target := serveAnnouncement(t, "走代理")
+	proxy := newProxyRecorder(t)
+
+	s := NewDynamicWithProxy(
+		func() string { return target.URL },
+		func() string { return proxy.server.URL },
+	)
+	item, err := s.Fetch(context.Background())
+	if err != nil || item == nil || item.Title != "走代理" {
+		t.Fatalf("经代理拉取失败: item=%v err=%v", item, err)
+	}
+	if proxy.hits.Load() != 1 {
+		t.Fatalf("代理未被使用，hits=%d want 1", proxy.hits.Load())
+	}
+}
+
+// 代理在**运行中**填上（或改掉）必须立刻生效，不用重启。
+//
+// 这条是「热更新」的正面用例：设置页改完代理，下一次拉取就该走上它。
+func TestProxyChangeTakesEffectImmediately(t *testing.T) {
+	target := serveAnnouncement(t, "换代理")
+	proxy := newProxyRecorder(t)
+
+	proxyURL := ""
+	s := NewDynamicWithProxy(
+		func() string { return target.URL },
+		func() string { return proxyURL },
+	)
+	ctx := context.Background()
+
+	// 还没有代理：直连。
+	if item, err := s.Fetch(ctx); err != nil || item == nil {
+		t.Fatalf("直连拉取失败: item=%v err=%v", item, err)
+	}
+	if proxy.hits.Load() != 0 {
+		t.Fatalf("没配代理就不该经过它，hits=%d", proxy.hits.Load())
+	}
+
+	// 填上代理。地址没变，所以要绕过缓存才能看出代理有没有接上。
+	proxyURL = proxy.server.URL
+	s.cachedAt = time.Time{}
+	if item, err := s.Fetch(ctx); err != nil || item == nil {
+		t.Fatalf("换代理后拉取失败: item=%v err=%v", item, err)
+	}
+	if proxy.hits.Load() == 0 {
+		t.Fatal("换代理后应当经代理，但代理一次都没被访问")
+	}
+}
+
+// 代理不可用时必须回落直连。
+//
+// 这是「有代理就走代理」那条规则的安全网：用户填的代理常常只对某些站有效
+// （按域名分流的代理），没有回落就会出现「公告莫名其妙不弹了」，
+// 而且失败是静默的，比原来更难查。
+func TestProxyFailureFallsBackToDirect(t *testing.T) {
+	target := serveAnnouncement(t, "回落直连")
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "proxy exploded", http.StatusBadGateway)
+	}))
+	defer dead.Close()
+
+	s := NewDynamicWithProxy(
+		func() string { return target.URL },
+		func() string { return dead.URL },
+	)
+	// 先让它经代理失败一次 —— 但失败会被记进冷却，所以直接构造一个
+	// 「代理是坏的、目标本身可达」的场景，看它能不能自己爬回来。
+	if item, err := s.Fetch(context.Background()); err != nil || item == nil {
+		t.Fatalf("代理坏掉时应回落直连: item=%v err=%v", item, err)
+	}
+}
+
+// 地址写错的代理不能让服务变成「必然失败」，也不该把直连一起带走。
+func TestMalformedProxyFallsBackToDirect(t *testing.T) {
+	target := serveAnnouncement(t, "坏地址")
+	s := NewDynamicWithProxy(
+		func() string { return target.URL },
+		func() string { return "://不是个地址" },
+	)
+	item, err := s.Fetch(context.Background())
+	if err != nil || item == nil || item.Title != "坏地址" {
+		t.Fatalf("代理地址非法时应当直连: item=%v err=%v", item, err)
 	}
 }
 
