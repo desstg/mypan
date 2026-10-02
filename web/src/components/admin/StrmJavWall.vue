@@ -134,6 +134,48 @@ function subtitle(item: JavWallItem): string {
   return bits.join(" · ");
 }
 
+// ————————————————————— 取图窗口 —————————————————————
+//
+// 一页最多 200 张，一屏只看得见 30~40 张。**只给看得见的那些发图片请求**：
+// `MediaImage` 的原生 `loading="lazy"` 在这里不管用 —— 它的触发距离按视口高度的
+// 倍数算，长列表里首屏渲染就会把下面好几屏的图一起排队（实测 50 张全发、2 MB 多、
+// 最后一张要几秒）。所以关掉原生懒加载，改由这里按滚动位置发牌。
+//
+// 窗口取「首屏 + 前后各一屏」，滚动时节流重算：往前留一屏是为了**往回滚**时图已经在
+// 手里，不至于滚动条停下来才开始加载。
+const imageBudget = ref(0);
+const rowHeightPx = 300; // 卡片 + 文字的高度上限，只用于估一屏多少张
+
+/** 一屏大概几张：按视口高度估行数，再乘当前列数（拿第一行的实际列数）。 */
+function perScreen(): number {
+  const cols = Math.max(1, Math.round((window.innerWidth - 48) / 154));
+  const rows = Math.max(1, Math.ceil(window.innerHeight / rowHeightPx));
+  return cols * rows;
+}
+
+function refreshImageBudget() {
+  // 首屏 + 前后各一屏（3 屏），上限就是当前这一页的张数。
+  imageBudget.value = Math.min(items.value.length, perScreen() * 3);
+}
+
+let onScrollTimer: number | undefined;
+function scheduleBudgetRefresh() {
+  window.clearTimeout(onScrollTimer);
+  onScrollTimer = window.setTimeout(refreshImageBudget, 120);
+}
+
+/**
+ * 这个位置该显示哪张图 —— 轮不到就返回空串（组件会渲染占位/骨架）。
+ *
+ * 判据是**列表下标**而不是元素的真实可视状态：网格是等高的，下标与屏幕位置
+ * 一一对应，算一次比给每张卡挂 IntersectionObserver 便宜得多，也不会因为
+ * 卡片进出视口而反复卸载/重载图片（那种抖动比多下几张图更难受）。
+ */
+function imageSrc(item: JavWallItem, index: number): string {
+  if (index >= imageBudget.value) return "";
+  return view.value === "poster" ? (item.poster_url ?? "") : (item.thumb_url ?? "");
+}
+
 watch(() => props.taskId, () => {
   category.value = "";
   void load();
@@ -146,8 +188,21 @@ watch(() => props.keyword, () => {
   keywordTimer = window.setTimeout(() => void load(), 300);
 });
 
-onMounted(() => void load());
-onUnmounted(() => window.clearTimeout(keywordTimer));
+// 列表换了（首屏、翻档、搜索）→ 重新发一轮图；滚动/改窗口大小 → 节流补发。
+watch(items, refreshImageBudget);
+
+onMounted(() => {
+  refreshImageBudget();
+  window.addEventListener("scroll", scheduleBudgetRefresh, { passive: true });
+  window.addEventListener("resize", scheduleBudgetRefresh);
+  void load();
+});
+onUnmounted(() => {
+  window.clearTimeout(keywordTimer);
+  window.clearTimeout(onScrollTimer);
+  window.removeEventListener("scroll", scheduleBudgetRefresh);
+  window.removeEventListener("resize", scheduleBudgetRefresh);
+});
 
 defineExpose({ refreshMeta, load });
 </script>
@@ -220,13 +275,17 @@ defineExpose({ refreshMeta, load });
     </div>
 
     <div v-else class="jav-wall__grid" :class="`jav-wall__grid--${view}`">
-      <article v-for="item in items" :key="item.id" class="jav-card jav-card--wall">
+      <article v-for="(item, index) in items" :key="item.id" class="jav-card jav-card--wall">
         <div class="jav-card__cover" :class="{ 'jav-card__cover--poster': view === 'poster' }">
-          <!-- 两个视图各自的 URL；都没有或加载失败 → 统一占位图。 -->
+          <!-- 两个视图各自的 URL；都没有或加载失败 → 统一占位图。
+               这里给 lazy=false 并自己按视口决定「发不发」——见 imgWindow。 -->
           <MediaImage
-            :src="view === 'poster' ? (item.poster_url ?? '') : (item.thumb_url ?? '')"
+            :src="imageSrc(item, index)"
             :alt="item.number"
+            :lazy="false"
           />
+          <!-- 还没轮到取图时占住位置，避免取到图之前卡片高度塌下去 -->
+          <div v-if="!imageSrc(item, index)" class="jav-card__skeleton" />
 
           <div class="jav-card__hover">
             <AppButton type="button" size="sm" variant="secondary" @click="openEditor(item)">编辑</AppButton>
@@ -303,4 +362,7 @@ defineExpose({ refreshMeta, load });
 .jav-card:focus-within .jav-card__hover { opacity: 1; }
 @media (hover: none) { .jav-card__hover { opacity: 1; } }
 .jav-wall__busy { position: absolute; inset: 0; background: rgba(15, 23, 42, 0.25); }
+/* 还没轮到取图的卡片：占住封面那块位置，免得图到之前高度塌下去、
+   滚动位置跟着跳（那比多下几张图更难受）。 */
+.jav-card__skeleton { position: absolute; inset: 0; background: var(--surface-sunken); }
 </style>

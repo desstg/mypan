@@ -15,6 +15,7 @@ import (
 	"litepan/internal/eventbus"
 	"litepan/internal/settings"
 	"litepan/internal/strm"
+	"litepan/internal/thumbcache"
 )
 
 const (
@@ -53,6 +54,10 @@ type Service struct {
 	// 冷启动要读几千份 nfo，命中就免一次读盘 + 解析。**不落盘**。
 	javTitleMu    sync.Mutex
 	javTitleCache map[string]javTitleEntry
+
+	// thumbs 是按需缩放的图片磁盘缓存（见 internal/thumbcache）。
+	// 海报墙上那些图只有一百多像素宽，原图直接发是五六倍的浪费。
+	thumbs *thumbcache.Cache
 }
 
 func New(opts Options) *Service {
@@ -73,6 +78,9 @@ func New(opts Options) *Service {
 		log:           log,
 		javWallCache:  map[int64]*javWallSnapshot{},
 		javTitleCache: map[string]javTitleEntry{},
+		thumbs: thumbcache.New(opts.DataDir, func(msg string, args ...any) {
+			log.Warn(msg, args...)
+		}),
 	}
 }
 
@@ -463,6 +471,17 @@ func (s *Service) ResolvePosterFile(ctx context.Context, strmTaskID int64, rel s
 		return "", domain.Errorf(domain.CodeNotFound, "海报不存在")
 	}
 	return full, nil
+}
+
+// PosterThumb 返回 path 这张图缩到不超过 width 宽的 JPEG 字节（走磁盘缓存）。
+//
+// 出错或缩不动时返回原图字节 —— 调用方总能拿到一张图，失败路径不必分支
+// （见 thumbcache 包注释里那条「失败就回原图」的边界）。
+func (s *Service) PosterThumb(path string, width int) ([]byte, string) {
+	if s == nil || s.thumbs == nil || strings.TrimSpace(path) == "" || width <= 0 {
+		return nil, ""
+	}
+	return s.thumbs.Get(path, width)
 }
 
 func (s *Service) run(ctx context.Context, req RunRequest) error {

@@ -100,7 +100,20 @@ function emptyMeta(): JavMovieMeta {
   };
 }
 
-const thumbSrc = computed(() => props.item?.thumb_url ?? "");
+/**
+ * 编辑器里那张缩略图。
+ *
+ * **把 URL 上的 `w` 换成 0**：服务端那个参数是「按卡片宽度缩放」用的，而这里要的是
+ * **原始像素** —— 裁剪框是按 thumb_width/thumb_height 算的，喂一张缩过的图会让
+ * 框的比例与实际存出来的结果对不上（用户挪了半天，存出来是另一个位置）。
+ *
+ * 换 w 而不是让后端别加：URL 是后端拼的（`javWallImageURL`），两处各拼一份迟早走岔；
+ * 这里只是把那个参数改成「不缩放」，语义仍然由后端定义。
+ */
+const thumbSrc = computed(() => {
+  const url = props.item?.thumb_url ?? "";
+  return url.replace(/([?&])w=\d+/, "$10");
+});
 const canSavePoster = computed(() => (detail.value?.poster.has_thumb ?? false));
 // 屏幕上的框 = 原始像素 × 显示缩放
 const displayRect = computed(() => {

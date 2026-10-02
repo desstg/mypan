@@ -40,8 +40,21 @@ const props = withDefaults(
      * `person` 是「无头像」（演员 / 分享者）。
      */
     variant?: "film" | "person";
+    /**
+     * 是否用原生 `loading="lazy"`。
+     *
+     * **海报墙那类一屏几十张图的地方要关掉**：原生懒加载的触发距离是按
+     * 视口高度的倍数算的，一屏 30~40 张的长列表里，浏览器会在首屏渲染时就把
+     * 下面好几屏的图一并排队下载 —— 实测一页 50 张全部发出去、2 MB 多。
+     * 关掉之后由调用方自己按视口取图（见 StrmJavWall 的图窗格），
+     * 发出去的张数与实际看得到的一致。
+     *
+     * 默认仍为 true：单张封面的地方（详情抽屉、订阅卡）不需要这层控制，
+     * 原生懒加载足够，而且少一层 IntersectionObserver。
+     */
+    lazy?: boolean;
   }>(),
-  { src: "", alt: "", variant: "film" },
+  { src: "", alt: "", variant: "film", lazy: true },
 );
 
 defineOptions({ inheritAttrs: false });
@@ -64,7 +77,7 @@ const showImg = computed(() => Boolean((props.src ?? "").trim()) && !failed.valu
     v-bind="$attrs"
     :src="props.src ?? ''"
     :alt="props.alt"
-    loading="lazy"
+    :loading="props.lazy ? 'lazy' : 'eager'"
     decoding="async"
     @error="failed = true"
   />

@@ -345,12 +345,12 @@ func javWallRowsForDir(taskID int64, absDir, relDir, cat string, files map[strin
 		if name, ok := pickJavArtifact(files, names.Poster, "-poster.jpg"); ok {
 			item.HasPoster = true
 			item.PosterRev = javWallRev(files[name])
-			item.PosterURL = javWallImageURL(taskID, relDir, name, item.PosterRev)
+			item.PosterURL = javWallImageURL(taskID, relDir, name, item.PosterRev, "poster")
 		}
 		if name, ok := pickJavArtifact(files, names.Thumb, "-thumb.jpg"); ok {
 			item.HasThumb = true
 			item.ThumbRev = javWallRev(files[name])
-			item.ThumbURL = javWallImageURL(taskID, relDir, name, item.ThumbRev)
+			item.ThumbURL = javWallImageURL(taskID, relDir, name, item.ThumbRev, "thumb")
 		}
 		if name, ok := pickJavArtifact(files, names.Fanart, "-fanart.jpg"); ok {
 			item.HasFanart = true

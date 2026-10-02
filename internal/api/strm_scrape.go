@@ -243,6 +243,21 @@ func (h *Handler) getStrmScrapePoster(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// w 是**卡片实际显示宽度**（CSS 像素）。带上它就走按需缩放 + 磁盘缓存：
+	// 海报墙一页 50 张、每张原图 376×538 而卡片只有 140~260 px 宽，原样发出去
+	// 实测首屏 30 个请求 2.1 MB / 2.7~4.5 秒。缩到显示尺寸后体积掉七成多。
+	//
+	// 不带 w（老的 URL、或调用方不知道尺寸）时按原图发 —— 行为与以前完全一致，
+	// 所以这个参数是纯增量，不会让任何既有调用方变慢或变样。
+	width, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("w")))
+	if width > 0 {
+		if body, ctype := h.strmScrape.PosterThumb(path, width); len(body) > 0 {
+			w.Header().Set("Content-Type", ctype)
+			w.Header().Set("Cache-Control", "private, max-age=3600")
+			_, _ = w.Write(body)
+			return
+		}
+	}
 	// 一次性读出来再写，**不用 os.Open + io.Copy**：后者在整个响应期间（浏览器
 	// 慢一点就是几秒）一直占着文件句柄，而 Windows 上「覆盖一个正被打开的文件」
 	// 会失败 —— 番号海报墙那边保存海报走的正是覆盖写。图只有几十 KB，全读进来毫无代价。

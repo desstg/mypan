@@ -157,12 +157,47 @@ func joinRel(dir, name string) string {
 // **末尾那个 `&v=<mtime>` 是必须的**：那个响应带 `Cache-Control: private, max-age=3600`，
 // 而保存裁剪**只改内容、不改路径** —— 不换 URL 的话浏览器会一直端出缓存里那张旧图，
 // 用户看到的是「提示保存成功了、图还是旧的」，像极了没生效。实测撞见过。
-func javWallImageURL(taskID int64, relDir, fileName, rev string) string {
-	url := posterURLFromRel(taskID, joinRel(relDir, fileName))
-	if rev == "" {
-		return url
+//
+// **`&w=<宽度>` 是给服务端按需缩放的**（见 internal/thumbcache）。海报墙上一张卡
+// 实际只有 140~260 CSS 像素宽，而磁盘上的 poster/thumb 是 376×538 起步 ——
+// 原样发出去实测首屏 30 个请求 2.1 MB、最后一张要 2.7~4.5 秒才画完。
+//
+// 宽度按**视图**给两档，而不是让前端自己算：那个值随视口变化，会让同一张图在
+// 不同窗口宽度下各存一份缓存；两档固定值既够清晰，缓存条目数也可预测。
+//
+//   - 海报视图（2:3）卡片 141~250 px 宽 → 取 400，2 倍屏够用；
+//   - 缩略图视图（3:2）5 列、宽屏一张约 300 px → 取 600。
+//
+// ⚠️ **两档都刻意大于卡片宽度，不是浪费**：取「刚好等于卡片」的宽度时，
+// 磁盘上那些 197×282 / 275×394 的小图会因为 `w >= 原图宽` 走 thumbcache 里
+// 「不放大」那条路，结果是**一张都没缩**（实测本地样本 100% 命中这条路）。
+// 取得比原图宽之后，服务端看到的是「原图 > 目标宽」→ 真的缩，省下的是
+// 「原图尺寸 vs 卡片尺寸」那部分，与卡片样式变不变无关。
+func javWallImageURL(taskID int64, relDir, fileName, rev string, view string) string {
+	// 没有文件名就没有图。生产路径上调用方已经用 pickJavArtifact 判过一次，
+	// 但这里再兜一道：少了它，joinRel 会把「目录 + 斜杠」拼成一个看着像路径、
+	// 实际指不到任何文件的地址，请求回来是 404 —— 而卡片上表现为一块占位图，
+	// 看不出是拼错了还是真没图。
+	if strings.TrimSpace(fileName) == "" {
+		return ""
 	}
-	return url + "&v=" + rev
+	url := posterURLFromRel(taskID, joinRel(relDir, fileName))
+	if url == "" {
+		return ""
+	}
+	url += "&w=" + strconv.Itoa(javWallImageWidth(view))
+	if rev != "" {
+		url += "&v=" + rev
+	}
+	return url
+}
+
+// javWallImageWidth 是两种视图各自的请求宽度。
+func javWallImageWidth(view string) int {
+	if view == "thumb" {
+		return 600
+	}
+	return 400
 }
 
 // cachedJavTitle 只在缓存命中且文件没变时返回。
