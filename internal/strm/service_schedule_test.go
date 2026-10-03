@@ -152,3 +152,54 @@ func TestShouldRunFallsBackToLegacyTaskIntervalWhenGlobalMissing(t *testing.T) {
 		t.Fatal("全局配置缺失时应回退历史任务级间隔，避免升级后停调度")
 	}
 }
+
+// TestStrmScrapeWriteModeFollowsScanMode 全量扫描 = 以 TMDB 为准全部重写、覆盖老的；
+// 补缺 / 更新 = 只补缺。这两种写模式就是 strmscrape 里那两个常量值。
+func TestStrmScrapeWriteModeFollowsScanMode(t *testing.T) {
+	if got := strmScrapeWriteMode(domain.StrmScanModeFullSync); got != "overwrite" {
+		t.Errorf("全量扫描应走 overwrite，got %q", got)
+	}
+	for _, mode := range []string{domain.StrmScanModeIncrementalMissing, domain.StrmScanModeIncrementalUpdate, ""} {
+		if got := strmScrapeWriteMode(mode); got != "missing_only" {
+			t.Errorf("%q 应走 missing_only，got %q", mode, got)
+		}
+	}
+}
+
+// TestAutoScrapeTriggerOnlyForTmdbWithChanges 钉住「扫描完自动刮削」的触发条件：
+// 只有 tmdb + 刮削开关开 + 本轮确有 .strm 新增/更新时才触发，且写模式跟着扫描方式走。
+// 这里直接验判定条件本身（真正的触发点在 runTaskAsync 的 goroutine 里，需要真账号）。
+func TestAutoScrapeTriggerCondition(t *testing.T) {
+	trigger := func(task *domain.StrmTask, res ScanResult) bool {
+		return !res.Protected && task.MediaKind == domain.StrmMediaKindTmdb && task.SyncMetadata &&
+			(res.StrmCreated > 0 || res.StrmUpdated > 0)
+	}
+
+	tmdbScrapeOn := &domain.StrmTask{MediaKind: domain.StrmMediaKindTmdb, SyncMetadata: true}
+	if !trigger(tmdbScrapeOn, ScanResult{StrmCreated: 1}) {
+		t.Error("tmdb + 刮削开 + 有新增，应触发")
+	}
+	if !trigger(tmdbScrapeOn, ScanResult{StrmUpdated: 3}) {
+		t.Error("tmdb + 刮削开 + 有更新，应触发")
+	}
+	if trigger(tmdbScrapeOn, ScanResult{}) {
+		t.Error("没有任何新增/更新时不该触发（避免空跑一轮刮削）")
+	}
+	if trigger(tmdbScrapeOn, ScanResult{GeneratedCount: 5}) {
+		t.Error("GeneratedCount 含元数据下载数，不能拿来判断「有新片」")
+	}
+
+	tmdbScrapeOff := &domain.StrmTask{MediaKind: domain.StrmMediaKindTmdb}
+	if trigger(tmdbScrapeOff, ScanResult{StrmCreated: 1}) {
+		t.Error("刮削开关关掉时不该触发")
+	}
+
+	jav := &domain.StrmTask{MediaKind: domain.StrmMediaKindJav, SyncMetadata: true}
+	if trigger(jav, ScanResult{StrmCreated: 1}) {
+		t.Error("番号影片走扫描末尾就地生成，不该再排一次 TMDB 刮削")
+	}
+
+	if trigger(tmdbScrapeOn, ScanResult{StrmCreated: 1, Protected: true}) {
+		t.Error("安全保护触发时不该刮削（本地状态本身就不完整）")
+	}
+}

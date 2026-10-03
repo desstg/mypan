@@ -83,6 +83,10 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	strmSvc.SetOrganizeBusyChecker(mediaOrganizeSvc)
 	strmSvc.SetRetentionBusyChecker(retentionSvc)
 	strmSvc.SetStartupGate(startupGate)
+	// 「扫描完自动排一次刮削」：strm 不 import strmscrape（会成环），这里用转调闭包接上。
+	strmSvc.SetScrapeTrigger(strm.ScrapeTriggerFunc(func(ctx context.Context, id int64, mode string) error {
+		return strmScrapeSvc.RunAsync(ctx, strmscrape.RunRequest{StrmTaskID: id, WriteMode: mode})
+	}))
 	retentionSvc.SetStrmBusyChecker(strmSvc)
 	retentionSvc.SetOrganizeBusyChecker(mediaOrganizeSvc)
 	retentionSvc.SetStartupGate(startupGate)

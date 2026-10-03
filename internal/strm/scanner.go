@@ -79,9 +79,15 @@ type ScanResult struct {
 	GeneratedCount int64
 	UpdatedCount   int64
 	RemovedCount   int64
-	Protected      bool   // 安全保护阻止了本次本地清理
-	ProtectReason  string // 保护原因（写入任务状态与通知）
-	Failures       []ScanFailure
+	// StrmCreated / StrmUpdated 只统计 **.strm 文件**本身的新增与更新，
+	// 不含元数据下载与番号产物（那两项都混在 GeneratedCount 里）。
+	// 「扫描完要不要自动排一次刮削」用这两个判断，否则「只下了几个字幕」会被
+	// 误判成「有新片」。
+	StrmCreated   int64
+	StrmUpdated   int64
+	Protected     bool   // 安全保护阻止了本次本地清理
+	ProtectReason string // 保护原因（写入任务状态与通知）
+	Failures      []ScanFailure
 }
 
 type scanScope struct {
@@ -125,8 +131,12 @@ func ScanTask(ctx context.Context, task *domain.StrmTask, deps ScanDeps, runMode
 	if len(exts) == 0 {
 		exts = parseExtensions(defaultExtensions)
 	}
-	// 番号任务额外收 json：侧车是生成本地 nfo / 图片的唯一输入，见 javMetaExtensions。
-	metaExts := javMetaExtensions(task.MediaKind, parseExtensions(deps.Settings.MetadataExtensions))
+	// 「同步元数据」开关决定要不要下楼盘小文件；番号任务额外无条件收 json
+	// （侧车是生成本地 nfo / 图片的唯一输入），见 taskMetaExtensions。
+	metaExts := taskMetaExtensions(task, parseExtensions(deps.Settings.MetadataExtensions))
+	// 要不要收集/同步元数据候选，直接由扩展名集合是否为空决定（番号即便两个开关
+	// 都关也非空，因为 json 必收）。
+	collectMetadata := len(metaExts) > 0
 	minMediaBytes := int64(deps.Settings.MinFileSizeMB) * 1024 * 1024
 	metaMaxBytes := int64(deps.Settings.MetadataMaxSizeMB) * 1024 * 1024
 	if deps.Settings.MetadataMaxSizeMB <= 0 {
@@ -183,7 +193,7 @@ func ScanTask(ctx context.Context, task *domain.StrmTask, deps ScanDeps, runMode
 	for _, scope := range scopes {
 		if scope.baseEntry {
 			children, remoteNames, err := walkBaseBranchEntry(ctx, task, deps, scope, exts, metaExts, excludeDirs, excludeFiles,
-				minMediaBytes, metaMaxBytes, task.SyncMetadata,
+				minMediaBytes, metaMaxBytes, collectMetadata,
 				branchParentIDs, state.skippedDirs, state.metadataDirs, root, &candidates, &metadataItems, dirHasMedia, subtreeHasMedia, log)
 			if err != nil {
 				return result, err
@@ -212,7 +222,7 @@ func ScanTask(ctx context.Context, task *domain.StrmTask, deps ScanDeps, runMode
 		}
 		state.cleanupScopes = append(state.cleanupScopes, cleanupScope{relDirs: scope.relDirs, recursive: scope.recursive})
 		if err := walkScope(ctx, task, deps, scope, exts, metaExts, excludeDirs, excludeFiles,
-			minMediaBytes, metaMaxBytes, task.SyncMetadata,
+			minMediaBytes, metaMaxBytes, collectMetadata,
 			state.remoteChildren, state.metadataDirs, state.skippedDirs, &candidates, &metadataItems, dirHasMedia, subtreeHasMedia); err != nil {
 			return result, err
 		}
@@ -220,7 +230,7 @@ func ScanTask(ctx context.Context, task *domain.StrmTask, deps ScanDeps, runMode
 	for _, scope := range childScopes {
 		state.cleanupScopes = append(state.cleanupScopes, cleanupScope{relDirs: scope.relDirs, recursive: true})
 		if err := walkScope(ctx, task, deps, scope, exts, metaExts, excludeDirs, excludeFiles,
-			minMediaBytes, metaMaxBytes, task.SyncMetadata,
+			minMediaBytes, metaMaxBytes, collectMetadata,
 			state.remoteChildren, state.metadataDirs, state.skippedDirs, &candidates, &metadataItems, dirHasMedia, subtreeHasMedia); err != nil {
 			return result, err
 		}
@@ -298,8 +308,10 @@ func finalizeScan(
 		}
 		if created {
 			result.GeneratedCount++
+			result.StrmCreated++
 		} else if updated {
 			result.UpdatedCount++
+			result.StrmUpdated++
 		}
 		// 番号元数据的驱动集合：
 		//   * 增量（补缺 / 更新）→ **本轮新增 / 更新的** .strm（用户选的「只处理新增」）；
@@ -337,7 +349,7 @@ func finalizeScan(
 		result.ProtectReason = protectReason
 		log.Warn("strm 扫描安全保护阻止清理", "task_id", task.ID, "task_name", task.Name, "reason", protectReason)
 	} else {
-		if task.SyncMetadata && len(state.metadataDirs) > 0 {
+		if len(metaExts) > 0 && len(state.metadataDirs) > 0 {
 			filteredMetadata := filterMetadataItems(metadataItems, dirHasMedia, subtreeHasMedia, deps.Settings.MetadataParentEnabled)
 			metadataDirs := filterMetadataDirectories(state.metadataDirs, dirHasMedia, subtreeHasMedia, deps.Settings.MetadataParentEnabled)
 			syncResult, err := syncMetadata(ctx, metadataSyncRequest{
@@ -385,7 +397,9 @@ func finalizeScan(
 		//     就是白干一轮，还会在日志里留下「生成了又删了」的噪声。
 		// 保护触发时（protectReason != ""）整块不跑：那时 syncMetadata 也没跑，
 		// 本地没有新侧车，生成器无事可做。
-		if task.MediaKind == domain.StrmMediaKindJav && deps.JavImages != nil && len(javTargets) > 0 {
+		// 「刮削元数据」关掉时也不生成：那时只下 strm 与 json 侧车，不产出 nfo/图片。
+		if task.MediaKind == domain.StrmMediaKindJav && task.SyncMetadata &&
+			deps.JavImages != nil && len(javTargets) > 0 {
 			javRes := generateJavArtifacts(ctx, javArtifactRequest{
 				Root:      root,
 				StrmFiles: javTargets,
@@ -623,7 +637,7 @@ func walkBaseBranchEntry(
 	exts, metaExts map[string]struct{},
 	excludeDirs, excludeFiles []string,
 	minMediaBytes, metaMaxBytes int64,
-	syncMetadata bool,
+	collectMetadata bool,
 	branchParentIDs map[string]struct{},
 	skippedDirs map[string]struct{},
 	metadataDirs map[string]metadataDirectory,
@@ -707,7 +721,7 @@ func walkBaseBranchEntry(
 		if matchesKeywordRules(name, excludeFiles) {
 			continue
 		}
-		classified := classifyScanFile(item.ID, name, outputFolder, item.Size, relDirs, exts, metaExts, minMediaBytes, metaMaxBytes, syncMetadata)
+		classified := classifyScanFile(item.ID, name, outputFolder, item.Size, relDirs, exts, metaExts, minMediaBytes, metaMaxBytes, collectMetadata)
 		if classified.hasMedia {
 			*candidates = append(*candidates, classified.media)
 			if deps.OnProgress != nil {
@@ -749,7 +763,7 @@ func walkScope(
 	exts, metaExts map[string]struct{},
 	excludeDirs, excludeFiles []string,
 	minMediaBytes, metaMaxBytes int64,
-	syncMetadata bool,
+	collectMetadata bool,
 	remoteChildren map[string]map[string]struct{},
 	metadataDirs map[string]metadataDirectory,
 	skippedDirs map[string]struct{},
@@ -800,7 +814,7 @@ func walkScope(
 			if matchesKeywordRules(name, excludeFiles) {
 				continue
 			}
-			classified := classifyScanFile(item.ID, name, outputFolder, item.Size, n.relDirs, exts, metaExts, minMediaBytes, metaMaxBytes, syncMetadata)
+			classified := classifyScanFile(item.ID, name, outputFolder, item.Size, n.relDirs, exts, metaExts, minMediaBytes, metaMaxBytes, collectMetadata)
 			if classified.hasMedia {
 				*candidates = append(*candidates, classified.media)
 				if deps.OnProgress != nil {

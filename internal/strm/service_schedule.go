@@ -115,108 +115,140 @@ func (s *Service) runTaskAsync(task *domain.StrmTask) {
 	)
 
 	go func() {
-		defer releaseFiles()
-		defer func() {
+		// 自动刮削要在**本任务的文件操作锁释放之后**才能触发（strmscrape 那边会
+		// 用 TryBeginTaskFileOperation 抢同一把锁，见 strmscrape.startAsyncOperation），
+		// 所以主体包进内层函数，让两个 defer 先跑完，再在返回后触发。
+		var autoScrape bool
+		var writeMode string
+		func() {
+			defer releaseFiles()
+			defer func() {
+				s.mu.Lock()
+				s.clearTaskRunState(task.ID, task.AccountID)
+				s.mu.Unlock()
+			}()
+			runCtx, cancel := taskRunContext(parent)
+			defer cancel()
 			s.mu.Lock()
-			s.clearTaskRunState(task.ID, task.AccountID)
+			s.taskCancels[task.ID] = cancel
 			s.mu.Unlock()
-		}()
-		runCtx, cancel := taskRunContext(parent)
-		defer cancel()
-		s.mu.Lock()
-		s.taskCancels[task.ID] = cancel
-		s.mu.Unlock()
-		ctx := runCtx
-		ctx = driver.WithExtraAPIDelay(ctx, task.ApiInterval)
-		reportProgress := s.beginLiveScan(task.ID)
-		defer s.endLiveScan(task.ID)
+			ctx := runCtx
+			ctx = driver.WithExtraAPIDelay(ctx, task.ApiInterval)
+			reportProgress := s.beginLiveScan(task.ID)
+			defer s.endLiveScan(task.ID)
 
-		_ = s.updateScanPersist(task.ID, domain.StrmScanPatch{
-			Status:       domain.StrmStatusRunning,
-			PausedReason: "",
-			ErrorMessage: "",
-		})
-		token, err := s.ensureToken(ctx)
-		if err != nil {
-			s.log.Error("STRM 任务令牌准备失败",
-				"task_id", task.ID,
-				"task_name", task.Name,
-				"account_id", task.AccountID,
-				"error", err.Error(),
-			)
-			if auth.IsAuthError(err) {
-				if pauseErr := s.PauseTask(ctx, task.ID, domain.PauseReasonAuthFailure, err.Error()); pauseErr != nil {
-					s.log.Warn("STRM 任务暂停状态保存失败", "task_id", task.ID, "error", pauseErr)
-				}
-			} else {
-				_ = s.finalizeScanPersist(task.ID, domain.StrmScanPatch{
-					Status:         domain.StrmStatusActive,
-					ErrorMessage:   err.Error(),
-					LastScan:       time.Now(),
-					LastScanStatus: "failed",
-				})
-			}
-			return
-		}
-		result, err := ScanTask(ctx, task, ScanDeps{
-			Files:       s.files,
-			Branches:    s.branches,
-			DirCache:    s.dirCache,
-			Playback:    s.playback,
-			StrmDir:     s.strmDir,
-			BaseURL:     s.scanBaseURL(),
-			Token:       token,
-			SignEnabled: s.settings.Bool(settings.KeyStrmSignatureEnabled),
-			Secret:      s.secret,
-			Settings:    s.scanSettings(),
-			JavImages:   s.javImages,
-			// ⚠️ 扫描那条路（定时 / 手动执行任务）走这里，**与 current_dir 是两处**。
-			// 漏掉这一行不会报错：番号元数据照常生成，只是永远没有字幕 ——
-			// 属于「静默变空」那一族（界面上的开关开着、日志里 `subtitles: 0`）。
-			JavSubtitles: s.javSubtitles,
-			JavPosters:   s.javPosters,
-			Log:          s.log,
-			OnProgress:   reportProgress,
-		}, runMode)
-		patch := scanPatchAfterRun(err, result)
-		patch.LastScan = time.Now()
-		if err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Error("STRM 任务执行失败",
-				"task_id", task.ID,
-				"task_name", task.Name,
-				"account_id", task.AccountID,
-				"parent_id", task.ParentID,
-				"error", err.Error(),
-			)
-			if auth.IsAuthError(err) {
-				if pauseErr := s.PauseTask(ctx, task.ID, domain.PauseReasonAuthFailure, err.Error()); pauseErr != nil {
-					s.log.Warn("STRM 任务暂停状态保存失败", "task_id", task.ID, "error", pauseErr)
+			_ = s.updateScanPersist(task.ID, domain.StrmScanPatch{
+				Status:       domain.StrmStatusRunning,
+				PausedReason: "",
+				ErrorMessage: "",
+			})
+			token, err := s.ensureToken(ctx)
+			if err != nil {
+				s.log.Error("STRM 任务令牌准备失败",
+					"task_id", task.ID,
+					"task_name", task.Name,
+					"account_id", task.AccountID,
+					"error", err.Error(),
+				)
+				if auth.IsAuthError(err) {
+					if pauseErr := s.PauseTask(ctx, task.ID, domain.PauseReasonAuthFailure, err.Error()); pauseErr != nil {
+						s.log.Warn("STRM 任务暂停状态保存失败", "task_id", task.ID, "error", pauseErr)
+					}
+				} else {
+					_ = s.finalizeScanPersist(task.ID, domain.StrmScanPatch{
+						Status:         domain.StrmStatusActive,
+						ErrorMessage:   err.Error(),
+						LastScan:       time.Now(),
+						LastScanStatus: "failed",
+					})
 				}
 				return
 			}
-		} else if errors.Is(err, context.Canceled) {
-			s.log.Info("STRM 任务已停止", "task_id", task.ID)
-		} else {
-			s.log.Info("strm 任务执行完成",
-				"task_id", task.ID,
-				"task_name", task.Name,
-				"scanned", result.ScannedCount,
-				"generated", result.GeneratedCount,
-				"updated", result.UpdatedCount,
-				"removed", result.RemovedCount,
-				"failures", len(result.Failures),
-			)
-		}
-		if err := s.finalizeScanPersist(task.ID, patch); err != nil {
-			s.log.Warn("strm update scan failed", "task_id", task.ID, "err", err)
-		}
-		if err == nil || errors.Is(err, context.Canceled) {
-			s.notifyScanFailures(task, result.Failures)
-			if err == nil && result.Protected {
-				s.notifyScanProtected(task, result.ProtectReason)
+			result, err := ScanTask(ctx, task, ScanDeps{
+				Files:       s.files,
+				Branches:    s.branches,
+				DirCache:    s.dirCache,
+				Playback:    s.playback,
+				StrmDir:     s.strmDir,
+				BaseURL:     s.scanBaseURL(),
+				Token:       token,
+				SignEnabled: s.settings.Bool(settings.KeyStrmSignatureEnabled),
+				Secret:      s.secret,
+				Settings:    s.scanSettings(),
+				JavImages:   s.javImages,
+				// ⚠️ 扫描那条路（定时 / 手动执行任务）走这里，**与 current_dir 是两处**。
+				// 漏掉这一行不会报错：番号元数据照常生成，只是永远没有字幕 ——
+				// 属于「静默变空」那一族（界面上的开关开着、日志里 `subtitles: 0`）。
+				JavSubtitles: s.javSubtitles,
+				JavPosters:   s.javPosters,
+				Log:          s.log,
+				OnProgress:   reportProgress,
+			}, runMode)
+			patch := scanPatchAfterRun(err, result)
+			patch.LastScan = time.Now()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				s.log.Error("STRM 任务执行失败",
+					"task_id", task.ID,
+					"task_name", task.Name,
+					"account_id", task.AccountID,
+					"parent_id", task.ParentID,
+					"error", err.Error(),
+				)
+				if auth.IsAuthError(err) {
+					if pauseErr := s.PauseTask(ctx, task.ID, domain.PauseReasonAuthFailure, err.Error()); pauseErr != nil {
+						s.log.Warn("STRM 任务暂停状态保存失败", "task_id", task.ID, "error", pauseErr)
+					}
+					return
+				}
+			} else if errors.Is(err, context.Canceled) {
+				s.log.Info("STRM 任务已停止", "task_id", task.ID)
+			} else {
+				s.log.Info("strm 任务执行完成",
+					"task_id", task.ID,
+					"task_name", task.Name,
+					"scanned", result.ScannedCount,
+					"generated", result.GeneratedCount,
+					"updated", result.UpdatedCount,
+					"removed", result.RemovedCount,
+					"failures", len(result.Failures),
+				)
+			}
+			if err := s.finalizeScanPersist(task.ID, patch); err != nil {
+				s.log.Warn("strm update scan failed", "task_id", task.ID, "err", err)
+			}
+			if err == nil || errors.Is(err, context.Canceled) {
+				s.notifyScanFailures(task, result.Failures)
+				if err == nil && result.Protected {
+					s.notifyScanProtected(task, result.ProtectReason)
+				}
+			}
+			// tmdb 影片：「刮削元数据」开着、且本轮确实有 .strm 新增/更新时，
+			// 扫描结束后自动排一次刮削（与番号在扫描末尾就地生成对齐）。
+			// 用 StrmCreated/StrmUpdated 而非 GeneratedCount：后者混了元数据下载数。
+			if err == nil && !result.Protected &&
+				task.MediaKind == domain.StrmMediaKindTmdb && task.SyncMetadata &&
+				(result.StrmCreated > 0 || result.StrmUpdated > 0) {
+				autoScrape, writeMode = true, strmScrapeWriteMode(task.ScanMode)
+			}
+		}()
+
+		if autoScrape {
+			if trigger := s.scrapeTriggerOrNil(); trigger != nil {
+				if err := trigger.TriggerAutoScrape(context.Background(), task.ID, writeMode); err != nil {
+					s.log.Warn("strm 自动刮削触发失败", "task_id", task.ID, "err", err)
+				}
 			}
 		}
 	}()
+}
+
+// strmScrapeWriteMode 把 STRM 的扫描方式映射成刮削的写模式：
+// 全量 = 以 TMDB 为准全部重写、覆盖老的；补缺 / 更新 = 只补缺（缺 nfo/海报的才写）。
+func strmScrapeWriteMode(scanMode string) string {
+	if scanMode == domain.StrmScanModeFullSync {
+		return "overwrite"
+	}
+	return "missing_only"
 }
 
 func (s *Service) canStartTaskLocked(task *domain.StrmTask, taskConcurrency int) bool {

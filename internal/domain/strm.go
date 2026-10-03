@@ -60,10 +60,19 @@ type StrmTask struct {
 	ApiInterval         int
 	ExcludeDirKeywords  string
 	ExcludeFileKeywords string
-	SyncMetadata        bool
-	// MediaKind 是媒体类型（StrmMediaKind*）。与 SyncMetadata 挨着放：
-	// 两者是同一件事的两半 —— 「同步元数据」决定要不要下楼盘的元数据小文件，
-	// 「媒体类型」决定番号那一路要不要顺手把 nfo 与图片生成出来。
+	// SyncMetadata 是「刮削元数据」开关：STRM 同步完之后要不要刮削。
+	//   tmdb：开 = 扫描有新增/更新时自动排一次刮削；关 = 不刮。
+	//   jav ：开 = 下 json 侧车 + 字幕/nfo/图片，并生成 nfo / 封面 / 剧照；
+	//         关 = 只出 strm（json 侧车照下，它是刮削的输入）。
+	SyncMetadata bool
+	// SyncFiles 是「同步元数据」开关：要不要把网盘上的元数据小文件
+	// （字幕/nfo/图片，按全局设置 strm_metadata_extensions）同步到本地。
+	// 与 SyncMetadata 挨着放，因为两者是同一件事的两半：
+	// 「同步元数据」管下楼盘小文件，「刮削元数据」管下完之后要不要刮。
+	// 注意番号影片的 json 侧车**不受这一位控制**，只要媒体类型是番号就一定同步
+	// （见 internal/strm 的 taskMetaExtensions）。
+	SyncFiles bool
+	// MediaKind 是媒体类型（StrmMediaKind*）。
 	MediaKind          string
 	BranchCheckEnabled bool
 	TimeWindowEnabled  bool

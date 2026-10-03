@@ -14,7 +14,7 @@ import (
 // 值会串到隔壁字段上 —— 表现是「勾了番号影片，任务却按 tmdb 跑」（什么都不生成、
 // 也不报错），正是这个功能最不该有的失败模式。
 //
-// 断言里带上隔壁两个字段（sync_metadata / branch_check_enabled）是有意的：
+// 断言里带上隔壁几个字段（sync_metadata / sync_files / branch_check_enabled）是有意的：
 // 只有它们也跟着对，才说明位置没错。
 func TestStrmTaskMediaKindRoundTrip(t *testing.T) {
 	ctx := context.Background()
@@ -33,6 +33,7 @@ func TestStrmTaskMediaKindRoundTrip(t *testing.T) {
 		OutputFolder:       "番号 test",
 		ScanMode:           domain.StrmScanModeIncrementalUpdate,
 		SyncMetadata:       true,
+		SyncFiles:          true,
 		MediaKind:          domain.StrmMediaKindJav,
 		BranchCheckEnabled: true,
 		Status:             domain.StrmStatusActive,
@@ -48,13 +49,14 @@ func TestStrmTaskMediaKindRoundTrip(t *testing.T) {
 	if got.MediaKind != domain.StrmMediaKindJav {
 		t.Errorf("MediaKind = %q，期望 %q（列位置串了？）", got.MediaKind, domain.StrmMediaKindJav)
 	}
-	if !got.SyncMetadata || !got.BranchCheckEnabled {
-		t.Errorf("隔壁两个布尔字段被串了：sync=%v branch=%v", got.SyncMetadata, got.BranchCheckEnabled)
+	if !got.SyncMetadata || !got.SyncFiles || !got.BranchCheckEnabled {
+		t.Errorf("隔壁几个布尔字段被串了：sync=%v files=%v branch=%v", got.SyncMetadata, got.SyncFiles, got.BranchCheckEnabled)
 	}
 
 	// Update 那条 SQL 是单独写的，也要覆盖
 	got.MediaKind = domain.StrmMediaKindTmdb
 	got.SyncMetadata = false
+	got.SyncFiles = false
 	if err := s.StrmTasks.Update(ctx, got); err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -62,8 +64,8 @@ func TestStrmTaskMediaKindRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get after update: %v", err)
 	}
-	if again.MediaKind != domain.StrmMediaKindTmdb || again.SyncMetadata {
-		t.Errorf("更新没生效：media_kind=%q sync=%v", again.MediaKind, again.SyncMetadata)
+	if again.MediaKind != domain.StrmMediaKindTmdb || again.SyncMetadata || again.SyncFiles {
+		t.Errorf("更新没生效：media_kind=%q sync=%v files=%v", again.MediaKind, again.SyncMetadata, again.SyncFiles)
 	}
 	// 迁移给老库填的默认值必须是 tmdb —— 升级不该改变任何既有任务的行为
 	if again.MediaKind == domain.StrmMediaKindJav {

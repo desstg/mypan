@@ -122,6 +122,9 @@ const taskOptions = computed(() =>
   tasks.value.map((t) => ({
     value: String(t.id),
     label: t.name || `任务 #${t.id}`,
+    // 媒体类型徽标：番号与 tmdb 是两套刮削（番号读本地侧车、走海报墙），
+    // 选任务时就该看出来，而不是等选中之后整面墙变了才知道。
+    tag: t.media_kind === "jav" ? "番号" : "tmdb",
   })),
 );
 const selectedTask = computed(() =>

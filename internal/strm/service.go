@@ -65,7 +65,10 @@ type Service struct {
 	organizeBusy             RunningAccountLister
 	retentionBusy            RunningAccountLister
 	automationManagedChecker func(context.Context, int64) (bool, error)
-	appCtx                   context.Context
+	// scrapeTrigger 由 wire 注入（*strmscrape.Service）。strm 不 import strmscrape，
+	// 否则与 strmscrape→strm 形成循环依赖；形状与 organizeBusy 那几个 setter 一样。
+	scrapeTrigger ScrapeTrigger
+	appCtx        context.Context
 	started                  bool
 	startupReadyAt           time.Time
 	startupGate              <-chan struct{}
@@ -154,6 +157,41 @@ func (s *Service) SetOrganizeBusyChecker(checker RunningAccountLister) {
 	s.mu.Lock()
 	s.organizeBusy = checker
 	s.mu.Unlock()
+}
+
+// ScrapeTrigger 是「扫描完自动排一次刮削」的注入点。
+//
+// 走接口而不是直接持有 *strmscrape.Service：strmscrape 已经 import strm（它按任务
+// 反查输出目录），strm 再反向 import 就会成环。由 wire 那边用一个转调闭包接上
+// （见 internal/app/wire_services.go）。
+type ScrapeTrigger interface {
+	TriggerAutoScrape(ctx context.Context, strmTaskID int64, writeMode string) error
+}
+
+// ScrapeTriggerFunc 让普通函数满足 ScrapeTrigger。
+type ScrapeTriggerFunc func(ctx context.Context, strmTaskID int64, writeMode string) error
+
+func (f ScrapeTriggerFunc) TriggerAutoScrape(ctx context.Context, strmTaskID int64, writeMode string) error {
+	return f(ctx, strmTaskID, writeMode)
+}
+
+// SetScrapeTrigger 注入刮削触发器。没注入时自动刮削整体跳过（其余行为不变）。
+func (s *Service) SetScrapeTrigger(t ScrapeTrigger) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.scrapeTrigger = t
+	s.mu.Unlock()
+}
+
+func (s *Service) scrapeTriggerOrNil() ScrapeTrigger {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.scrapeTrigger
 }
 
 func (s *Service) SetRetentionBusyChecker(checker RunningAccountLister) {
@@ -385,6 +423,7 @@ func (s *Service) UpdateTask(ctx context.Context, id int64, task *domain.StrmTas
 	existing.ExcludeDirKeywords = task.ExcludeDirKeywords
 	existing.ExcludeFileKeywords = task.ExcludeFileKeywords
 	existing.SyncMetadata = task.SyncMetadata
+	existing.SyncFiles = task.SyncFiles
 	existing.BranchCheckEnabled = task.BranchCheckEnabled
 	existing.TimeWindowEnabled = task.TimeWindowEnabled
 	existing.TimeStart = task.TimeStart

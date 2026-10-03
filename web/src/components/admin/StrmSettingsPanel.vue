@@ -502,7 +502,7 @@ defineExpose(
             <div class="settings-row__label">
               <span>元数据扩展名</span>
               <SettingsHelpTooltip title="元数据扩展名说明">
-                <p>任务开启同步元数据后，会按这里的扩展名同步同目录文件，用英文分号分隔。</p>
+                <p>任务开启「同步元数据」后，会按这里的扩展名同步同目录文件，用英文分号分隔。</p>
               </SettingsHelpTooltip>
             </div>
           </template>
@@ -554,7 +554,7 @@ defineExpose(
               <span>番号元数据</span>
               <SettingsHelpTooltip title="番号元数据说明">
                 <p>
-                  媒体类型选「番号影片」、且任务开了「同步元数据」时，会在 <code>.strm</code>
+                  媒体类型选「番号影片」、且任务开了「刮削元数据」时，会在 <code>.strm</code>
                   同层按这里的勾选生成元数据；侧车 json 会先同步到本地，读的是本地那份。
                 </p>
                 <p>

@@ -144,9 +144,17 @@ func boolToInt(v bool) int {
 }
 
 // RebuildIndex 扫盘重建该任务索引。
+//
+// 只给 tmdb 影片任务用：番号那套不落索引库（直接扫本地目录，见 javWallRows），
+// 给番号任务建索引只会留下一个没人读的 sqlite。
 func (s *Service) RebuildIndex(ctx context.Context, strmTaskID int64) error {
 	if strmTaskID <= 0 {
 		return domain.Errorf(domain.CodeValidation, "strm_task_id 无效")
+	}
+	if task, _, err := s.resolveTask(ctx, strmTaskID); err != nil {
+		return err
+	} else if task.MediaKind == javMediaKind {
+		return errNotTmdbTask
 	}
 	return s.withTaskIndexLock(strmTaskID, func() error {
 		return s.rebuildIndexLocked(ctx, strmTaskID)

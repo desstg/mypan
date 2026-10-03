@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"litepan/internal/domain"
 	"litepan/internal/jav/emby"
 	"litepan/internal/settings"
 )
@@ -30,7 +31,7 @@ func testLogger(t *testing.T) *slog.Logger {
 //
 // 「json 是怎么下到本地的」那一半不在这里测：它走的是既有的元数据同步链路
 // （metadata_test.go / metadata_reconcile_test.go 覆盖），本文件只钉「接口处」
-// —— 即 `javMetaExtensions` 确实把 json 加进了扩展名集合（见文件末尾那条）。
+// —— 即 `taskMetaExtensions` 确实把 json 加进了扩展名集合（见文件末尾那条）。
 
 const sampleSidecar = `{
   "schema": "litepan.jav.sidecar/1",
@@ -410,23 +411,50 @@ func TestJavArtifactNamesIsWhatWeGenerate(t *testing.T) {
 	}
 }
 
-// TestJavMetaExtensions 接口处那一颗钉：番号任务的元数据扩展名里必须有 json，
-// 别的任务**一个都不能多**。
-func TestJavMetaExtensions(t *testing.T) {
-	base := map[string]struct{}{"nfo": {}, "jpg": {}}
-	jav := javMetaExtensions("jav", map[string]struct{}{"nfo": {}})
+// TestTaskMetaExtensions 接口处那一颗钉：番号任务的元数据扩展名里必须有 json
+// （**无条件**，与两个开关无关 —— 侧车是刮削的输入），
+// tmdb 任务则完全由「同步元数据」开关决定收不收那批小文件。
+func TestTaskMetaExtensions(t *testing.T) {
+	global := map[string]struct{}{"nfo": {}, "jpg": {}}
+
+	// 番号 + 同步开：全局那批 + json
+	jav := taskMetaExtensions(&domain.StrmTask{MediaKind: domain.StrmMediaKindJav, SyncFiles: true}, global)
 	if _, ok := jav["json"]; !ok {
 		t.Error("番号任务必须收 json —— 侧车是生成 nfo / 图片的唯一输入")
 	}
-	tmdb := javMetaExtensions("tmdb", map[string]struct{}{"nfo": {}})
-	if _, ok := tmdb["json"]; ok {
-		t.Error("非番号任务不该多收 json（会把网盘上无关的 json 拖进媒体库）")
+	if _, ok := jav["nfo"]; !ok {
+		t.Error("番号任务开了「同步元数据」时也该收全局那批")
 	}
-	// 空集合也要能兜住（调用方可能传 nil）
-	if got := javMetaExtensions("jav", nil); len(got) != 1 {
+	// 番号 + 同步关：**只有 json**
+	javOff := taskMetaExtensions(&domain.StrmTask{MediaKind: domain.StrmMediaKindJav}, global)
+	if len(javOff) != 1 {
+		t.Errorf("番号任务关掉「同步元数据」时只该剩 json，got %v", javOff)
+	}
+	if _, ok := javOff["json"]; !ok {
+		t.Error("番号任务即便关掉「同步元数据」也必须收 json")
+	}
+
+	// tmdb + 同步关：一个都不收（也不该多收 json，否则会把网盘上无关的 json 拖进媒体库）
+	tmdb := taskMetaExtensions(&domain.StrmTask{MediaKind: domain.StrmMediaKindTmdb}, global)
+	if len(tmdb) != 0 {
+		t.Errorf("tmdb 任务关掉「同步元数据」时不该收任何元数据，got %v", tmdb)
+	}
+	// tmdb + 同步开：全局那批，且**没有** json
+	tmdbOn := taskMetaExtensions(&domain.StrmTask{MediaKind: domain.StrmMediaKindTmdb, SyncFiles: true}, global)
+	if _, ok := tmdbOn["json"]; ok {
+		t.Error("非番号任务不该多收 json")
+	}
+	if _, ok := tmdbOn["nfo"]; !ok {
+		t.Error("tmdb 任务开了「同步元数据」时该收全局那批")
+	}
+
+	// 空/ nil 全局集合也要能兜住
+	if got := taskMetaExtensions(&domain.StrmTask{MediaKind: domain.StrmMediaKindJav}, nil); len(got) != 1 {
 		t.Errorf("nil 集合也该补上 json，got %v", got)
 	}
-	_ = base
+	if got := taskMetaExtensions(nil, global); len(got) != 0 {
+		t.Errorf("nil 任务不该崩，也不该收任何东西，got %v", got)
+	}
 }
 
 func decodeJPEGFile(t *testing.T, path string) image.Image {

@@ -480,15 +480,20 @@
               <label>STRM任务</label>
               <AppSelect v-model="configAction.params.task_id" :options="strmTaskOptions" placeholder="请选择STRM任务" />
             </div>
-            <div class="cfg-row">
-              <label>写入策略</label>
-              <AppSelect v-model="configAction.params.write_mode" :options="strmScrapeWriteModeOptions" />
-            </div>
-            <div class="cfg-row">
-              <label>联动中断条件</label>
-              <AppSelect v-model="configAction.params.failure_policy" :options="strmScrapeFailurePolicyOptions" />
-            </div>
-            <div class="field-tip">仅控制单个影片刮削失败时是否继续；配置错误、任务取消或服务异常仍会中断联动。</div>
+            <!-- 番号影片走「读本地侧车 json 重建 nfo/封面/剧照」那条路，写入策略与
+                 联动中断条件（都是 TMDB 那套的参数）对它没有意义，直接不显示。 -->
+            <template v-if="!isJavStrmTask(configAction.params.task_id)">
+              <div class="cfg-row">
+                <label>写入策略</label>
+                <AppSelect v-model="configAction.params.write_mode" :options="strmScrapeWriteModeOptions" />
+              </div>
+              <div class="cfg-row">
+                <label>联动中断条件</label>
+                <AppSelect v-model="configAction.params.failure_policy" :options="strmScrapeFailurePolicyOptions" />
+              </div>
+              <div class="field-tip">仅控制单个影片刮削失败时是否继续；配置错误、任务取消或服务异常仍会中断联动。</div>
+            </template>
+            <div v-else class="field-tip">番号影片：用本地侧车 json 重建整库的 nfo / 封面 / 剧照（不联网、不碰网盘）。</div>
           </template>
           <template v-else-if="configAction.type === 'delay'">
             <div class="cfg-row">
@@ -686,8 +691,8 @@ const ACTION_DEFINITIONS = {
       run_mode: params.run_mode && params.run_mode !== 'auto' ? params.run_mode : 'full'
     }),
     canApply: action => Number(action.params.task_id || 0) > 0,
-    nodeTitle: action => `STRM「${findTaskLabel('strm', action.params.task_id)}」`,
-    previewTitle: action => `执行STRM任务[${findTaskLabel('strm', action.params.task_id)}]`
+    nodeTitle: action => `STRM「${strmTaskNodeLabel(action.params.task_id)}」`,
+    previewTitle: action => `执行STRM任务[${strmTaskNodeLabel(action.params.task_id)}]`
   },
   strm_scrape: {
     label: '生成本地STRM元数据',
@@ -700,8 +705,8 @@ const ACTION_DEFINITIONS = {
       failure_policy: ['any_failed', 'never'].includes(params.failure_policy) ? params.failure_policy : 'all_failed'
     }),
     canApply: action => Number(action.params.task_id || 0) > 0,
-    nodeTitle: action => `刮削「${findTaskLabel('strm', action.params.task_id)}」`,
-    previewTitle: action => `生成本地STRM元数据[${findTaskLabel('strm', action.params.task_id)}]`
+    nodeTitle: action => `刮削「${strmTaskNodeLabel(action.params.task_id)}」`,
+    previewTitle: action => `生成本地STRM元数据[${strmTaskNodeLabel(action.params.task_id)}]`
   },
   delay: {
     label: '延迟',
@@ -774,8 +779,13 @@ const organizeTaskOptions = computed(() => options.value.organize_tasks.map(task
 
 const strmTaskOptions = computed(() => options.value.strm_tasks.map(task => ({
   value: Number(task.id),
-  label: `${task.name || task.id}${task.branch_check_enabled ? '（分支）' : ''}`
+  label: `${task.name || task.id}${task.branch_check_enabled ? '（分支）' : ''}`,
+  // 媒体类型徽标：两种任务的刮削是两套东西（番号读本地侧车，tmdb 走 TMDB 匹配），
+  // 选任务时必须一眼看出选的是哪种，别把番号任务当 tmdb 刮了。
+  tag: task.media_kind === 'jav' ? '番号' : 'tmdb'
 })))
+
+const isJavStrmTask = (taskId) => findStrmTask(taskId)?.media_kind === 'jav'
 
 const strmScrapeWriteModeOptions = [
   { value: 'missing_only', label: '仅补缺（推荐）' },
@@ -1675,6 +1685,19 @@ const findTaskLabel = (type, id) => {
     return options.value.strm_tasks.find(task => Number(task.id) === Number(id))?.name || 'STRM任务'
   }
   return ''
+}
+
+// STRM 任务在流程图上要能看出媒体类型：两种任务的刮削是两套东西。
+const strmTaskKindLabel = (id) => {
+  const task = options.value.strm_tasks.find(item => Number(item.id) === Number(id))
+  if (!task) return ''
+  return task.media_kind === 'jav' ? '番号' : 'tmdb'
+}
+
+const strmTaskNodeLabel = (id) => {
+  const kind = strmTaskKindLabel(id)
+  const name = findTaskLabel('strm', id)
+  return kind ? `${name} · ${kind}` : name
 }
 
 const triggerLabel = (rule) => {

@@ -342,6 +342,9 @@ func (s *Service) ListOptions(ctx context.Context) (map[string]any, error) {
 			"path":                 task.Path,
 			"schedule_mode":        task.ScheduleMode,
 			"branch_check_enabled": task.BranchCheckEnabled,
+			// media_kind 给前端标「tmdb 影片 / 番号影片」，也让动作能按类型分派
+			// （番号的刮削走本地侧车那条路，与 tmdb 不是同一套，见 runStrmScrape）。
+			"media_kind": task.MediaKind,
 		})
 	}
 	organizeData := make([]map[string]any, 0, len(organizeTasks))

@@ -825,3 +825,85 @@ func (configRepoStub) Get(context.Context, string) (string, bool, error) {
 	return "", false, nil
 }
 func (configRepoStub) Set(context.Context, string, string) error { return nil }
+
+// TestRunStrmScrapeDispatchesByMediaKind 钉住分派：番号影片走本地侧车重建那条路
+// （不碰 strmscrape 的全局刮削闸），tmdb 走原来的 RunAsync。
+//
+// 这里只验「走错路会被挡住」这一点：番号任务上没有装配图片抓取器时，
+// runJavScrape 必须如实报错，而不是悄悄退回 tmdb 那套去刮番号库。
+func TestRunStrmScrapeDispatchesByMediaKind(t *testing.T) {
+	t.Parallel()
+
+	strmSvc := newTestStrmService(t, newStrmTaskRepo(
+		&domain.StrmTask{ID: 20, Name: "番号库", AccountID: 1, MediaKind: domain.StrmMediaKindJav, Status: domain.StrmStatusActive},
+		&domain.StrmTask{ID: 21, Name: "电影库", AccountID: 1, MediaKind: domain.StrmMediaKindTmdb, Status: domain.StrmStatusActive},
+	))
+	service := New(Options{Strm: strmSvc})
+
+	// 番号：没有图片抓取器 → 报「图片抓取器未就绪」，绝不落进 tmdb 那条分支。
+	jav := service.runStrmScrape(context.Background(), map[string]any{"task_id": 20})
+	if jav["success"] != false {
+		t.Fatalf("番号任务应走本地侧车那条路并如实报错，实际 %#v", jav)
+	}
+	if msg, _ := jav["message"].(string); !strings.Contains(msg, "图片抓取器") {
+		t.Fatalf("番号分支的错误信息不对：%#v", jav["message"])
+	}
+
+	// tmdb：没有 strmScrape 服务 → 报「未就绪」（证明它走的是另一条分支）。
+	tmdb := service.runStrmScrape(context.Background(), map[string]any{"task_id": 21})
+	if msg, _ := tmdb["message"].(string); !strings.Contains(msg, "刮削服务未就绪") {
+		t.Fatalf("tmdb 分支应提示刮削服务未就绪，实际 %#v", tmdb)
+	}
+}
+
+// TestValidateRuleAcceptsCacheClearBeforeStrmScrape 「刷新目录」后面跟
+// 「生成本地STRM元数据」也该算有后续任务 —— 它同样按任务查账号来刷缓存。
+func TestValidateRuleAcceptsCacheClearBeforeStrmScrape(t *testing.T) {
+	t.Parallel()
+
+	strmSvc := newTestStrmService(t, newStrmTaskRepo(&domain.StrmTask{
+		ID: 30, Name: "电影 STRM", AccountID: 1, Status: domain.StrmStatusActive,
+	}))
+	service := New(Options{Rules: newAutomationRuleRepo(), Runs: &automationRunRepo{}, Strm: strmSvc})
+
+	result, err := service.ValidateRule(context.Background(), []RuleAction{
+		{ID: "clear-1", Type: domain.AutomationActionCacheClear},
+		{ID: "scrape-1", Type: domain.AutomationActionStrmScrape, Params: map[string]any{"task_id": 30}},
+	})
+	if err != nil {
+		t.Fatalf("ValidateRule 返回错误: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("「刷新目录 → 生成本地STRM元数据」应校验通过，实际 issues=%#v", result.Issues)
+	}
+
+	// 光一个刷新目录仍然该被判错。
+	only, err := service.ValidateRule(context.Background(), []RuleAction{
+		{ID: "clear-2", Type: domain.AutomationActionCacheClear},
+	})
+	if err != nil {
+		t.Fatalf("ValidateRule 返回错误: %v", err)
+	}
+	if only.OK {
+		t.Fatal("刷新目录后面什么都没有时应校验失败")
+	}
+}
+
+// TestCacheClearCollectsAccountFromStrmScrape 刷新目录要能把
+// 「生成本地STRM元数据」所选任务的账号也算进去。
+func TestCacheClearCollectsAccountFromStrmScrape(t *testing.T) {
+	t.Parallel()
+
+	const accountID int64 = 42
+	strmSvc := newTestStrmService(t, newStrmTaskRepo(&domain.StrmTask{
+		ID: 31, Name: "番号库", AccountID: accountID, MediaKind: domain.StrmMediaKindJav, Status: domain.StrmStatusActive,
+	}))
+	service := New(Options{Strm: strmSvc})
+
+	ids := service.collectCacheClearAccountIDs(context.Background(), []RuleAction{
+		{Type: domain.AutomationActionStrmScrape, Params: map[string]any{"task_id": 31}},
+	})
+	if len(ids) != 1 || ids[0] != accountID {
+		t.Fatalf("应从 strm_scrape 动作取到账号 %d，实际 %v", accountID, ids)
+	}
+}

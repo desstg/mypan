@@ -137,6 +137,9 @@ func (s *Service) ListItems(ctx context.Context, strmTaskID int64, query ItemLis
 	if err != nil {
 		return ItemListResult{}, err
 	}
+	if err := s.requireTmdbTask(ctx, strmTaskID); err != nil {
+		return ItemListResult{}, err
+	}
 	if abs, aerr := filepath.Abs(root); aerr == nil {
 		root = abs
 	}
@@ -167,6 +170,15 @@ func (s *Service) RefreshIndex(ctx context.Context, strmTaskID int64, query Item
 func (s *Service) RunAsync(ctx context.Context, req RunRequest) error {
 	if req.StrmTaskID <= 0 {
 		return domain.Errorf(domain.CodeValidation, "strm_task_id 无效")
+	}
+	// 守卫要放在**起后台任务之前**：进 startAsyncOperation 之后就是异步的了，
+	// 错误只能落在 progress.Error 里，调用方拿不到（见 errNotTmdbTask 的注释）。
+	task, _, err := s.resolveTask(ctx, req.StrmTaskID)
+	if err != nil {
+		return err
+	}
+	if task.MediaKind == javMediaKind {
+		return errNotTmdbTask
 	}
 	_ = ctx // 后台任务不随启动请求结束
 	return s.startAsyncOperation(req.StrmTaskID, 0, "准备刮削", "刮削完成", "strm scrape failed", func(runCtx context.Context) error {
@@ -236,10 +248,28 @@ func (s *Service) overwriteForMatch(sameID bool) bool {
 	return normalizeWriteMode(s.GetSettings().WriteMode) == WriteModeOverwrite
 }
 
+// requireTmdbTask 挡住「拿 TMDB 那套去刮番号任务」（见 errNotTmdbTask）。
+//
+// 取 task 而不是只比 taskID：resolveTask 已经查过一次库，这里再查一次是为了让
+// 调用点读起来是一句话 —— 这几条路的开销都在后面的扫盘/网络，多一次主键查询无所谓。
+func (s *Service) requireTmdbTask(ctx context.Context, strmTaskID int64) error {
+	task, _, err := s.resolveTask(ctx, strmTaskID)
+	if err != nil {
+		return err
+	}
+	if task.MediaKind == javMediaKind {
+		return errNotTmdbTask
+	}
+	return nil
+}
+
 // Rematch 对同 ID 沿用写入策略，换 ID 时强制覆盖并统一走 writeMatchedOpts。
 func (s *Service) Rematch(ctx context.Context, req RematchRequest) (*Item, bool, error) {
 	if req.StrmTaskID <= 0 || strings.TrimSpace(req.ItemID) == "" || strings.TrimSpace(req.TMDBID) == "" {
 		return nil, false, domain.Errorf(domain.CodeValidation, "参数不完整")
+	}
+	if err := s.requireTmdbTask(ctx, req.StrmTaskID); err != nil {
+		return nil, false, err
 	}
 	_, root, err := s.resolveTask(ctx, req.StrmTaskID)
 	if err != nil {
@@ -343,6 +373,9 @@ func (s *Service) MarkNormal(ctx context.Context, req MarkNormalRequest) (*Item,
 		return nil, domain.Errorf(domain.CodeValidation, "刮削任务进行中")
 	}
 	defer s.operationMu.Unlock()
+	if err := s.requireTmdbTask(ctx, req.StrmTaskID); err != nil {
+		return nil, err
+	}
 	_, root, err := s.resolveTask(ctx, req.StrmTaskID)
 	if err != nil {
 		return nil, err
@@ -387,6 +420,9 @@ func (s *Service) MarkNormal(ctx context.Context, req MarkNormalRequest) (*Item,
 func (s *Service) Rescrape(ctx context.Context, req RescrapeRequest) (*Item, bool, error) {
 	if req.StrmTaskID <= 0 || strings.TrimSpace(req.ItemID) == "" {
 		return nil, false, domain.Errorf(domain.CodeValidation, "参数不完整")
+	}
+	if err := s.requireTmdbTask(ctx, req.StrmTaskID); err != nil {
+		return nil, false, err
 	}
 	_, root, err := s.resolveTask(ctx, req.StrmTaskID)
 	if err != nil {

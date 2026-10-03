@@ -243,9 +243,10 @@ const temporaryRetentionOptions = [
   { value: 0, label: "永久" },
 ];
 
-type TaskForm = Omit<StrmTaskInput, "sync_metadata" | "schedule_mode"> & {
+type TaskForm = Omit<StrmTaskInput, "sync_metadata" | "sync_files" | "schedule_mode"> & {
   time_window_mode: "always" | "custom";
   sync_metadata: string;
+  sync_files: string;
   schedule_mode: ScheduleMode;
 };
 
@@ -263,7 +264,8 @@ const emptyForm = (): TaskForm => ({
   api_interval: 200,
   exclude_dir_keywords: "",
   exclude_file_keywords: "",
-  sync_metadata: "false",
+  sync_metadata: "true",
+  sync_files: "false",
   media_kind: "tmdb",
   branch_check_enabled: false,
   time_window_enabled: false,
@@ -653,11 +655,12 @@ function openEdit(task: StrmTask) {
   form.exclude_dir_keywords = task.exclude_dir_keywords ?? "";
   form.exclude_file_keywords = task.exclude_file_keywords ?? "";
   form.sync_metadata = task.sync_metadata ? "true" : "false";
+  form.sync_files = task.sync_files ? "true" : "false";
   form.media_kind = task.media_kind === "jav" ? "jav" : "tmdb";
   form.branch_check_enabled = !!task.branch_check_enabled;
   applyTimeWindowFromTask(form, task);
-  // 编辑既有任务时也展开：改任务的人多半正是来动这几项的（媒体类型、同步元数据…），
-  // 折起来只会让他多点一次。
+  // 编辑既有任务时也展开：改任务的人多半正是来动这几项的（媒体类型、刮削元数据、
+  // 同步元数据…），折起来只会让他多点一次。
   showAdvanced.value = true;
   dialogOpen.value = true;
 }
@@ -686,6 +689,7 @@ function buildTaskPayload(): StrmTaskInput {
     exclude_dir_keywords: form.exclude_dir_keywords.trim(),
     exclude_file_keywords: form.exclude_file_keywords.trim(),
     sync_metadata: form.sync_metadata === "true",
+    sync_files: form.sync_files === "true",
     media_kind: form.media_kind === "jav" ? "jav" : "tmdb",
     branch_check_enabled: form.branch_check_enabled,
     ...timeWindowPayload(form),
@@ -1152,6 +1156,9 @@ watch(activeTab, (tab) => {
                 <div class="strm-task-main" :title="task.name">
                   <div class="strm-task-name">
                     <span class="strm-task-name__text">{{ displayTaskName(task.name) }}</span>
+                    <AdminStatusPill :tone="task.media_kind === 'jav' ? 'warning' : 'brand'">
+                      {{ task.media_kind === "jav" ? "番号" : "tmdb" }}
+                    </AdminStatusPill>
                     <AdminStatusPill :tone="isTaskEnabled(task) ? 'success' : 'warning'">
                       {{ isTaskEnabled(task) ? "已启用" : "已禁用" }}
                     </AdminStatusPill>
@@ -1354,14 +1361,21 @@ watch(activeTab, (tab) => {
                 placeholder="请选择媒体类型"
               />
             </FormField>
+            <FormField label="同步元数据">
+              <AppSelect
+                v-model="form.sync_files"
+                :options="metadataSyncOptions"
+                placeholder="请选择是否同步元数据"
+              />
+            </FormField>
           </div>
 
           <div class="strm-form__row">
-            <FormField label="同步元数据">
+            <FormField label="刮削元数据">
               <AppSelect
                 v-model="form.sync_metadata"
                 :options="metadataSyncOptions"
-                placeholder="请选择是否同步元数据"
+                placeholder="请选择是否刮削元数据"
               />
             </FormField>
             <FormField label="分支检查">

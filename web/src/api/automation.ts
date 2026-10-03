@@ -66,6 +66,8 @@ export interface AutomationOptionItem {
   path?: string;
   schedule_mode?: string;
   branch_check_enabled?: boolean;
+  /** STRM 任务的媒体类型："tmdb" | "jav"（整理任务没有这个字段）。 */
+  media_kind?: string;
 }
 
 export interface AutomationOptions {

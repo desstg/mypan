@@ -65,13 +65,17 @@ func (s *Service) ValidateRule(ctx context.Context, actions []RuleAction) (Valid
 		case domain.AutomationActionCacheClear:
 			hasFollowingTask := false
 			for _, next := range actions[index+1:] {
-				if next.Type == domain.AutomationActionOrganize || next.Type == domain.AutomationActionStrm {
+				// strm_scrape 也算：它同样要按任务查账号来刷缓存（见 collectCacheClearAccountIDs），
+				// 漏掉它会让「刷新目录 → 生成本地STRM元数据」这种配法被判成没有后续任务。
+				if next.Type == domain.AutomationActionOrganize ||
+					next.Type == domain.AutomationActionStrm ||
+					next.Type == domain.AutomationActionStrmScrape {
 					hasFollowingTask = true
 					break
 				}
 			}
 			if !hasFollowingTask {
-				issues = append(issues, ValidationIssue{Level: "error", Message: "刷新目录后面需要有整理任务或 STRM 任务", ActionIndex: index, ActionType: action.Type})
+				issues = append(issues, ValidationIssue{Level: "error", Message: "刷新目录后面需要有整理任务、STRM 任务或生成本地STRM元数据", ActionIndex: index, ActionType: action.Type})
 			}
 		case domain.AutomationActionEmbyRefresh, domain.AutomationActionEmbyCompleteMediaInfo:
 			mode := strings.TrimSpace(anyString(action.Params["mode"]))

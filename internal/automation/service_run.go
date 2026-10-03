@@ -63,17 +63,23 @@ func (s *Service) runRule(id int64, triggerSource string) {
 	message := "执行完成"
 	status := domain.AutomationRunSuccess
 	for i, action := range actions {
+		stepName := actionDisplayName(action)
+		// 「生成本地 STRM 元数据」按所选任务的媒体类型换个名字：番号与 tmdb 是两套
+		// 刮削，记录里得看得出这一趟跑的是哪一种。
+		if action.Type == domain.AutomationActionStrmScrape && strings.TrimSpace(action.Name) == "" {
+			stepName = s.strmScrapeActionLabel(ctx, int64(anyInt(action.Params["task_id"])))
+		}
 		step := map[string]any{
 			"index":     i,
 			"type":      action.Type,
-			"name":      actionDisplayName(action),
+			"name":      stepName,
 			"condition": normalizedCondition(action.Condition, i),
 			"status":    "skipped",
 			"success":   true,
 			"message":   "条件未满足，已跳过",
 		}
 		if shouldRunAction(action.Condition, previousSuccess, i) {
-			s.setRunningStep(id, i, actionDisplayName(action), action.Type)
+			s.setRunningStep(id, i, stepName, action.Type)
 			runAction := action
 			if action.Type == domain.AutomationActionCacheClear {
 				runAction.Params = cloneMap(action.Params)
@@ -141,7 +147,7 @@ func (s *Service) runCacheClear(ctx context.Context, params map[string]any) map[
 	}
 	accountIDs := s.collectCacheClearAccountIDs(ctx, params["_following_actions"])
 	if len(accountIDs) == 0 {
-		return map[string]any{"status": "failed", "success": false, "message": "刷新目录后面需要有整理任务或 STRM 任务"}
+		return map[string]any{"status": "failed", "success": false, "message": "刷新目录后面需要有整理任务、STRM 任务或生成本地STRM元数据"}
 	}
 	for _, accountID := range accountIDs {
 		s.files.InvalidateDirectoryCaches(accountID)
@@ -191,7 +197,9 @@ func (s *Service) collectCacheClearAccountIDs(ctx context.Context, raw any) []in
 				accountID = int64(anyInt(cfg["account_id"]))
 			}
 			addAccount(accountID)
-		case domain.AutomationActionStrm:
+		case domain.AutomationActionStrm, domain.AutomationActionStrmScrape:
+			// 两种动作都是「按 task_id 找一个 STRM 任务」，取账号的方式完全一样
+			// （strm_scrape 的 task_id 也是任务主键，不是整理任务那种字符串 id）。
 			if s.strm == nil {
 				continue
 			}
@@ -267,7 +275,6 @@ func (s *Service) runOrganize(ctx context.Context, params map[string]any) map[st
 		},
 	}
 }
-
 type organizeActionOutcome struct {
 	success         bool
 	message         string
@@ -325,7 +332,8 @@ func (s *Service) runStrm(ctx context.Context, params map[string]any) map[string
 	if taskID <= 0 {
 		return map[string]any{"status": "failed", "success": false, "message": "未选择 STRM 任务"}
 	}
-	if _, err := s.strm.GetTask(ctx, taskID); err != nil {
+	task, err := s.strm.GetTask(ctx, taskID)
+	if err != nil {
 		return map[string]any{"status": "failed", "success": false, "message": err.Error()}
 	}
 	startedAt := time.Now()
@@ -356,6 +364,10 @@ func (s *Service) runStrm(ctx context.Context, params map[string]any) map[string
 			message = "STRM 任务执行失败"
 		}
 	}
+	// 扫描本身两种媒体类型共用同一条路（都是「同步 STRM」）；分岔只在扫描之后 ——
+	// 番号在扫描末尾就地生成 nfo/图片，tmdb 由本任务自己的「刮削元数据」开关决定
+	// 要不要排一次刮削（见 strm.runTaskAsync）。这里只把媒体类型带回去给界面看。
+	message = fmt.Sprintf("%s（%s）", message, strmMediaKindLabel(task.MediaKind))
 	return map[string]any{
 		"status":  ternaryStatus(success),
 		"success": success,
@@ -363,23 +375,64 @@ func (s *Service) runStrm(ctx context.Context, params map[string]any) map[string
 		"data": map[string]any{
 			"task_id":          updated.ID,
 			"name":             updated.Name,
+			"media_kind":       task.MediaKind,
 			"last_scan_status": updated.LastScanStatus,
 		},
 	}
 }
 
-func (s *Service) runStrmScrape(ctx context.Context, params map[string]any) map[string]any {
-	if s.strmScrape == nil {
-		return map[string]any{"status": "failed", "success": false, "message": "STRM 刮削服务未就绪"}
+// strmMediaKindLabel 把媒体类型翻成界面上的说法（只用于展示）。
+func strmMediaKindLabel(kind string) string {
+	if kind == domain.StrmMediaKindJav {
+		return "番号影片"
 	}
+	return "tmdb 影片"
+}
+
+// strmScrapeActionLabel 给「生成本地 STRM 元数据」动作起个能看出媒体类型的名字：
+// 两种任务的刮削是两套东西（番号读本地侧车 json，tmdb 走 TMDB 匹配），
+// 记录里只写「生成本地 STRM 元数据」看不出这一趟到底刮的是什么。
+func (s *Service) strmScrapeActionLabel(ctx context.Context, taskID int64) string {
+	if s.strm == nil || taskID <= 0 {
+		return "生成本地 STRM 元数据"
+	}
+	task, err := s.strm.GetTask(ctx, taskID)
+	if err != nil || task == nil {
+		return "生成本地 STRM 元数据"
+	}
+	if task.MediaKind == domain.StrmMediaKindJav {
+		return "生成番号 STRM 元数据"
+	}
+	return "生成 TMDB STRM 元数据"
+}
+
+func (s *Service) runStrmScrape(ctx context.Context, params map[string]any) map[string]any {
 	taskID := int64(anyInt(params["task_id"]))
 	if taskID <= 0 {
 		return map[string]any{"status": "failed", "success": false, "message": "未选择 STRM 任务"}
+	}
+	if s.strm == nil {
+		return map[string]any{"status": "failed", "success": false, "message": "STRM 服务未就绪"}
 	}
 	task, err := s.strm.GetTask(ctx, taskID)
 	if err != nil {
 		return map[string]any{"status": "failed", "success": false, "message": err.Error()}
 	}
+	// 媒体类型分派：番号影片的 nfo/图片是读**本地侧车 json** 生成的，与 tmdb 那套
+	// （扫盘 → 匹配 TMDB → 写 nfo/海报）完全不是一回事。往番号任务上跑 tmdb 那套
+	// 会拿 TMDB 的片名去覆盖番号库，必须走各自的路。
+	if task.MediaKind == domain.StrmMediaKindJav {
+		return s.runJavScrape(ctx, task)
+	}
+	return s.runTmdbScrape(ctx, task, params)
+}
+
+// runTmdbScrape 是原有的 tmdb 刮削：调 strmscrape.RunAsync 并等它跑完。
+func (s *Service) runTmdbScrape(ctx context.Context, task *domain.StrmTask, params map[string]any) map[string]any {
+	if s.strmScrape == nil {
+		return map[string]any{"status": "failed", "success": false, "message": "STRM 刮削服务未就绪"}
+	}
+	taskID := task.ID
 	req := strmscrape.RunRequest{
 		StrmTaskID: taskID,
 		WriteMode:  strings.TrimSpace(anyString(params["write_mode"])),
@@ -412,6 +465,7 @@ func (s *Service) runStrmScrape(ctx context.Context, params map[string]any) map[
 				"data": map[string]any{
 					"task_id":        task.ID,
 					"name":           task.Name,
+					"media_kind":     domain.StrmMediaKindTmdb,
 					"total":          progress.Total,
 					"done":           progress.Done,
 					"skipped":        progress.Skipped,
@@ -425,6 +479,42 @@ func (s *Service) runStrmScrape(ctx context.Context, params map[string]any) map[
 			return map[string]any{"status": "failed", "success": false, "message": "本地 STRM 元数据生成等待被取消"}
 		case <-time.After(2 * time.Second):
 		}
+	}
+}
+
+// runJavScrape 是番号影片的刮削：用本地侧车 json 重建整库的 nfo / 封面 / 剧照。
+//
+// 同步执行（不是后台任务）：与 tmdb 那条路一样，动作要等它跑完才知道成败。
+// 但它不进 strmscrape 的全局 operationMu —— 那条闸是给 tmdb 索引那套用的，
+// 番号这条路只读写本地文件，用不上。任务级文件操作锁由 strm 侧自己抢。
+func (s *Service) runJavScrape(ctx context.Context, task *domain.StrmTask) map[string]any {
+	if s.strm == nil {
+		return map[string]any{"status": "failed", "success": false, "message": "STRM 服务未就绪"}
+	}
+	releaseFiles, ok := s.strm.TryBeginTaskFileOperation(task.ID)
+	if !ok {
+		return map[string]any{"status": "failed", "success": false, "message": "该 STRM 任务正在运行，请稍后再刮削"}
+	}
+	defer releaseFiles()
+	written, noSidecar, err := s.strm.RebuildJavArtifactsAll(ctx, task)
+	if err != nil {
+		return map[string]any{"status": "failed", "success": false, "message": err.Error()}
+	}
+	message := fmt.Sprintf("番号元数据已重建 %d 个文件", written)
+	if noSidecar > 0 {
+		message = fmt.Sprintf("%s（%d 部本地没有侧车 json，已跳过）", message, noSidecar)
+	}
+	return map[string]any{
+		"status":  "success",
+		"success": true,
+		"message": message,
+		"data": map[string]any{
+			"task_id":    task.ID,
+			"name":       task.Name,
+			"media_kind": domain.StrmMediaKindJav,
+			"written":    written,
+			"no_sidecar": noSidecar,
+		},
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -791,27 +792,34 @@ func relPath(dir, name string) string {
 	return dir + "/" + name
 }
 
-// javMetaExtensions 在番号任务的元数据扩展名集合里补上 `json`。
+// taskMetaExtensions 算这次扫描要收集哪些「元数据小文件」扩展名。
 //
-// 侧车是生成本地 nfo / 图片的**唯一输入**，而它就在网盘上视频的同层目录里。
-// 走既有的元数据同步链路把它下下来（而不是在生成器里另写一条「解析地址 + 重试 +
-// 处理 115 重定向」的路）：那条路已经被 metadataSyncer 试过错了 ——
-// 并发闸、重试轮次、临时文件 + 原子落盘，重写一遍只会重踩。
+// 同步链路本身（syncMetadata + 全局设置 strm_metadata_extensions / 大小上限 /
+// 同步模式 / 父目录）一个字都不改，这里只决定**传哪些扩展名**：
 //
-// 误伤由读侧的 schema 校验兜住：形状不对的 json 会被当成「不是侧车」忽略
-// （见 emby.Parse），最坏情况只是多下一个几 KB 的文件。
+//   - 「同步元数据」（SyncFiles）开着 → 全局那批（字幕 / nfo / 图片）。
+//   - 番号任务 → **无条件**并入 `json`。侧车是生成本地 nfo / 图片的唯一输入，
+//     而它就在网盘上视频的同层目录里。走既有的元数据同步链路把它下下来（而不是
+//     在生成器里另写一条「解析地址 + 重试 + 处理 115 重定向」的路）：那条路已经被
+//     metadataSyncer 试过错了 —— 并发闸、重试轮次、临时文件 + 原子落盘，重写一遍
+//     只会重踩。误伤由读侧的 schema 校验兜住：形状不对的 json 会被当成「不是侧车」
+//     忽略（见 emby.Parse），最坏情况只是多下一个几 KB 的文件。
+//
+// 返回空集 = 这次扫描不收集任何元数据候选（也不跑 syncMetadata）。
 //
 // 抽成函数是因为**遍历入口有四条**（普通递归 / 增强清单 / 基础分支 / 手动同步
 // 当前目录），各写一遍迟早漏一条，而表现是「只有某个入口的番号任务不出图」。
-func javMetaExtensions(taskMediaKind string, metaExts map[string]struct{}) map[string]struct{} {
-	if taskMediaKind != domain.StrmMediaKindJav {
-		return metaExts
+func taskMetaExtensions(task *domain.StrmTask, globalExts map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{})
+	if task != nil && task.SyncFiles {
+		for k := range globalExts {
+			out[k] = struct{}{}
+		}
 	}
-	if metaExts == nil {
-		metaExts = map[string]struct{}{}
+	if task != nil && task.MediaKind == domain.StrmMediaKindJav {
+		out["json"] = struct{}{}
 	}
-	metaExts["json"] = struct{}{}
-	return metaExts
+	return out
 }
 
 // javArtifactNames 从**同一次 ReadDir 的结果**里算出「本程序生成的番号元数据」守卫。
@@ -993,6 +1001,86 @@ func (s *Service) RebuildJavArtifacts(ctx context.Context, task *domain.StrmTask
 			"本地没有这一部的侧车 json：请先对这个任务跑一次「同步元数据」的扫描，再重刮")
 	}
 	return res.Written, nil
+}
+
+// RebuildJavArtifactsAll 把整个任务输出目录里**每一部**的番号元数据重建一遍。
+//
+// 「重刮整库」：自动化联动里选中的番号任务走这里 —— 与单部的 RebuildJavArtifacts
+// 同一条生成路径（同一份生成器、同一个 Overwrite/RefetchImages 语义），只是把
+// 「这一部」换成「扫盘得到的全部 .strm」。
+//
+// 为什么不复用 tmdb 那条 RunAsync：番号的 nfo/图片不是 TMDB 数据写出来的，是读
+// **本地侧车 json** 生成的（见本文件头的铁律），两者是两套东西，不能互相顶替。
+//
+// 不碰网盘：缺侧车的部会被生成器跳过并计入 noSidecar，如实报数、不报错
+// （绝大多数媒体库还没推送过番号片，没有侧车是正常状态）。
+//
+// 返回值：written 是写出/重建的文件数，noSidecar 是「有 .strm 但本地没有可用侧车」的部数。
+func (s *Service) RebuildJavArtifactsAll(ctx context.Context, task *domain.StrmTask) (int64, int64, error) {
+	if s == nil || task == nil {
+		return 0, 0, domain.Errorf(domain.CodeValidation, "任务不存在")
+	}
+	if task.MediaKind != domain.StrmMediaKindJav {
+		return 0, 0, domain.Errorf(domain.CodeValidation, "该任务不是番号影片任务")
+	}
+	if s.javImages == nil {
+		return 0, 0, domain.Errorf(domain.CodeInternal, "图片抓取器未就绪")
+	}
+	root := TaskOutputDir(s.strmDir, TaskRelDir(task.GroupDir, task.OutputFolder))
+	if st, err := os.Stat(root); err != nil || !st.IsDir() {
+		return 0, 0, domain.Errorf(domain.CodeValidation, "STRM 输出目录不存在：%s", root)
+	}
+	relPaths, err := listAllStrmRelPaths(root)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(relPaths) == 0 {
+		return 0, 0, domain.Errorf(domain.CodeValidation, "输出目录里没有 .strm 文件：%s", root)
+	}
+	res := generateJavArtifacts(ctx, javArtifactRequest{
+		Root:          root,
+		StrmFiles:     relPaths,
+		Items:         s.scanSettings().JavMetaItems,
+		Overwrite:     true,
+		RefetchImages: true,
+		Images:        s.javImages,
+		Subtitles:     s.javSubtitles,
+		PosterQueue:   s.javPosters,
+		WatermarkEnabled: s.scanSettings().JavWatermarkEnabled,
+		WatermarkScale:   s.scanSettings().JavWatermarkScale,
+		WatermarkMargin:  s.scanSettings().JavWatermarkMargin,
+		watermarkDir:     s.scanSettings().JavWatermarkDir,
+		Log:              s.log,
+	})
+	if res.NoSidecar > 0 && res.Written == 0 {
+		return 0, res.NoSidecar, domain.Errorf(domain.CodeValidation,
+			"本地没有可用的侧车 json（%d 部）：请先对这个任务跑一次带「同步元数据」的扫描，再重刮", res.NoSidecar)
+	}
+	return res.Written, res.NoSidecar, nil
+}
+
+// listAllStrmRelPaths 递归列出输出目录里的全部 .strm，返回相对 root 的 `/` 分隔路径。
+func listAllStrmRelPaths(root string) ([]string, error) {
+	out := make([]string, 0, 64)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !strings.EqualFold(filepath.Ext(d.Name()), ".strm") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		out = append(out, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // WriteFileAtomic 原子覆盖写一个任务输出目录里的文件。

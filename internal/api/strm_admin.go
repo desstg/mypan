@@ -26,6 +26,7 @@ type strmTaskDTO struct {
 	ExcludeDirKeywords  string `json:"exclude_dir_keywords"`
 	ExcludeFileKeywords string `json:"exclude_file_keywords"`
 	SyncMetadata        bool   `json:"sync_metadata"`
+	SyncFiles           bool   `json:"sync_files"`
 	MediaKind           string `json:"media_kind"`
 	BranchCheckEnabled  bool   `json:"branch_check_enabled"`
 	TimeWindowEnabled   bool   `json:"time_window_enabled"`
@@ -622,6 +623,7 @@ func fromStrmTaskDTO(in strmTaskDTO) *domain.StrmTask {
 		ExcludeDirKeywords:  in.ExcludeDirKeywords,
 		ExcludeFileKeywords: in.ExcludeFileKeywords,
 		SyncMetadata:        in.SyncMetadata,
+		SyncFiles:           in.SyncFiles,
 		MediaKind:           in.MediaKind,
 		BranchCheckEnabled:  in.BranchCheckEnabled,
 		TimeWindowEnabled:   in.TimeWindowEnabled,
@@ -651,6 +653,7 @@ func toStrmTaskDTO(task *domain.StrmTask, meta strm.TaskListMeta, automationMana
 		ExcludeDirKeywords:  task.ExcludeDirKeywords,
 		ExcludeFileKeywords: task.ExcludeFileKeywords,
 		SyncMetadata:        task.SyncMetadata,
+		SyncFiles:           task.SyncFiles,
 		MediaKind:           task.MediaKind,
 		BranchCheckEnabled:  task.BranchCheckEnabled,
 		TimeWindowEnabled:   task.TimeWindowEnabled,

@@ -127,7 +127,7 @@ func scanEnhancedTask(
 			continue // 远端路径不在任务根范围内，忽略
 		}
 		recordMetadataDirectory(state.metadataDirs, e.ParentID, relDirs)
-		classified := classifyScanFile(e.FileID, e.Name, outputFolder, e.Size, relDirs, exts, metaExts, minMediaBytes, metaMaxBytes, task.SyncMetadata)
+		classified := classifyScanFile(e.FileID, e.Name, outputFolder, e.Size, relDirs, exts, metaExts, minMediaBytes, metaMaxBytes, len(metaExts) > 0)
 		if classified.hasMedia {
 			candidates = append(candidates, classified.media)
 			dirHasMedia[dirKey(relDirs)] = true

@@ -46,9 +46,10 @@ type currentDirWork struct {
 	outputFolder string
 	root         string
 	scanCfg      ScanSettings
-	// metaExts 是（番号任务已补上 json 的）元数据扩展名集合。**必须是 prepare 那份**：
-	// 调用方那边再解析一次就会漏掉 javMetaExtensions，表现是「只有手动生成那一路
-	// 不下侧车、于是不出 nfo/图」。
+	// metaExts 是这次要收集的元数据扩展名集合（番号任务已无条件补上 json）。
+	// **必须是 prepare 那份**：调用方那边再解析一次就会漏掉 taskMetaExtensions，
+	// 表现是「只有手动生成那一路不下侧车、于是不出 nfo/图」。
+	// 集合非空即「要收集元数据」—— 番号即便两个开关都关也非空（json 必收）。
 	metaExts        map[string]struct{}
 	selected        []mediaCandidate
 	metadataItems   []metadataItem
@@ -83,7 +84,7 @@ func (s *Service) CheckCurrentDirectoryStatus(ctx context.Context, accountID int
 			status.PendingStrm++
 		}
 	}
-	if work.task.SyncMetadata {
+	if len(work.metaExts) > 0 {
 		filtered := filterMetadataItems(work.metadataItems, nil, nil, false)
 		plan, planErr := buildMetadataSyncPlan(ctx, metadataSyncRequest{
 			Root:         work.root,
@@ -181,7 +182,7 @@ func (s *Service) GenerateCurrentDirectory(ctx context.Context, accountID int64,
 		out.Deleted = removed
 	}
 
-	if work.task.SyncMetadata {
+	if len(work.metaExts) > 0 {
 		filtered := filterMetadataItems(work.metadataItems, nil, nil, false)
 		syncResult, syncErr := syncMetadata(ctx, metadataSyncRequest{
 			AccountID:    work.task.AccountID,
@@ -211,7 +212,8 @@ func (s *Service) GenerateCurrentDirectory(ctx context.Context, accountID int64,
 	// 而扫描那一路只处理本轮新增 / 更新的（老片子不会自己回头补）。
 	//
 	// 与扫描那一路同样排在 syncMetadata 之后：侧车 json 得先在本地躺好。
-	if work.task.MediaKind == domain.StrmMediaKindJav && s.javImages != nil {
+	// 「刮削元数据」关掉时也不生成：那时只下 strm 与 json 侧车，不产出 nfo/图片。
+	if work.task.MediaKind == domain.StrmMediaKindJav && work.task.SyncMetadata && s.javImages != nil {
 		if dirAbs := filepath.Join(work.root, outputDirRel(work.outputFolder, work.relDirs)); dirAbs != "" {
 			if names, listErr := listStrmFiles(dirAbs); listErr == nil && len(names) > 0 {
 				res := generateJavArtifacts(ctx, javArtifactRequest{
@@ -263,7 +265,7 @@ func (s *Service) prepareCurrentDirectoryWork(ctx context.Context, accountID int
 	}
 	// 与 ScanTask 同一处收口：手动「生成当前目录 STRM」也要给番号任务补上 json，
 	// 否则它在界面上看起来就是「只有手动生成那一路不出图」。
-	metaExts := javMetaExtensions(task.MediaKind, parseExtensions(scanCfg.MetadataExtensions))
+	metaExts := taskMetaExtensions(task, parseExtensions(scanCfg.MetadataExtensions))
 	minMediaBytes := int64(scanCfg.MinFileSizeMB) * 1024 * 1024
 	metaMaxBytes := int64(scanCfg.MetadataMaxSizeMB) * 1024 * 1024
 	if scanCfg.MetadataMaxSizeMB <= 0 {
@@ -296,7 +298,7 @@ func (s *Service) prepareCurrentDirectoryWork(ctx context.Context, accountID int
 			})
 			continue
 		}
-		if task.SyncMetadata && len(metaExts) > 0 {
+		if len(metaExts) > 0 {
 			if _, ok := metaExts[ext]; ok {
 				if metaMaxBytes > 0 && item.Size > metaMaxBytes {
 					continue
