@@ -683,15 +683,19 @@ func addCNInclude(t *testing.T, rules Rules, brand string) Rules {
 
 // TestCNBrandsFromRules 从分类规则里把「用户填的国产厂牌」挑出来。
 func TestCNBrandsFromRules(t *testing.T) {
-	// ① 出厂默认表：那 12 条 `MD-`/`MDX-`… 本来就是代码表里的厂牌。
-	// 取出 12 个，而且**加进候选段之后与代码表逐字相同** —— 这是「用户什么都没填时
-	// 行为不变」的保证：多一个候选都可能抢走别的番号。
+	// ① 出厂默认表：那 12 条 `MD-`/`MDX-`… 本来就是代码表里的厂牌，
+	// 外加 2026-10-03 从真机补进来的 `cus` / `pme` / `91cm`（共 15 个）。
+	//
+	// **后两条真的会改变候选段**（`CUS` 与 `91CM` 不在 `cnBrandPrefixes` 里），
+	// 也就是说默认表从此也把 `CUS1729` / `91CM109` 认成番号 —— 分类与改名
+	// 两条路对同一批片子给出同一个答案（`CUS-1729` / `91CM-109`）。
+	// 这是**有意**的：用户明确要求把这三条进默认。`pme` 已经在候选段里，不改变它。
 	def := CNBrandsFromRules(Defaults().ClassifyRules)
-	if len(def) != 12 {
-		t.Fatalf("默认表应当取出 12 个厂牌，got %d：%v", len(def), def)
+	if len(def) != 15 {
+		t.Fatalf("默认表应当取出 15 个厂牌，got %d：%v", len(def), def)
 	}
-	if alt := cnBrandAlt(def); alt != cnBrandPrefixes {
-		t.Errorf("默认表的厂牌不该改变候选段：\n%q\n%q", alt, cnBrandPrefixes)
+	if alt := cnBrandAlt(def); alt != cnBrandPrefixes+"|CUS|91CM" {
+		t.Errorf("默认表的候选段只该多出 CUS 与 91CM：\n%q", alt)
 	}
 
 	// ② 用户新加的厂牌要取出来：转大写、去掉尾连字符、去重、保序。
@@ -708,8 +712,8 @@ func TestCNBrandsFromRules(t *testing.T) {
 		t.Errorf("CNBrandsFromRules = %v, 期望 %v", got, want)
 	}
 	// 代码表里已有的（MDCN/MDL）不重复加进候选段，用户新加的才加。
-	if alt := cnBrandAlt(got); alt != cnBrandPrefixes+"|ZZBRAND" {
-		t.Errorf("候选段 = %q，期望只多一个 ZZBRAND", alt)
+	if alt := cnBrandAlt(got); alt != cnBrandPrefixes+"|CUS|91CM|ZZBRAND" {
+		t.Errorf("候选段 = %q，期望在默认那两条之外只多一个 ZZBRAND", alt)
 	}
 
 	// ③ 形不成厂牌的 token 一个都不能捞进来 —— 规则表里还会有水印、中文、纯数字。
@@ -726,7 +730,7 @@ func TestCNBrandsFromRules(t *testing.T) {
 	mixed := CNBrandsFromRules(append(Defaults().ClassifyRules, ClassifyRule{
 		Name: "有码补充", TargetName: "有码", Includes: []string{"ZZBRAND"},
 	}))
-	if len(mixed) != 12 {
+	if len(mixed) != len(def) {
 		t.Errorf("「有码」里填的词不该被当成国产厂牌：%v", mixed)
 	}
 
