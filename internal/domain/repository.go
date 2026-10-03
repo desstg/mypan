@@ -27,6 +27,10 @@ type ConfigRepository interface {
 
 type NotificationRepository interface {
 	Create(ctx context.Context, n *Notification) (int64, error)
+	// CreateOrMerge 落一条通知；若已存在**未读**且 (category, ref_id, title, message)
+	// 完全相同的行，则把那一行 count+1、created_at 推到当前，返回 merged=true。
+	// 同键的已读行不合并 —— 读过之后再发生要重新亮红点。
+	CreateOrMerge(ctx context.Context, n *Notification) (id int64, merged bool, err error)
 	List(ctx context.Context, limit, offset int) ([]*Notification, error)
 	UnreadCount(ctx context.Context) (int, error)
 	MarkRead(ctx context.Context, id int64) error

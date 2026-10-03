@@ -106,6 +106,9 @@ type notificationDTO struct {
 	AccountID int64  `json:"account_id,omitempty"`
 	RefID     int64  `json:"ref_id,omitempty"`
 	IsRead    bool   `json:"is_read"`
+	// Count > 1 表示这条是同键合并来的：前端显示「N 次」。
+	Count     int    `json:"count"`
+	FirstAt   string `json:"first_at,omitempty"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -116,6 +119,11 @@ func toNotificationDTOs(items []*domain.Notification) []notificationDTO {
 			continue
 		}
 		created := FormatAPITime(it.CreatedAt)
+		count := it.Count
+		if count <= 0 {
+			count = 1
+		}
+		first := FormatAPITime(it.FirstAt)
 		out = append(out, notificationDTO{
 			ID:        it.ID,
 			Level:     it.Level,
@@ -125,6 +133,8 @@ func toNotificationDTOs(items []*domain.Notification) []notificationDTO {
 			AccountID: it.AccountID,
 			RefID:     it.RefID,
 			IsRead:    it.IsRead,
+			Count:     count,
+			FirstAt:   first,
 			CreatedAt: created,
 		})
 	}

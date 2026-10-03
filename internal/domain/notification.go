@@ -22,5 +22,10 @@ type Notification struct {
 	AccountID int64
 	RefID     int64
 	IsRead    bool
+	// Count 是同一条通知重复发生的次数（未读期间同键合并，见 notificationRepo.CreateOrMerge）。
+	// 1 表示只发生过一次；前端只在 >1 时显示次数。
+	Count int
+	// FirstAt 是第一次发生的时间；CreatedAt 会被合并推到最近一次（列表按它倒序）。
+	FirstAt   time.Time
 	CreatedAt time.Time
 }

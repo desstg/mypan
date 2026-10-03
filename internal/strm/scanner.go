@@ -337,7 +337,8 @@ func finalizeScan(
 		protectReason = strings.TrimSpace(state.cleanupBlockedReason)
 	}
 	if protectReason == "" && cleanupEnabled && !deps.ManualCleanupConfirm {
-		impact, countErr := collectCleanupImpact(root, taskRelDir, cleanupScopes, cleanupSkipped, seen, state.remoteChildren)
+		impact, countErr := collectCleanupImpact(root, taskRelDir, cleanupScopes, cleanupSkipped, seen, state.remoteChildren,
+			task.MediaKind == domain.StrmMediaKindJav)
 		if countErr != nil {
 			return result, countErr
 		}
@@ -1196,7 +1197,15 @@ const (
 // collectCleanupImpact 统计本次清理将影响的规模：
 // 过期 STRM（本地存在、本次远端未确认，跨范围去重）与 cleanupMissingRemoteChildDirs
 // 即将整体删除的顶层子目录数。
-func collectCleanupImpact(root, outputFolder string, scopes []cleanupScope, skipped map[string]struct{}, seen map[string]struct{}, remoteChildren map[string]map[string]struct{}) (cleanupImpact, error) {
+//
+// ⚠️ guardJavArtifacts 必须与 cleanupMissingRemoteChildDirs 的那个参数**同源**。
+// 统计与执行一旦不一致，被守卫放行的目录就永远只出现在统计里 —— 于是
+// `extrafanart/` 这种「本地独有、网盘上永远没有对应项」的番号元数据目录
+// 每一轮都会把 staleDirs 顶过阈值，报一条「安全保护阻止清理」，
+// 而实际要删的是 0 个。实测真机：50 部里有 28 部带 extrafanart，
+// dirDeleteThreshold=20，于是每轮定时扫描都发同一条通知，且因为保护生效，
+// 元数据同步整块被跳过 —— 表面「什么都没发生」，实际是白扫一轮。
+func collectCleanupImpact(root, outputFolder string, scopes []cleanupScope, skipped map[string]struct{}, seen map[string]struct{}, remoteChildren map[string]map[string]struct{}, guardJavArtifacts bool) (cleanupImpact, error) {
 	var imp cleanupImpact
 	taskFolder := localTaskDir("", outputFolder, nil)
 	staleSet := make(map[string]struct{})
@@ -1276,6 +1285,11 @@ func collectCleanupImpact(root, outputFolder string, scopes []cleanupScope, skip
 				continue
 			}
 			if _, ok := remoteNames[SafeName(entry.Name())]; ok {
+				continue
+			}
+			// 与 cleanupMissingRemoteChildDirs 的守卫保持一致：被放行的目录
+			// 不会真删，就不该计入待删规模（否则保护每轮都触发，见函数注释）。
+			if guardJavArtifactsDir(guardJavArtifacts, entry.Name()) {
 				continue
 			}
 			imp.staleDirs++

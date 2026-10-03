@@ -401,7 +401,7 @@ func TestCollectCleanupImpact(t *testing.T) {
 	remoteChildren := map[string]map[string]struct{}{
 		dirKey(nil): {SafeName("电视剧"): {}},
 	}
-	imp, err := collectCleanupImpact(root, "任务", scopes, nil, seen, remoteChildren)
+	imp, err := collectCleanupImpact(root, "任务", scopes, nil, seen, remoteChildren, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,6 +410,52 @@ func TestCollectCleanupImpact(t *testing.T) {
 	}
 	if imp.staleDirs != 1 {
 		t.Fatalf("待删顶层目录应为 1（电影），实际 %d", imp.staleDirs)
+	}
+}
+
+// TestCollectCleanupImpactSkipsJavArtifactDirs 番号任务下，本程序生成的 `extrafanart/`
+// 不能计入待删顶层目录 —— 否则统计与执行不一致，保护每轮都误触发。
+//
+// 实测真机（2026-10-03）：50 部里 28 部带 extrafanart，dirDeleteThreshold=20，
+// 于是每 6 小时一次的定时扫描都报「将删除本地 0 个 STRM / 28 个目录，超出保护阈值」，
+// 而真正会被删的目录是 0 个 —— 保护一生效，元数据同步整块被跳过，白扫一轮。
+func TestCollectCleanupImpactSkipsJavArtifactDirs(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "任务", "有码", "SSIS-001")
+	if err := os.MkdirAll(filepath.Join(dir, "extrafanart"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "本地独有目录"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SSIS-001.strm"), []byte("u"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	remoteChildren := map[string]map[string]struct{}{
+		dirKey([]string{"有码", "SSIS-001"}): {},
+	}
+	scopes := []cleanupScope{{relDirs: []string{"有码"}, recursive: true}}
+	seen := map[string]struct{}{"任务/有码/SSIS-001/SSIS-001.strm": {}}
+
+	// 番号任务：extrafanart 不计入，普通本地独有目录照旧计入
+	imp, err := collectCleanupImpact(root, "任务", scopes, nil, seen, remoteChildren, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imp.staleDirs != 1 {
+		t.Fatalf("番号任务下只应统计「本地独有目录」1 个，实际 %d", imp.staleDirs)
+	}
+	if reason := cleanupProtectReason(imp); reason != "" {
+		t.Fatalf("1 个目录不该触发保护，实际 %q", reason)
+	}
+
+	// 非番号任务（tmdb）：照旧统计，证明守卫是按任务类型生效的
+	imp, err = collectCleanupImpact(root, "任务", scopes, nil, seen, remoteChildren, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imp.staleDirs != 2 {
+		t.Fatalf("非番号任务下应统计 2 个（extrafanart + 本地独有目录），实际 %d", imp.staleDirs)
 	}
 }
 

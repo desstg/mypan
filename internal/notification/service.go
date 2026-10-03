@@ -125,11 +125,16 @@ func (s *Service) onCreated(ctx context.Context, e eventbus.NotificationCreated)
 	s.persist(ctx, level, category, e.Title, e.Message, e.AccountID, e.RefID)
 }
 
+// persist 落一条通知：同键的未读行合并（count+1），否则新增。
+//
+// 合并规则见 notificationRepo.CreateOrMerge。这里刻意**不**在服务层去重：
+// 判重键含 message，而 message 是各调用方拼出来的，服务层无从判断
+// 「这次和上次是不是同一件事」—— 交给仓储的一条原子 UPDATE 最省事也最准。
 func (s *Service) persist(ctx context.Context, level, category, title, message string, accountID, refID int64) {
 	if s.repo == nil {
 		return
 	}
-	_, err := s.repo.Create(ctx, &domain.Notification{
+	_, merged, err := s.repo.CreateOrMerge(ctx, &domain.Notification{
 		Level:     level,
 		Category:  category,
 		Title:     title,
@@ -139,6 +144,10 @@ func (s *Service) persist(ctx context.Context, level, category, title, message s
 	})
 	if err != nil {
 		s.log.Warn("persist notification failed", "title", title, "err", err)
+		return
+	}
+	if merged {
+		s.log.Debug("notification merged", "title", title, "ref_id", refID)
 	}
 }
 

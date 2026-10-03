@@ -255,6 +255,20 @@ function notifyListMessage(item: NotificationItem): string {
   return item.message;
 }
 
+// 重复次数：同一条通知在未读期间重复发生时由后端合并（count+1）。
+// 1 是常态，不显示 —— 只有反复发生的告警才需要这个数字。
+function repeatCount(item: NotificationItem): number {
+  return item.count ?? 1;
+}
+
+// 详情底部那行：合并过的显示「首次/最近/共 N 次」，普通通知只显示时间。
+function detailTimeText(item: NotificationItem): string {
+  const n = repeatCount(item);
+  if (n <= 1) return formatTimeShort(item.created_at);
+  const first = formatTimeShort(item.first_at) || formatTimeShort(item.created_at);
+  return `共 ${n} 次 · 首次 ${first} · 最近 ${formatTimeShort(item.created_at)}`;
+}
+
 function handleDocumentClick(e: MouseEvent) {
   const el = e.target as HTMLElement | null;
   if (!open.value || !el) return;
@@ -333,7 +347,12 @@ onUnmounted(() => {
         >
           <span class="notify-item__icon">{{ levelIcon(item.level) }}</span>
           <div class="notify-item__body">
-            <div class="notify-item__title">{{ item.title }}</div>
+            <div class="notify-item__title">
+              {{ item.title }}
+              <span v-if="repeatCount(item) > 1" class="notify-item__count">
+                {{ repeatCount(item) }} 次
+              </span>
+            </div>
             <div class="notify-item__msg">{{ notifyListMessage(item) }}</div>
             <div class="notify-item__time">{{ formatTimeShort(item.created_at) }}</div>
           </div>
@@ -382,7 +401,7 @@ onUnmounted(() => {
           </ul>
         </div>
 
-        <div class="notify-detail__meta">{{ formatTimeShort(detailItem.created_at) }}</div>
+        <div class="notify-detail__meta">{{ detailTimeText(detailItem) }}</div>
       </div>
 
       <template v-if="detailItem" #footer>
@@ -609,6 +628,19 @@ onUnmounted(() => {
   font-weight: 600;
   color: var(--text);
   line-height: 1.35;
+}
+
+.notify-item__count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  vertical-align: 1px;
 }
 
 .notify-item__msg {

@@ -15,6 +15,10 @@ export interface NotificationItem {
   account_id?: number;
   ref_id?: number;
   is_read: boolean;
+  /** 同一条通知重复发生的次数（未读期间同键合并）。1 表示只发生过一次。 */
+  count?: number;
+  /** 第一次发生的时间；created_at 是最近一次。 */
+  first_at?: string;
   created_at: string;
 }
 
