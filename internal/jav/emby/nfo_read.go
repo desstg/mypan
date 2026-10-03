@@ -49,6 +49,7 @@ type nfoMovieRead struct {
 	Release       string           `xml:"release"`
 	Genres        []string         `xml:"genre"`
 	Tags          []string         `xml:"tag"`
+	Sets          []nfoSet         `xml:"set"`
 	Studio        string           `xml:"studio"`
 	Series        string           `xml:"series"`
 	Maker         string           `xml:"maker"`
@@ -156,8 +157,18 @@ func ParseNFO(data []byte, hints NFOReadHints) (*MovieMeta, error) {
 		},
 	}
 	for _, a := range raw.Actors {
+		// **性别这里无从得知**：nfo 的 <actor> 只有 name/type，没有性别元素。
+		// 这不影响往返 —— 合集是从 <set> 原样读回来的（下面），不是从演员性别算的。
+		// 代价是「编辑器里看不出谁是男优」，而那份信息本来就不在 nfo 里。
 		if name := strings.TrimSpace(a.Name); name != "" {
 			meta.Actors = append(meta.Actors, name)
+		}
+	}
+	// <set> **原样收下**，不在重建时按性别/顺序重算：用户可能手工调过合集，
+	// 重算会把他的改动悄悄抹掉。往返的字节稳定也靠这一条（见 nfo_read_test.go）。
+	for _, s := range raw.Sets {
+		if name := strings.TrimSpace(s.Name); name != "" {
+			meta.Sets = append(meta.Sets, name)
 		}
 	}
 	if raw.Ratings != nil {
@@ -202,6 +213,9 @@ func ParseNFO(data []byte, hints NFOReadHints) (*MovieMeta, error) {
 	// 实测就栽在这：没有演员也没有标签的那批片（国产那几个）全打不开。
 	if meta.Actors == nil {
 		meta.Actors = []string{}
+	}
+	if meta.Sets == nil {
+		meta.Sets = []string{}
 	}
 	if meta.Tags == nil {
 		meta.Tags = []string{}

@@ -22,8 +22,13 @@ import (
 //
 // 字段的取值与 nfo 元素一一对应；凡是能从别的字段推出来的（`<sorttitle>` = title、
 // `<studio>`/`<label>` = maker、`<year>` 从发行日期、`<rating>`/`<criticrating>` 从
-// score 与 score_max 换算、`<set>` = 第一个演员、`<genre>`/`<tag>` 合成）都**不存**，
+// score 与 score_max 换算、`<genre>`/`<tag>` 合成）都**不存**，
 // 由 BuildNFOFromMeta 现算 —— 存两份迟早对不上。
+//
+// 唯一的例外是 `Sets`：它在**扫描**那条路上确实是算出来的（由 MovieMetaFromSidecar
+// 按性别现算），但**读回来**的那份必须原样保留 —— 用户可能手工调过某部片的合集，
+// 再按性别重算就等于把他的改动悄悄抹掉，而 Emby 那边只表现为「合集变了」。
+// 这与 `Names` 是同一类：读出来的那份以磁盘为准，不是从别的字段推。
 type MovieMeta struct {
 	// —— 番号与标题 ——
 	//
@@ -41,6 +46,19 @@ type MovieMeta struct {
 	// Tags **只含真标签**：合成项（4K / 番号字母 / 演员 / 破解 / 系列:/片商:/发行:）
 	// 已剥离，见 ParseNFO。
 	Tags []string `json:"tags"`
+
+	// Sets 是 <set>（Emby/Kodi 的「所属合集」）的成员名。
+	//
+	// 生成时由 MovieMetaFromSidecar 现算：**一位女演员一个**，男优不写，
+	// 上限 maxActorSets（用户库的既有形态就是这么写的，见仓库根 BBAN-548.nfo
+	// 两个 <set> 对应两位女演员）。没有女演员就一个都不写。
+	//
+	// 从磁盘读回来时**原样保留**，理由见 MovieMeta 的说明。
+	//
+	// 只存名字、不存性别：**性别不是 nfo 的内容**（`<actor>` 只有 name/type），
+	// 它只在生成那一刻用来算这个列表。往内容模型里塞一个「读回来必然是零值」的
+	// 字段，只会让人以为它是可编辑、可往返的。
+	Sets []string `json:"sets"`
 
 	Series    string `json:"series"`
 	Maker     string `json:"maker"`
@@ -89,6 +107,50 @@ type MovieMeta struct {
 	Names Names `json:"names"`
 }
 
+// maxActorSets 是一部片最多写几个 <set>。
+//
+// 上游的演员表在**总集篇**上会失控：用户库里 10+ 位女演员的有 244 部，
+// 最多一部 253 位（`311連発 … 260人460分` 那种）。一位女演员一个合集写下去，
+// Emby 里会凭空多出 253 个「只有这一部片」的合集，把合集列表整个冲垮。
+//
+// 取 5：1~5 位女演员的影片（用户库里约 1600 部）完全按规则写，多出来的截断。
+// 不做成设置项 —— 先写死，好调。
+const maxActorSets = 5
+
+// 性别码，与 domain.JavGenderMale 同值。这里**刻意不 import domain**：
+// 本包只依赖 domain 的类型（见 sidecar.go 顶部说明），而这一条是纯约定，
+// 复制一个常量比多引一层清楚。
+const genderMale = 1
+
+// actorSets 按「一位女演员一个合集」算出 <set> 的名字，上限 maxActorSets。
+//
+// **男优与导演不写**：上游演员数组是「主要女演员在前、男优在后」，而合集在用户库的
+// 既有形态里就是「这位女演员的片聚在一起」—— 男优当合集是错的（真机上 `デカ吉`
+// 就当过 CAWD-987 的合集，见迁移 0050）。
+//
+// 没有女演员就返回 nil（男同片、纯总集篇）—— 一个 <set> 都不写，而不是拿导演或
+// 第一个演员兜底。返回 nil 而不是空切片：`omitempty` 才会让整个元素消失。
+//
+// 入参是**侧车的演员**而不是名字列表：性别只在这一个地方有用，而它正是
+// `<actor>` 元素里不存在的那个信息 —— 算完就丢掉，不进 MovieMeta。
+func actorSets(actors []SidecarActor) []string {
+	var out []string
+	for _, a := range actors {
+		if a.Gender == genderMale {
+			continue
+		}
+		name := strings.TrimSpace(a.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, name)
+		if len(out) >= maxActorSets {
+			break
+		}
+	}
+	return out
+}
+
 // MovieMetaFromSidecar 把侧车转成 nfo 的内容模型。与旧的 BuildNFO 逐项一致。
 func MovieMetaFromSidecar(doc *SidecarDoc, opts NFOOptions) *MovieMeta {
 	meta := &MovieMeta{
@@ -131,6 +193,12 @@ func MovieMetaFromSidecar(doc *SidecarDoc, opts NFOOptions) *MovieMeta {
 			meta.Actors = append(meta.Actors, name)
 		}
 	}
+	// 合集在这一刻算一次（上游顺序 + 性别都已经在手），算完就丢掉性别 ——
+	// 性别不是 nfo 的内容，`<actor>` 只有 name/type。
+	//
+	// **不在 BuildNFOFromMeta 里现算**：那条路要同时服务「扫描生成」与「编辑器保存」，
+	// 而后者读回来的合集必须原样写回，不能重算（见 MovieMeta.Sets 的说明）。
+	meta.Sets = actorSets(doc.Actors)
 	for _, tag := range doc.Tags {
 		if tag = strings.TrimSpace(tag); tag != "" {
 			meta.Tags = append(meta.Tags, tag)
@@ -139,6 +207,9 @@ func MovieMetaFromSidecar(doc *SidecarDoc, opts NFOOptions) *MovieMeta {
 	// 同 ParseNFO：nil 切片出 JSON 会是 null，前端那两个 chip 列表会当场抛错。
 	if meta.Actors == nil {
 		meta.Actors = []string{}
+	}
+	if meta.Sets == nil {
+		meta.Sets = []string{}
 	}
 	if meta.Tags == nil {
 		meta.Tags = []string{}
@@ -229,15 +300,21 @@ func BuildNFOFromMeta(meta *MovieMeta) ([]byte, error) {
 			m.Actors = append(m.Actors, nfoActor{Name: name, Type: "Actor"})
 		}
 	}
-	if len(m.Actors) > 0 {
-		// 样本的 <set><name> 用的是**演员名**而不是系列名（很多片没有系列）。
-		m.Set = &nfoSet{Name: m.Actors[0].Name}
+	// <set> **不在这里算**：它由 MovieMetaFromSidecar（扫描生成）或 ParseNFO（编辑器
+	// 读回来的那份）填好，这里只负责序列化。理由见 MovieMeta.Sets 的注释 ——
+	// 在这里按性别重算会把用户手工改过的合集抹掉。
+	for _, name := range meta.Sets {
+		if name = strings.TrimSpace(name); name != "" {
+			m.Sets = append(m.Sets, nfoSet{Name: name})
+		}
 	}
 
 	if director := strings.TrimSpace(meta.Director); director != "" {
 		m.Director = director
 	}
 
+	// <genre> 里的演员名**不区分性别、也不截断**：那是 nfo 的「演员」词条，
+	// 与 <set>（合集）是两回事 —— 男优也要出现在 genre/tag 里，样本如此。
 	genres := buildGenres(genreInput{
 		tags:      meta.Tags,
 		fourK:     meta.FourK,

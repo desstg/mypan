@@ -92,7 +92,7 @@ const dragState = ref<{ startX: number; startY: number; start: JavCropRect } | n
 function emptyMeta(): JavMovieMeta {
   return {
     number: "", number_letter: "", title: "", origin_title: "", summary: "",
-    actors: [], director: "", tags: [], series: "", maker: "", publisher: "", label: "",
+    actors: [], director: "", tags: [], sets: [], series: "", maker: "", publisher: "", label: "",
     release_date: "", duration: 0, score: 0, score_max: 5, votes: 0, rating_name: "javdb",
     javdb_url: "", cover_url: "", trailer_url: "", added_at: "",
     four_k: false, uncensored: false, has_subtitle: false,
@@ -145,6 +145,9 @@ async function load() {
     Object.assign(form, emptyMeta(), meta, {
       actors: meta.actors ?? [],
       tags: meta.tags ?? [],
+      // sets 也可能是旧版本服务端给的 undefined —— 与上面两个同理，
+      // 列表控件读 `.length`，null/undefined 会让抽屉渲染失败。
+      sets: meta.sets ?? [],
     });
     applyWatermarkPreset(data.watermark?.preset);
     rect.value = data.poster?.rect ?? { x: 0, y: 0, w: 0, h: 0 };
@@ -416,6 +419,14 @@ async function rebuild() {
 
           <div class="jav-edit__section-title">演员</div>
           <JavStringListEditor v-model="form.actors" placeholder="输入演员名后回车" empty-hint="无" />
+
+          <div class="jav-edit__section-title">所属合集（&lt;set&gt;）</div>
+          <JavStringListEditor
+            v-model="form.sets"
+            placeholder="输入合集名后回车"
+            empty-hint="无"
+            input-hint="扫描时按「一位女演员一个合集」自动写（男优不写、最多 5 个）；这里改了什么就存什么，保存后不会被重算覆盖。"
+          />
 
           <div class="jav-edit__section-title">标签</div>
           <JavStringListEditor v-model="form.tags" placeholder="输入标签后回车" empty-hint="无" />

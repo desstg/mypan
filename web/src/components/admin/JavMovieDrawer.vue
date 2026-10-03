@@ -1113,6 +1113,9 @@ onUnmounted(() => {
               <MediaImage :src="javImageURL(a.avatar_url)" :alt="a.name" variant="person" />
             </span>
             <span>{{ a.name }}</span>
+            <!-- 男优加一枚标记：列表按上游顺序排（女演员在前、男优在后），
+                 没有标记的话满屏人名看不出谁是谁。女演员不加，保持列表干净。 -->
+            <span v-if="a.gender === 1" class="jd-actor__gender">男</span>
           </button>
         </div>
         <div v-else class="jd-empty-hint">暂无演员。</div>

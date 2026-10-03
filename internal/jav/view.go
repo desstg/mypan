@@ -40,10 +40,15 @@ type MovieCard struct {
 }
 
 // ActorView 是演员。
+//
+// Gender 是上游的性别码（`domain.JavGenderMale` = 1 是男，其余含未知是女）。
+// 前端只拿它做一件事：给男优加一枚「男」标记 —— 详情页的演员列表是按上游顺序排的
+// （女演员在前），没有标记的话满屏人名看不出谁是谁。
 type ActorView struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	AvatarURL string `json:"avatar_url"`
+	Gender    int    `json:"gender"`
 }
 
 // MagnetView 是一颗磁链。

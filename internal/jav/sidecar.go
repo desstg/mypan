@@ -138,7 +138,10 @@ type sidecarActorJSON struct {
 	ID string `json:"id"`
 	// Name 是 nfo 的 <actor><name>。
 	Name string `json:"name"`
-	// Gender 是上游给的性别码。
+	// Gender 是上游给的性别码（1 = 男，其余含缺省 = 女，见 domain.JavGenderMale）。
+	//
+	// 读侧（internal/jav/emby）**真的会读它**：nfo 的 <set>（演员合集）要按性别把
+	// 男优剔掉 —— 一位女演员一个合集是用户库的既有形态。这里只是原样透传上游那个数。
 	Gender int `json:"gender"`
 	// Avatar 是演员头像的**原始地址**（同样可能混淆），给 nfo 的 <actor><thumb>。
 	Avatar string `json:"avatar"`

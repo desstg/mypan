@@ -139,6 +139,14 @@ export interface JavActor {
   id: string;
   name: string;
   avatar_url: string;
+  /**
+   * 上游的性别码：`1` 是男优，其余（含缺省 `0`）是女优。
+   *
+   * 只用来在演员列表里给男优加一枚「男」标记 —— 列表是按上游顺序排的
+   * （女演员在前、男优在后），满屏人名没有标记看不出谁是谁。
+   * 榜单接口（JavRankingResult）也会带上它。
+   */
+  gender: number;
 }
 
 /** 磁链。角标由服务端算好，前端只负责画。 */

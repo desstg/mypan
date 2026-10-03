@@ -1862,6 +1862,18 @@
   object-fit: cover;
 }
 
+/* 男优的「男」标记。刻意做得比名字轻一档：它是一枚注脚，不是主体 ——
+   女演员（列表里的大多数）不带标记，一眼扫过去仍然是人名列表。 */
+.jd-actor__gender {
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
 /* —— 简介 —— */
 
 /* 「加载中…」那态：比正文浅一档，读起来像占位而不是内容。 */

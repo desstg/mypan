@@ -207,6 +207,60 @@ func TestParseNFOTagEqualsActorName(t *testing.T) {
 	}
 }
 
+// TestParseNFOMultipleSetsRoundTrip 多 `<set>` 必须原样收下、原样写回。
+//
+// 这是编辑器「打开不改保存」的字节稳定里最容易破的一环：<set> 在扫描那条路上是
+// **算出来**的（一位女演员一个，看性别、有上限），如果重建时也走那套算法，
+// 用户手工加/删过合集的 nfo 一保存就会被重算覆盖 —— 而 Emby 那边只表现为
+// 「合集变了」，没人会想到是编辑器干的。
+//
+// 用仓库根那份真产物 `BBAN-548.nfo` 的形状（两个 <set>，两位女演员）。
+func TestParseNFOMultipleSetsRoundTrip(t *testing.T) {
+	const raw = `<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<movie>
+  <title>BBAN-548 标题</title>
+  <actor>
+    <name>二羽紗愛</name>
+    <type>Actor</type>
+  </actor>
+  <actor>
+    <name>弥生美月</name>
+    <type>Actor</type>
+  </actor>
+  <set>
+    <name>二羽紗愛</name>
+  </set>
+  <set>
+    <name>弥生美月</name>
+  </set>
+  <num>BBAN-548</num>
+</movie>
+`
+	meta, err := ParseNFO([]byte(raw), NFOReadHints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(meta.Sets, "|") != "二羽紗愛|弥生美月" {
+		t.Fatalf("多 <set> 没读全或顺序错了：%v", meta.Sets)
+	}
+	if len(meta.Actors) != 2 {
+		t.Fatalf("演员应当是 2 个：%v", meta.Actors)
+	}
+	again, err := BuildNFOFromMeta(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 两个 <set> 都要在，且**顺序不变**
+	for _, name := range []string{"二羽紗愛", "弥生美月"} {
+		if !bytes.Contains(again, []byte("<set>\n    <name>"+name+"</name>\n  </set>")) {
+			t.Errorf("重建后丢了 <set><name>%s</name>：\n%s", name, again)
+		}
+	}
+	if got := bytes.Count(again, []byte("<set>")); got != 2 {
+		t.Errorf("<set> 条数 = %d，want 2\n%s", got, again)
+	}
+}
+
 func TestParseNFORejectsGarbage(t *testing.T) {
 	cases := []struct {
 		label, raw string

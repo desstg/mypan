@@ -366,6 +366,12 @@ func TestIngestMovieLinksActorsAndKeepsRaw(t *testing.T) {
 	if len(actors) != 2 {
 		t.Fatalf("演员关联 = %d 条，want 2", len(actors))
 	}
+	// **顺序是上游那份**（演员甲在前），不是按名字排序 —— nfo 的 <set>（演员合集）
+	// 与详情页的演员列表都吃这个次序。这里两个名字按名字排恰好也是这个序，
+	// 所以顺带钉住「至少没被改成别的排序」。
+	if actors[0].Name != "演员甲" {
+		t.Errorf("演员顺序应当与上游一致（演员甲在前），got %q", actors[0].Name)
+	}
 
 	// 演员表要有头像。
 	if actors[0].AvatarURL == "" && actors[1].AvatarURL == "" {

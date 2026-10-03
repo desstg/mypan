@@ -74,6 +74,12 @@ func TestParseAcceptsSample(t *testing.T) {
 	if len(doc.Images.Previews) != 1 {
 		t.Errorf("previews 条数 = %d", len(doc.Images.Previews))
 	}
+	// 性别码要真的读进来：nfo 的 <set>（合集）靠它把男优剔掉。
+	// 读侧以前把它列在忽略白名单里，那时集合里只有女演员也不会被误伤 ——
+	// 而真机上恰恰就是男优当了合集（见迁移 0050）。
+	if len(doc.Actors) != 1 || doc.Actors[0].Gender != 1 {
+		t.Errorf("actors[].gender 没读进来：%+v", doc.Actors)
+	}
 }
 
 // TestParseRejects 三种必须拒绝的输入。

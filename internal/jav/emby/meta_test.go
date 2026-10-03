@@ -76,7 +76,8 @@ func TestEmptySlicesMarshalAsArray(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := string(blob)
-		if !strings.Contains(got, `"actors":[]`) || !strings.Contains(got, `"tags":[]`) {
+		if !strings.Contains(got, `"actors":[]`) || !strings.Contains(got, `"tags":[]`) ||
+			!strings.Contains(got, `"sets":[]`) {
 			t.Errorf("空列表应当序列化成 []，got：\n%s", got)
 		}
 	}

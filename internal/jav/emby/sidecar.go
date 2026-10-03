@@ -82,10 +82,15 @@ type SidecarCredit struct {
 
 // SidecarActor 是演员。
 //
+// Gender 是上游 JAVDB 的性别码（1 = 男，其余含缺省 = 女，见 domain.JavGenderMale）。
+// 它**只用来把男优从 nfo 的 `<set>`（演员合集）里剔掉** —— 合集按用户库的既有形态
+// 是「一位女演员一个」，男优当合集是错的（真机上就是这么错的，见迁移 0050）。
+//
 // Avatar 不参与 nfo：上游头像地址同样经 XOR 混淆，写进 <actor><thumb> 会让 Emby
 // 拉回一张花屏图，而样本 nfo 里本来就没有这个元素。
 type SidecarActor struct {
-	Name string `json:"name"`
+	Name   string `json:"name"`
+	Gender int    `json:"gender"`
 }
 
 // SidecarImages 是封面与剧照的**原始地址**。
@@ -220,7 +225,6 @@ var ignoredSidecarPaths = map[string]string{
 	"dest.path":          "网盘路径，同上",
 	"dest.files":         "落盘文件清单（含它下面每个条目），同上",
 	"actors[].id":        "JAVDB 自家演员 id，写进 <tmdbid> 会让 Emby 认到别人",
-	"actors[].gender":    "性别，nfo 的 <actor> 只有 name/type",
 	"actors[].avatar":    "头像地址同样经 XOR 混淆，写进 <thumb> 只会让 Emby 拉到花屏图",
 	"director.id":        "同 actors[].id",
 	"maker.id":           "同 actors[].id",

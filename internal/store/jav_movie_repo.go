@@ -270,6 +270,14 @@ func (r *javMovieRepo) MarkViewed(ctx context.Context, id string, at time.Time) 
 	return wrapDB(err)
 }
 
+// ReplaceMovieActors 用给定的演员集合整体替换该影片的关联。
+//
+// **入参顺序就是上游演员表的次序，必须原样存进 position**：上游那份是
+// 「主要女演员在前、男优与导演之类在后」，nfo 的 `<set>`（演员合集）与详情页的
+// 演员列表都按它排。丢掉次序的代价实测过：`<set>` 会取到按名字排序的第一个，
+// 于是男优当了合集（见迁移 0050 的注释）。
+//
+// 去重与跳过空 id 之后再编号 —— 编在**最终写入的次序**上，不留空洞。
 func (r *javMovieRepo) ReplaceMovieActors(ctx context.Context, movieID string, actorIDs []string) error {
 	tx, err := r.db.write.BeginTx(ctx, nil)
 	if err != nil {
@@ -281,6 +289,7 @@ func (r *javMovieRepo) ReplaceMovieActors(ctx context.Context, movieID string, a
 		return wrapDB(err)
 	}
 	seen := make(map[string]struct{}, len(actorIDs))
+	position := 0
 	for _, id := range actorIDs {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -291,9 +300,11 @@ func (r *javMovieRepo) ReplaceMovieActors(ctx context.Context, movieID string, a
 		}
 		seen[id] = struct{}{}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO jav_movie_actors(movie_id, actor_id) VALUES (?,?)`, movieID, id); err != nil {
+			`INSERT INTO jav_movie_actors(movie_id, actor_id, position) VALUES (?,?,?)`,
+			movieID, id, position); err != nil {
 			return wrapDB(err)
 		}
+		position++
 	}
 	return wrapDB(tx.Commit())
 }
@@ -359,11 +370,19 @@ func (r *javMovieRepo) ActorsByIDs(ctx context.Context, ids []string) (map[strin
 	return out, nil
 }
 
+// ListActors 取一部影片的演员，**按上游那份演员表的次序**（position 列）。
+//
+// 这里原本是 `ORDER BY a.name COLLATE NOCASE` —— 那个排序的代价是静默的：
+// nfo 的 `<set>` 取 `Actors[0]`，于是合集变成了「按名字排序的第一个演员」，
+// 男优 `デカ吉`（か行）就这样排到了女优 `彩月七緒`（さ行）前面（见迁移 0050）。
+//
+// 改成 position 之后，详情页的演员列表也顺带变成了「女演员在前、男优在后」，
+// 与上游网页看到的一致。position 是 ReplaceMovieActors 按上游次序写的。
 func (r *javMovieRepo) ListActors(ctx context.Context, movieID string) ([]*domain.JavActor, error) {
 	rows, err := r.db.read.QueryContext(ctx, `
 SELECT a.id, a.name, a.gender, a.avatar_url
 FROM jav_movie_actors ma JOIN jav_actors a ON a.id = ma.actor_id
-WHERE ma.movie_id = ? ORDER BY a.name COLLATE NOCASE`, movieID)
+WHERE ma.movie_id = ? ORDER BY ma.position, a.name COLLATE NOCASE`, movieID)
 	if err != nil {
 		return nil, wrapDB(err)
 	}

@@ -570,7 +570,7 @@ func (s *Service) rankingUpstream(ctx context.Context, q RankingQuery) (RankingR
 			_ = s.movies.UpsertActor(ctx, &domain.JavActor{
 				ID: a.ID, Name: a.Name, Gender: a.Gender.Int(), AvatarURL: a.AvatarURL,
 			})
-			out = append(out, ActorView{ID: a.ID, Name: a.Name, AvatarURL: a.AvatarURL})
+			out = append(out, ActorView{ID: a.ID, Name: a.Name, AvatarURL: a.AvatarURL, Gender: a.Gender.Int()})
 		}
 		return RankingResult{Actors: out, Total: len(out)}, nil
 
@@ -1032,7 +1032,7 @@ func (s *Service) assembleDetail(ctx context.Context, m *domain.JavMovie, opt de
 	}
 	actorViews := make([]ActorView, 0, len(actors))
 	for _, a := range actors {
-		actorViews = append(actorViews, ActorView{ID: a.ID, Name: a.Name, AvatarURL: a.AvatarURL})
+		actorViews = append(actorViews, ActorView{ID: a.ID, Name: a.Name, AvatarURL: a.AvatarURL, Gender: a.Gender})
 	}
 
 	// 磁链抓不到**不该让整个详情抽屉打不开**：影片的标题、封面、演员、简介

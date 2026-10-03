@@ -77,7 +77,10 @@ type nfoMovie struct {
 	Studio string   `xml:"studio,omitempty"`
 	Tags   []string `xml:"tag,omitempty"`
 
-	Set      *nfoSet      `xml:"set,omitempty"`
+	// Sets 是 <set>（合集）。**切片而不是单值**：用户库里一位女演员一个合集
+	// （仓库根 BBAN-548.nfo 就是两个 <set>，对应两位女演员）。`omitempty` 对切片
+	// 天然生效 —— 一个都没有时整个元素不出现（没有女演员的片就该这样）。
+	Sets     []nfoSet     `xml:"set,omitempty"`
 	FileInfo *nfoFileInfo `xml:"fileinfo,omitempty"`
 
 	Series       string     `xml:"series,omitempty"`

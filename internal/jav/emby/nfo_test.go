@@ -73,13 +73,107 @@ func TestBuildNFOElementMapping(t *testing.T) {
 			t.Errorf("%s：nfo 里找不到 %s\n---\n%s", c.label, c.want, xml)
 		}
 	}
-	// <set> 用演员名（样本就是这么写的，不是系列名）
-	if !strings.Contains(xml, "<set>\n    <name>演员甲</name>\n  </set>") {
-		t.Errorf("<set> 应当用第一个演员的名字：\n%s", xml)
+	// <set>（合集）**不该出现**：样本侧车里那位演员 gender=1（男优），
+	// 而合集按用户库的既有形态是「一位女演员一个」，男优不写。
+	// 正面的规则在 TestBuildNFOSetsPerFemaleActor 里逐条钉。
+	if strings.Contains(xml, "<set>") {
+		t.Errorf("只有男演员时不该写 <set>：\n%s", xml)
 	}
 	// 刻意不给 <tmdbid>：那是 TMDB 的人物 id，拿 JAVDB 的填进去会让 Emby 认到别人
 	if strings.Contains(xml, "<tmdbid>") {
 		t.Error("不该写 <tmdbid> —— 侧车里只有 JAVDB 自家的演员 id")
+	}
+}
+
+// TestBuildNFOSetsPerFemaleActor 钉住 <set>（Emby/Kodi 的「所属合集」）的规则。
+//
+// 规则来自用户库的既有形态（仓库根 `BBAN-548.nfo`：两位女演员 → 两个 <set>）：
+//   - **一位女演员一个 <set>**，不是只写第一个；
+//   - **男优不写**（真机上 `デカ吉` 当过一次合集，见迁移 0050）；
+//   - **上限 maxActorSets** —— 总集篇动辄几十上百位女演员，全写会把 Emby 的
+//     合集列表冲垮（用户库里 10+ 位的有 244 部，最多 253 位）；
+//   - **没有女演员就一个都不写**（男同片、纯总集篇），不拿导演或第一个演员兜底。
+//
+// 集合的取值只看 `meta.Sets`（由 MovieMetaFromSidecar 现算或 ParseNFO 读回来），
+// 所以这里直接造 MovieMeta —— 顺带证明 BuildNFOFromMeta 不重算。
+func TestBuildNFOSetsPerFemaleActor(t *testing.T) {
+	cases := []struct {
+		label string
+		sets  []string
+		want  []string
+	}{
+		{"一位女演员", []string{"女优甲"}, []string{"女优甲"}},
+		{"两位女演员（BBAN-548 那种）", []string{"女优甲", "女优乙"}, []string{"女优甲", "女优乙"}},
+		{"没有女演员", nil, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			meta := &MovieMeta{Number: "X-1", Title: "x", Sets: c.sets, Names: TargetNames("X-1", false)}
+			out, err := BuildNFOFromMeta(meta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			xml := string(out)
+			if len(c.want) == 0 {
+				if strings.Contains(xml, "<set>") {
+					t.Errorf("没有女演员时不该有 <set>：\n%s", xml)
+				}
+				return
+			}
+			for _, name := range c.want {
+				if !strings.Contains(xml, "<set>\n    <name>"+name+"</name>\n  </set>") {
+					t.Errorf("缺少 <set><name>%s</name>：\n%s", name, xml)
+				}
+			}
+			if got := strings.Count(xml, "<set>"); got != len(c.want) {
+				t.Errorf("<set> 条数 = %d，want %d\n%s", got, len(c.want), xml)
+			}
+		})
+	}
+}
+
+// TestActorSetsRules 钉住 actorSets 这个纯函数的三条规则（男优剔除 / 上限 / 顺序）。
+//
+// 单独测它而不是只测 nfo：这三条规则**只在这里**实现，而它出错时的表现是
+// 「Emby 里多一个或少一个合集」—— 不报错、不崩，最难发现。
+func TestActorSetsRules(t *testing.T) {
+	mk := func(pairs ...any) []SidecarActor {
+		out := make([]SidecarActor, 0, len(pairs)/2)
+		for i := 0; i+1 < len(pairs); i += 2 {
+			out = append(out, SidecarActor{Name: pairs[i].(string), Gender: pairs[i+1].(int)})
+		}
+		return out
+	}
+
+	// 男优被剔掉，顺序保持（上游是「女演员在前、男优在后」）
+	got := actorSets(mk("女一", 0, "男一", 1, "女二", 0))
+	if strings.Join(got, "|") != "女一|女二" {
+		t.Errorf("男优没被剔掉或顺序错了：%v", got)
+	}
+
+	// 全是男优 → 空
+	if got := actorSets(mk("男一", 1, "男二", 1)); len(got) != 0 {
+		t.Errorf("全是男优时应当是空的：%v", got)
+	}
+
+	// 上限：给 12 位女演员，只取前 5
+	var many []SidecarActor
+	for i := 0; i < 12; i++ {
+		many = append(many, SidecarActor{Name: string(rune('a' + i))})
+	}
+	got = actorSets(many)
+	if len(got) != maxActorSets || got[0] != "a" || got[maxActorSets-1] != "e" {
+		t.Errorf("上限应当是 %d 且取前几个：%v", maxActorSets, got)
+	}
+
+	// 空名字跳过（不产出 <set><name></name>）
+	if got := actorSets(mk("  ", 0, "女一", 0)); len(got) != 1 || got[0] != "女一" {
+		t.Errorf("空名字应当跳过：%v", got)
+	}
+
+	// 空输入 → nil（omitempty 才能让整个元素消失）
+	if got := actorSets(nil); got != nil {
+		t.Errorf("空输入应当返回 nil，got %v", got)
 	}
 }
 

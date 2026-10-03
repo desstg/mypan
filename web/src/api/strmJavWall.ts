@@ -73,10 +73,24 @@ export interface JavMovieMeta {
   title: string;
   origin_title: string;
   summary: string;
+  /**
+   * 演员名列表（编辑器里是一个字符串列表控件，只改名字）。
+   *
+   * 后端 `emby.MovieMeta.Actors` 现在是 `[]ActorEntry`（带 gender），但编辑器
+   * **只读名字** —— 这份类型是「表单形状」，不是后端的原始形状。
+   */
   actors: string[];
   director: string;
   /** **只含真标签**（4K / 番号字母 / 演员 / 破解 / 系列:xxx 这些合成项已剥掉）。 */
   tags: string[];
+  /**
+   * `<set>`（Emby/Kodi 的「所属合集」）的成员。
+   *
+   * 扫描生成时由后端按「一位女演员一个」算好（男优不写、上限 5 个、没有女演员就空）。
+   * 读回来的是 nfo 里原样那份 —— 保存时后端**原样写回、不重算**，所以这里改了什么
+   * 就存什么。表单里用同一个字符串列表控件编辑。
+   */
+  sets: string[];
   series: string;
   maker: string;
   publisher: string;
