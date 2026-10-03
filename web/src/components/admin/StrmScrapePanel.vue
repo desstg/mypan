@@ -393,6 +393,15 @@ async function loadItems(opts?: {
     clearItemList();
     return false;
   }
+  // 番号影片的卡片是子组件直接扫本地磁盘来的，**不经过 TMDB 索引**。
+  // 不早退的话首屏 onMounted 那一次 /refresh-index 会被后端挡下来
+  // （errNotTmdbTask），弹一条「该任务不是 tmdb 影片任务，番号影片请在海报墙上操作」
+  // —— 用户什么都没点就看到一个红条。watch(currentListQueryKey) 那条路早有同样的
+  // 守卫，这里补上它缺的那一处。
+  if (isJavTask.value) {
+    clearItemList();
+    return false;
+  }
   const append = Boolean(opts?.append);
   if (append && (!hasMore.value || loadingMore.value || loading.value || refreshing.value)) {
     return false;

@@ -493,9 +493,11 @@ function scanElapsedText(task: StrmTask): string {
 }
 
 function displayTaskName(name: string): string {
-  const chars = Array.from(name || "");
-  if (chars.length <= 7) return name || "";
-  return `${chars.slice(0, 7).join("")}...`;
+  // 不截断：这一列是 `table-layout: fixed` + `text-overflow: ellipsis`，
+  // 装不下自己会省略号，鼠标悬停还有 title 看全名。
+  // 以前在这里按 7 个字硬切，叠上旁边两颗角标之后，像「t... 番号 已启用」
+  // 这样连任务名都认不出来 —— 用户看到的是一列「t...」和「影...」。
+  return name || "";
 }
 
 function formatLastScan(value?: string): string {
@@ -1625,7 +1627,7 @@ watch(activeTab, (tab) => {
 
 .strm-task-table th:nth-child(1),
 .strm-task-table td:nth-child(1) {
-  width: 14%;
+  width: 22%;
 }
 
 .strm-task-table th:nth-child(2),
@@ -1635,7 +1637,7 @@ watch(activeTab, (tab) => {
 
 .strm-task-table th:nth-child(3),
 .strm-task-table td:nth-child(3) {
-  width: 48%;
+  width: 40%;
   min-width: 280px;
 }
 
@@ -1677,8 +1679,10 @@ watch(activeTab, (tab) => {
   min-width: 0;
 }
 
+/* 任务名优先于角标：名字可以缩到 0 撑出省略号，两颗角标不许被挤掉。
+   flex 默认 `1 1 auto` 会让名字参与收缩却不给角标让位，长名字下角标先变形。 */
 .strm-task-name__text {
-  flex: 0 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   font-weight: 700;
   color: var(--text);
