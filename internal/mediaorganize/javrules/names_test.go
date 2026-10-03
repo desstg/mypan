@@ -662,7 +662,6 @@ func TestCNBrandPatternDoesNotStealJapanese(t *testing.T) {
 }
 
 // ── 用户自填的国产厂牌（分类规则 → 改名/认侧车）──
-//
 // 起因：用户原话「国产厂牌各种各样的，随时都会有没加厂牌表的，到时自己加入，
 // 这样方便」。此前填了只生效一半 —— 分类读规则表，改名读代码里那份硬编码的
 // `cnBrandPrefixes`，于是**无连字符**的形态（`ZZBRAND0001`）会被认作国产、
@@ -825,17 +824,27 @@ func TestUserBrandRenameAndHyphen(t *testing.T) {
 // **代码里那份**厂牌表。若它跟着规则表走，用户往「国产」加一个词，那个词就再也
 // 进不了兜底 —— 而这里更糟的是它会**一条规则都命中不了**，目录静默留在原地。
 //
-// 构造：国产那条关键词规则加 `ZZBRAND`，但同时用排除词把它挡掉 —— 于是这份
+// 构造：国产那条关键词规则加 `ZZ4BRAND`，但同时用排除词把它挡掉 —— 于是这份
 // 文件既不归国产（被排除），也不该被任何别的规则命中，只能落进兜底的「未匹配」。
+//
+// ⚠️ 样本名**必须绕开默认表里那条「国产·形状」**（它只看形状、不看厂牌，
+// 大写字母直接接数字就被收走）。所以这里把厂牌本身写成**带数字**的
+// `ZZ4BRAND`：`ZZ4BRAND0001` 里没有「纯大写字母段直接接数字」的形态
+// （`ZZ` 后面是 `4`，`BRAND` 前面是数字），形状规则不命中；
+// 而 `HasCodeWithBrands` 靠厂牌表仍认得出它。
 func TestUserBrandDoesNotChangeNocodeFallback(t *testing.T) {
-	rules := addCNInclude(t, Defaults(), "ZZBRAND")
+	const (
+		brand = "ZZ4BRAND"
+		name  = "ZZ4BRAND0001"
+	)
+	rules := addCNInclude(t, Defaults(), brand)
 	for i := range rules.ClassifyRules {
 		if rules.ClassifyRules[i].TargetName == cnTargetName &&
 			rules.ClassifyRules[i].EffectiveMode() == ModeIncludes {
 			rules.ClassifyRules[i].Excludes = []string{"0001"}
 		}
 	}
-	idx := ClassifyName("ZZBRAND0001", rules.ClassifyRules)
+	idx := ClassifyName(name, rules.ClassifyRules)
 	if idx < 0 {
 		t.Fatal("一条规则都没命中 —— 兜底判定被规则表污染了（自指），目录会静默留在原地")
 	}
@@ -844,7 +853,7 @@ func TestUserBrandDoesNotChangeNocodeFallback(t *testing.T) {
 	}
 	// 而**改名那条路**必须认它 —— 同一份规则，两条路的判据刻意不同。
 	brands := CNBrandsFromRules(rules.ClassifyRules)
-	if !HasCodeWithBrands("ZZBRAND0001", brands) {
+	if !HasCodeWithBrands(name, brands) {
 		t.Error("改名那条路应当认这个厂牌")
 	}
 }

@@ -1511,13 +1511,21 @@ func TestSidecarUserBrandAbsent(t *testing.T) {
 	if len(dirNames) != 1 || dirNames[0] != "ZZBRAND0001 沉溺偷情的淫乱姐妹" {
 		t.Fatalf("目录名应当是原样返回的名字，got %v", dirNames)
 	}
-	// 分类：认不出厂牌 → 没有 pattern 命中 → 兜底的「未匹配」
-	// （`HasCode` 为假，所以兜底那条吃得到它 —— 这条同时钉住了「兜底没被自指破坏」）
+	// 分类：**国产·形状** 这条默认规则现在会把它收进「国产」。
+	//
+	// 这份文件用的是 `ZZBRAND0001` —— 一个刻意不在任何厂牌表里的假厂牌，
+	// 而「形状」规则认的正是形状（大写字母直接接数字）而不是厂牌，所以它命中了。
+	// **这不是回归，是本次有意加的能力**：真机上 `XKG147` / `RS034` / `DYXO002` /
+	// `XKVP116` 那批没收录的国产厂牌就靠这条救回来（见 defaults.go 的规则注释）。
+	//
+	// 这条用例原本钉的是「兜底没被自指破坏」—— 那件事现在由
+	// `TestUserBrandDoesNotChangeNocodeFallback` 用**真正无番号**的名字守着
+	// （名字里没有「字母接数字」的形状，形状规则不会命中）。
 	classified := false
 	for _, a := range actionsFor(plan, stageClassify) {
 		if a.Kind == moplan.ActionKindRelocate && a.TargetName == "ZZBRAND0001 沉溺偷情的淫乱姐妹" {
-			if !strings.Contains(a.Reason, "未匹配") {
-				t.Errorf("应当落进兜底的「未匹配」，理由：%q", a.Reason)
+			if !strings.Contains(a.Reason, "国产") {
+				t.Errorf("形状规则应当把它收进「国产」，理由：%q", a.Reason)
 			}
 			classified = true
 		}
