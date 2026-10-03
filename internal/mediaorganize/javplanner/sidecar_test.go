@@ -1484,21 +1484,92 @@ func TestSidecarUserBrandFromRules(t *testing.T) {
 	}
 }
 
+// TestSidecarCNShapeRecognized 国产番号的**形状**能让侧车被认出来 —— 不需要厂牌表。
+//
+// 起因（2026-10-03 真机）：115 `/mypan影库/番号临时` 那 7 部里有 4 部的 json 主名
+// （`XKG147` / `RS034` / `DYXO002` / `XKVP116`）不在任何厂牌表里，于是
+// **分类靠「国产·形状」进了「国产」，视频却完全不改名** —— 两条路判据不同，
+// 而用户要的是「国产目录里新进来的文件和目录，直接改成与 json 同名」。
+//
+// 这里同时钉住那条**边界**：全小写的 `readme.json` / `config.json` 不能因为
+// 「字母接数字」被误收（形状要求大写字母段）。
+func TestSidecarCNShapeRecognized(t *testing.T) {
+	fs := newFakeFS()
+	const root = "/root"
+	fs.add(root, "XKG147.json", 900, false)
+	fs.add(root, "星空無限傳媒 XKG147 黑絲性感少婦勾引外送員 鄧紫晴.mp4", 688*mb, false)
+	target := fs.add(root, "整理库", 0, true)
+
+	plan := buildPlanWith(t, fs, root, target, seedConfig()) // 出厂默认规则，**没加任何厂牌**
+
+	if plan.Diagnostics["sidecars"] == nil {
+		t.Fatal("国产形状的 json 应当被认作侧车（形状判据不需要厂牌表）")
+	}
+	renames := map[string]string{}
+	for _, a := range actionsFor(plan, stageRename) {
+		renames[a.SourceName] = a.TargetName
+	}
+	// 视频改成与 json 同名；侧车自己不动（主名已经是番号）
+	if got := renames["星空無限傳媒 XKG147 黑絲性感少婦勾引外送員 鄧紫晴.mp4"]; got != "XKG147.mp4" {
+		t.Errorf("视频应当改名成 XKG147.mp4，got %q（全部：%v）", got, renames)
+	}
+	// 目录名也跟着变成番号
+	dirNames := []string{}
+	for _, a := range actionsFor(plan, stageMoveIn) {
+		if a.Kind == moplan.ActionKindEnsureDir {
+			dirNames = append(dirNames, a.TargetName)
+		}
+	}
+	if len(dirNames) != 1 || dirNames[0] != "XKG147" {
+		t.Errorf("应当建一个名为 XKG147 的目录，got %v", dirNames)
+	}
+}
+
+// TestSidecarLowercaseJSONNotSidecar 全小写的常见 json 主名不该被当成侧车。
+//
+// `readme` / `config` / `notes` 这些名字在 `ParseJavFileName` 眼里都是「没有标记
+// 的主名」（机械上拆得开），而网盘上这类 json 满地都是 —— 少一道闸就会拿它们
+// 去改视频名、建目录。形状判据要求**大写字母段**，正是为了挡住它们。
+func TestSidecarLowercaseJSONNotSidecar(t *testing.T) {
+	fs := newFakeFS()
+	const root = "/root"
+	for _, n := range []string{"readme.json", "config.json", "notes.json", "settings.json"} {
+		fs.add(root, n, 900, false)
+	}
+	fs.add(root, "某部没有番号的片子.mp4", 688*mb, false)
+	target := fs.add(root, "整理库", 0, true)
+
+	plan := buildPlanWith(t, fs, root, target, seedConfig())
+	if plan.Diagnostics["sidecars"] != nil {
+		t.Errorf("这些 json 都不该被认作侧车，got %v", plan.Diagnostics["sidecars"])
+	}
+	for _, a := range actionsFor(plan, stageRename) {
+		if a.SourceName == "某部没有番号的片子.mp4" {
+			t.Errorf("无番号的视频不该被改名，got %q", a.TargetName)
+		}
+	}
+}
+
 // TestSidecarUserBrandAbsent 同一棵树、同一个名字：**规则里没加这个厂牌**时行为照旧。
 //
 // 这一半与上面那条同等重要 —— 「多认一个厂牌」只能是**加法**：加之前是什么样，
-// 不加的时候还得是什么样（认不出番号 → 不改名 → 目录名是清理后的原名 → 落兜底）。
+// 不加的时候还得是什么样。
+//
+// ⚠️ 样本名必须**绕开国产形状判据**（`LooksLikeCNNumber` 只看形状、不看厂牌，
+// `ZZBRAND0001` 正好长成那个样子，会被它收走）。所以这里用**带数字的厂牌**
+// `ZZ4BRAND`：`ZZ4BRAND0001` 里没有「纯大写字母段直接接数字」的形态
+// （`ZZ` 后面是 `4`，`BRAND` 前面是数字），形状不命中；而厂牌表仍认得出它。
 func TestSidecarUserBrandAbsent(t *testing.T) {
 	fs := newFakeFS()
 	const root = "/root"
-	fs.add(root, "ZZBRAND0001.json", 900, false)
-	fs.add(root, "ZZBRAND0001 沉溺偷情的淫乱姐妹.mp4", 688*mb, false)
+	fs.add(root, "ZZ4BRAND0001.json", 900, false)
+	fs.add(root, "ZZ4BRAND0001 沉溺偷情的淫乱姐妹.mp4", 688*mb, false)
 	target := fs.add(root, "整理库", 0, true)
 
 	plan := buildPlanWith(t, fs, root, target, seedConfig()) // 出厂默认规则
 
 	if plan.Diagnostics["sidecars"] != nil {
-		t.Error("没加厂牌时那份 json 不该被认作侧车")
+		t.Error("没加厂牌时那份 json 不该被认作侧车（它的名字绕开了国产形状判据）")
 	}
 	dirNames := []string{}
 	for _, a := range actionsFor(plan, stageMoveIn) {
@@ -1508,24 +1579,20 @@ func TestSidecarUserBrandAbsent(t *testing.T) {
 	}
 	// 目录名是**原名扣掉扩展名**（没有番号 → 不改名，`RenameFilename` 原样返回整串，
 	// 连中文标题一起）。关键是它**没有**被补上连字符。
-	if len(dirNames) != 1 || dirNames[0] != "ZZBRAND0001 沉溺偷情的淫乱姐妹" {
+	if len(dirNames) != 1 || dirNames[0] != "ZZ4BRAND0001 沉溺偷情的淫乱姐妹" {
 		t.Fatalf("目录名应当是原样返回的名字，got %v", dirNames)
 	}
-	// 分类：**国产·形状** 这条默认规则现在会把它收进「国产」。
+	// 分类：落**兜底**「未匹配」。
 	//
-	// 这份文件用的是 `ZZBRAND0001` —— 一个刻意不在任何厂牌表里的假厂牌，
-	// 而「形状」规则认的正是形状（大写字母直接接数字）而不是厂牌，所以它命中了。
-	// **这不是回归，是本次有意加的能力**：真机上 `XKG147` / `RS034` / `DYXO002` /
-	// `XKVP116` 那批没收录的国产厂牌就靠这条救回来（见 defaults.go 的规则注释）。
-	//
-	// 这条用例原本钉的是「兜底没被自指破坏」—— 那件事现在由
-	// `TestUserBrandDoesNotChangeNocodeFallback` 用**真正无番号**的名字守着
-	// （名字里没有「字母接数字」的形状，形状规则不会命中）。
+	// 这份名字刻意绕开了「国产·形状」那条规则（`ZZ4BRAND0001` 里 `BRAND` 前面是
+	// 数字 `4`，不满足「左边是非字母数字或行首」），所以它既认不出番号、
+	// 也进不了国产 —— 正好把「厂牌表缺失时行为照旧」完整地钉住：
+	// 不改名、目录名原样、分类走兜底。
 	classified := false
 	for _, a := range actionsFor(plan, stageClassify) {
-		if a.Kind == moplan.ActionKindRelocate && a.TargetName == "ZZBRAND0001 沉溺偷情的淫乱姐妹" {
-			if !strings.Contains(a.Reason, "国产") {
-				t.Errorf("形状规则应当把它收进「国产」，理由：%q", a.Reason)
+		if a.Kind == moplan.ActionKindRelocate && a.TargetName == "ZZ4BRAND0001 沉溺偷情的淫乱姐妹" {
+			if !strings.Contains(a.Reason, "未匹配") {
+				t.Errorf("应当落进兜底的「未匹配」，理由：%q", a.Reason)
 			}
 			classified = true
 		}

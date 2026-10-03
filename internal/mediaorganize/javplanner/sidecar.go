@@ -298,7 +298,7 @@ func sameNumber(a, b string) bool {
 //
 // 两道闸：
 //  1. 必须是 `*.json`，且主名能按标准命名机械地拆开（quality.ParseJavFileName）；
-//  2. 拆出来的番号必须**真的像番号**（javrules.HasCode）。
+//  2. 拆出来的番号必须**真的像番号**（javrules.HasCode，外加国产形状那条）。
 //
 // 第二道不能省。机械拆分对 `4K`、`notes`、`config` 这种名字同样会「拆得开」
 // （它们确实就是「没有标记的主名」），而网盘上顺带带着的配置 json 满地都是 ——
@@ -307,6 +307,15 @@ func sameNumber(a, b string) bool {
 // 判据复用 javrules.HasCodeWithBrands 而不是在这里另写一套：那是这个项目里唯一
 // 权威的番号识别，设置页的试跑预览走的也是它。两套判据迟早分家，而分家的表现是
 // 「同一份文件在预览里认得出、整理时不认」。
+//
+// **`LooksLikeCNNumber` 是第二道的加法**（2026-10-03）：厂牌表永远列不全，而国产
+// 番号的**形状**能定性。真机实测 `/mypan影库/番号临时` 那 7 部里有 4 部的 json
+// 主名（`XKG147` / `RS034` / `DYXO002` / `XKVP116`）过不了 HasCode —— 分类靠
+// 「国产·形状」进了「国产」，视频却完全不改名，两条路对不上。用户要求：
+// 国产目录里新进来的文件和目录，直接改成与 json 同名。
+//
+// 只放宽「无连字符的国产番号」：日式番号（`ABP-123`）本来就走 HasCode 过闸，
+// 不受影响；全小写的 `readme` / `config` 因大小写敏感被挡住（见 cnShape）。
 //
 // `brands` 是用户填的国产厂牌：不带上它的话，用户在设置页新加一个国产厂牌之后，
 // **分类**按规则命中进了「国产」，而推送写出的 `ZZBRAND0001.json` 却不被当成侧车
@@ -317,7 +326,10 @@ func parseSidecarName(name string, brands []string) (string, quality.Marks, bool
 		return "", quality.Marks{}, false
 	}
 	number, marks, ok := quality.ParseJavFileName(stemOf(name))
-	if !ok || !javrules.HasCodeWithBrands(number, brands) {
+	if !ok {
+		return "", quality.Marks{}, false
+	}
+	if !javrules.HasCodeWithBrands(number, brands) && !javrules.LooksLikeCNNumber(number) {
 		return "", quality.Marks{}, false
 	}
 	return number, marks, true
