@@ -47,3 +47,18 @@ drivers/115/
 # 从真库导出的规则快照 / 一次性探针产物
 /tmp-real-rules.json
 /tmp-dbtool/
+
+# 从真库捞出来对照的样本文件（不入库）。
+#
+# 这些是排查时随手拷到仓库根的：真库产出的 nfo、封面角块、以及从库/上游 dump
+# 出来的中间 json 与文本。**它们不是代码**，而且内容是真实媒体库数据 ——
+# 入库既污染仓库也把私人内容带上公开远端。
+#
+# 只锚定根目录（前缀 `/`）：`internal/jav/emby/testdata/NIMA-086-U.nfo` 那份是
+# **有意入库**的测试样本（测试要用它验真库形状），别被这条规则误伤。
+/*.nfo
+/*.jpg
+/nima_*.json
+/nima_*.txt
+/corner-*.jpg
+/probe_ingest.sh
