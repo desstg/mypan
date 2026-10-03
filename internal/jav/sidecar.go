@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"litepan/internal/domain"
@@ -508,6 +509,31 @@ func stringSliceOrEmpty(in []string) []string {
 // 就是下一轮的磁力提交，网盘的风控看的是总请求速率。
 var sidecarSem = make(chan struct{}, 2)
 
+// sidecarWaitTimeout 是**排队等信号量**的上限。
+//
+// 起因（2026-10-03 真机）：用户从演员卡片执行订阅，**45 部在两秒内全部报
+// 「离线下载完成」**（115 秒传，文件本来就在），于是 45 个 goroutine 同时要写侧车，
+// 而信号量只有 2 个名额。结果落盘后**只有 22 个目录有 json、23 个没有**，
+// 而日志里**一条 warn 都没有** —— 因为卡在 `sidecarSem <-` 上既不算失败、
+// 也没有任何记录，失败是彻底静默的。
+//
+// 那个无上限的等待是这一段最要命的地方：它没有超时、没有日志，出问题时
+// 现场什么都不剩。这里给它一个上限，超时就**记一条 warn 并放弃这一份**
+// （不重试：重试会把队列压得更长，而且下一次推送本来就会再触发一遍）。
+//
+// 60 秒是估出来的：一份侧车 = 一次 115 上传（实测 1~3 秒）+ 一次目录 List，
+// 2 并发下 45 份约需 30~70 秒。排在队尾的那些本来就要等这么久，
+// 所以这个上限**不是**用来兜「队列长」的（那是正常的），而是用来兜
+// 「卡死了却没人知道」—— 正常排队不会到 60 秒，到了就说明出事了。
+const sidecarWaitTimeout = 60 * time.Second
+
+// sidecarFailStreak 记「连续多少次排队超时」。
+//
+// 只为了**打一条醒目的汇总**：一次 45 部里超时 3 个是排队太长，45 个全超时
+// 是系统性问题（网盘挂了、上传路径坏了）。单条 warn 看不出这个区别，
+// 而「看不出区别」正是这次漏写 23 份 json 却查不出原因的原因。
+var sidecarFailStreak atomic.Int64
+
 // sidecarTimeout 是单个侧车的写入预算。
 //
 // 30 秒：一次 115 上传实测 1~3 秒，留十倍余量给网络抖动。
@@ -545,8 +571,29 @@ func (s *Service) spawnSidecarWrite(rec *domain.JavPushRecord, attempt *domain.J
 	go func() {
 		// 信号量在 goroutine 里取（不是 spawn 时取）：spawn 的是事件分发那条
 		// goroutine，在那里等信号量就等于把总线堵住 —— 正是要避免的事。
-		sidecarSem <- struct{}{}
-		defer func() { <-sidecarSem }()
+		//
+		// **等待有上限**（见 sidecarWaitTimeout 的说明）：无上限的等待在出问题时
+		// 什么都不留，2026-10-03 那 23 份漏写的 json 就是这么静默丢的。
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), sidecarWaitTimeout)
+		defer waitCancel()
+		select {
+		case sidecarSem <- struct{}{}:
+			defer func() { <-sidecarSem }()
+		case <-waitCtx.Done():
+			n := sidecarFailStreak.Add(1)
+			s.logWarn("jav sidecar wait timeout: 排队等名额超过上限，这一份侧车**没有写**",
+				"record", rec.ID, "code", rec.Code, "movie", rec.MovieID,
+				"parent", event.TargetParentID, "wait", sidecarWaitTimeout.String(),
+				"streak", n)
+			if n >= 10 && n%10 == 0 {
+				// 连续大批超时 = 系统性问题，不是「队列长」。
+				s.logWarn("jav sidecar 连续超时，侧车写入通道可能已经卡死",
+					"streak", n, "hint", "检查网盘上传是否可用；侧车写入并发上限为 2")
+			}
+			return
+		}
+		// 拿到了名额：清零连续计数（说明通道是活的）。
+		sidecarFailStreak.Store(0)
 
 		// ctx 在**拿到名额之后**才建：排队等待的时间不该吃掉写入预算，
 		// 否则排在后面的几份侧车会因为等太久而当场超时。
@@ -564,11 +611,21 @@ func (s *Service) spawnSidecarWrite(rec *domain.JavPushRecord, attempt *domain.J
 			}
 		}()
 
+		// 入口/出口各记一条：漏写时能直接看出「根本没进来」还是「进来了但写失败」。
+		// 这两条曾经都不存在，而 2026-10-03 那批漏写**正是**因为什么都看不到
+		// 才查不出原因（卡在信号量上既不算失败也不记日志）。
+		start := time.Now()
+		s.logInfo("jav sidecar start", "record", rec.ID, "code", rec.Code,
+			"movie", rec.MovieID, "parent", event.TargetParentID)
 		if err := s.writeSidecar(ctx, rec, infoHash, event); err != nil {
 			s.logWarn("jav sidecar write failed",
-				"record", rec.ID, "account", event.AccountID, "movie", rec.MovieID,
-				"parent", event.TargetParentID, "err", err)
+				"record", rec.ID, "code", rec.Code, "account", event.AccountID,
+				"movie", rec.MovieID, "parent", event.TargetParentID,
+				"elapsed", time.Since(start).String(), "err", err)
+			return
 		}
+		s.logInfo("jav sidecar done", "record", rec.ID, "code", rec.Code,
+			"parent", event.TargetParentID, "elapsed", time.Since(start).String())
 	}()
 }
 
