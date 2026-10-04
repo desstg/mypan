@@ -58,34 +58,49 @@ const rect = ref<JavCropRect>({ x: 0, y: 0, w: 0, h: 0 });
 // 直接赋值、不用翻译一层。8K 与「流出」**推不出来**（见后端 watermark.go 的说明），
 // 所以它们永远只能手选、不会被预置。
 const wmSub = ref(false);
-const wmCensored = ref<"censored" | "uncensored" | "leak" | "">("");
+// 「无码流出」那一组：**默认不贴**，想贴才点（2026-10-04 用户要求）。
+//
+// 原来它是「有码/无码/流出」三选一、由影片属性自动决定，无码片每张海报都会挂
+// 一个「无码流出」。用户说有点多余 —— 那个信息标题/标签里本来就有。
+//
+// 现在**属性完全不显示**（用户明确要求）：`censored` 那个字段后端还在传，
+// 但界面上不再展示。原因是它对国产片会显示成「有码」（JAVDB 把国产片一律标
+// type=0），看着费解 —— 与其解释不如不显示。
+const wmCensoredMark = ref<"none" | "leak">("none");
 const wmUncensor = ref<"umr" | "">("");
 const wmRes = ref<"4k" | "8k" | "">("");
 
 /**
  * 勾选结果 → 要贴的水印 id 列表。
  *
- * **「无码」与「流出」都贴 leak.png**（用户定的：只有那一张图，它写的就是"无码流出"）。
- * 两个选项分开只是让用户能标出"这是流出片"这个事实，贴出来是一样的。
+ * ⚠️ **默认不含 leak（「无码流出」）**（2026-10-04 用户要求）。
+ * `wmCensoredMark` 默认是 `none`，只有用户**主动**点「无码/流出」才会贴 ——
+ * 这正是「改海报不会意外把 leak 带出来」的关键：它是**独立状态**，
+ * 不像原来那样由「影片属性」自动决定（那会导致每次动海报都重新贴上去）。
  */
 function watermarkIDs(): string[] {
   const ids: string[] = [];
   if (wmSub.value) ids.push("sub");
-  if (wmCensored.value === "uncensored" || wmCensored.value === "leak") ids.push("leak");
+  if (wmCensoredMark.value === "leak") ids.push("leak");
   if (wmUncensor.value === "umr") ids.push("umr");
   if (wmRes.value) ids.push(wmRes.value);
   return ids;
 }
 
-/** 后端给的预置 → 三个控件。 */
+/**
+ * 后端给的预置 → 那几组控件。
+ *
+ * `preset` 里不会再有 `leak`（后端自动那条路已经不贴它了），所以
+ * `wmCensoredMark` 永远从 `none` 起步 —— 用户不点就永远不贴。
+ */
 function applyWatermarkPreset(preset: string[] | undefined) {
   const list = preset ?? [];
   wmSub.value = list.includes("sub");
   wmUncensor.value = list.includes("umr") ? "umr" : "";
   wmRes.value = list.includes("8k") ? "8k" : list.includes("4k") ? "4k" : "";
-  // 预置落到「无码」而不是「流出」：模型里分不出"流出"（那与破解是同一个标志位），
-  // 把一个普通无码片标成"流出"是编造事实。两个选项贴出来的图是一样的。
-  wmCensored.value = list.includes("leak") ? "uncensored" : "censored";
+  // 手贴那条路仍然留着：预置里万一出现 leak（老版本后端、或用户手改过），
+  // 就把它勾上；正常情况下它是 none。
+  wmCensoredMark.value = list.includes("leak") ? "leak" : "none";
 }
 const dragState = ref<{ startX: number; startY: number; start: JavCropRect } | null>(null);
 
@@ -341,7 +356,12 @@ async function rebuild() {
           <div class="jav-edit__hint">在框上按住鼠标左右拖动，选好位置后点「裁剪」</div>
 
           <!-- 添加水印：勾上的项会贴到**截出来的**那张 poster 上（位置固定，见后端
-               watermark.go）。默认按影片属性预置，用户可以改。 -->
+               watermark.go）。默认按影片属性预置，用户可以改。
+
+               「无码流出」那一组**默认不贴**（2026-10-04 用户要求）：无码片原来
+               每张海报都自动挂一个「无码流出」标，用户说有点多余。现在想贴才点，
+               而且不再显示「本片属性」那行 —— 对国产片它会显示成「有码」
+               （JAVDB 把国产片一律标 type=0），看着费解。 -->
           <div class="jav-wm">
             <div class="jav-wm__title">添加水印</div>
             <label class="jav-wm__check">
@@ -349,9 +369,8 @@ async function rebuild() {
               字幕
             </label>
             <div class="jav-wm__row">
-              <label><input v-model="wmCensored" type="radio" value="censored" /> 有码</label>
-              <label><input v-model="wmCensored" type="radio" value="uncensored" /> 无码</label>
-              <label><input v-model="wmCensored" type="radio" value="leak" /> 流出</label>
+              <label><input v-model="wmCensoredMark" type="radio" value="none" /> 不贴</label>
+              <label><input v-model="wmCensoredMark" type="radio" value="leak" /> 无码/流出</label>
             </div>
             <div class="jav-wm__row">
               <label><input v-model="wmUncensor" type="radio" value="umr" /> 破解</label>
@@ -363,8 +382,7 @@ async function rebuild() {
               <label><input v-model="wmRes" type="radio" value="" /> 无</label>
             </div>
             <div class="jav-edit__hint">
-              8K 与「流出」推不出来（上游把 8k 归进 4K 那一档，流出与破解是同一个标记），
-              这两个只能手选。
+              8K 推不出来（上游把 8k 归进 4K 那一档），只能手选。
             </div>
           </div>
         </section>

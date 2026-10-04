@@ -751,9 +751,13 @@ func TestFillNFOPlotIfMissing(t *testing.T) {
 
 // TestAutoWatermarkIDsFromSidecar 自动那条路该贴哪几个水印 —— 按侧车属性算。
 //
-// 判据与编辑页的自动预置是同一套（有码不贴 leak、中字贴 sub、破解贴 umr、4K 贴 4k）。
-// **8K 与「流出」推不出来**（上游把 8k 归进 4K 那一档；流出与破解是同一个标志位），
-// 所以这里断言它们**不会**被自动贴上 —— 那是一条明写的短板，不是漏做。
+// 判据（中字贴 sub、破解贴 umr、4K 贴 4k）。
+//
+// **leak（「无码流出」）2026-10-04 起自动不贴**：用户说无码片每张海报都挂一个
+// 「无码流出」有点多余，那个信息标题/标签里本来就有。编辑页仍然可以手贴。
+//
+// **8K 推不出来**（上游把 8k 归进 4K 那一档），所以自动这条路永远不贴 8k.png
+// —— 那是一条明写的短板，不是漏做。
 func TestAutoWatermarkIDsFromSidecar(t *testing.T) {
 	req := javArtifactRequest{WatermarkEnabled: true}
 	cases := []struct {
@@ -764,14 +768,22 @@ func TestAutoWatermarkIDsFromSidecar(t *testing.T) {
 		{"有码 + 破解 + 中字 + 4K",
 			&emby.SidecarDoc{Type: "0", HasCNSub: true, Quality: emby.SidecarQuality{Uncensored: true, FourK: true}},
 			"sub,umr,4k"},
-		{"无码（贴 leak）+ 中字", &emby.SidecarDoc{Type: "1", HasCNSub: true}, "leak,sub"},
-		{"type 缺失 → 当无码（与裁剪默认窗口同一条判据）", &emby.SidecarDoc{}, "leak"},
+		// 无码片只贴中字 —— **不再有 leak**
+		{"无码 + 中字（不贴 leak）", &emby.SidecarDoc{Type: "1", HasCNSub: true}, "sub"},
+		{"type 缺失（当无码）也不贴 leak", &emby.SidecarDoc{}, ""},
 		{"什么都没带的有码片", &emby.SidecarDoc{Type: "0"}, ""},
+		// 反面：无码 + 破解 + 4K，一个 leak 都不该出现
+		{"无码 + 破解 + 4K（仍无 leak）",
+			&emby.SidecarDoc{Type: "1", Quality: emby.SidecarQuality{Uncensored: true, FourK: true}},
+			"umr,4k"},
 	}
 	for _, c := range cases {
 		got := strings.Join(autoWatermarkIDs(req, c.doc), ",")
 		if got != c.want {
 			t.Errorf("%s：%q，期望 %q", c.label, got, c.want)
+		}
+		if strings.Contains(got, "leak") {
+			t.Errorf("%s：自动这条路不该贴 leak，got %q", c.label, got)
 		}
 	}
 

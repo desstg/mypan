@@ -49,8 +49,12 @@ type JavWallWatermarkState struct {
 	// Scale / Margin 是百分数（18 / 6）—— 编辑页显示当前偏好，保存时原样带回来。
 	Scale  int `json:"scale"`
 	Margin int `json:"margin"`
-	// Censored 是「有码/无码」那组的预置依据：true = 有码。
-	// 8K 与「流出」推不出来（见 watermark.go 的说明），那两个只能手选。
+	// Censored 是影片属性：true = 有码。
+	//
+	// **前端已经不用它了**（2026-10-04）：编辑页原来拿它显示「本片属性：有码/无码」，
+	// 但对国产片会显示成「有码」（JAVDB 把国产片一律标 type=0），看着费解，
+	// 用户要求不显示。字段留着是因为它是**客观属性**、成本只有一次 IsCensored()，
+	// 而将来想再展示（或按它做别的判断）不必重新走一遍侧车。
 	Censored bool `json:"censored"`
 	// Available 是认得的水印 id（前端据此渲染那几行选项）。
 	Available []string `json:"available"`
@@ -306,8 +310,13 @@ func (s *Service) javWallWatermarkState(ref javItemRef) JavWallWatermarkState {
 		return state // 没有侧车 → 不预置（用户自己勾）
 	}
 	state.Censored = doc.IsCensored()
-	// 预置判据与**自动那条路共用**（strm 里的 watermarkIDsForSidecar）——
-	// 各写一份的话，「自动贴的那些」与「编辑页预置的那些」迟早对不上。
+	// Preset 是**编辑页那组控件**的初始勾选，用「自动那条路」的判据算
+	// （strm 里的 watermarkIDsForSidecar）—— 各写一份的话，「自动贴的那些」
+	// 与「编辑页预置的那些」迟早对不上。
+	//
+	// ⚠️ 但它**不含 leak**：2026-10-04 起自动不再贴「无码流出」（用户要求去掉），
+	// 所以这份预置里也不会有它 —— 编辑页那组单选的默认落点因此是「不贴」。
+	// 用户想手贴，自己点「无码 / 流出」，那条路仍然通（图标还在 Available 里）。
 	state.Preset = strm.WatermarkIDsForSidecar(doc)
 	return state
 }

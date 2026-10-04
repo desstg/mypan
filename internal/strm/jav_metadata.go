@@ -1384,21 +1384,26 @@ func WatermarkIDsForSidecar(doc *emby.SidecarDoc) []string { return watermarkIDs
 
 // watermarkIDsForSidecar 按侧车属性算出「该贴哪几个水印」。
 //
-// 判据（与编辑页的自动预置**同一套**，见 StrmJavMetaDrawer 的 watermarkPreset）：
+// 判据（与编辑页的自动预置**同一套**，见 StrmJavMetaDrawer 的 applyWatermarkPreset）：
 //
-//	有码 → 不贴 leak；其余（无码/欧美/FC2）→ 贴 leak（图标本身就是"无码流出"）
 //	破解 → umr        4K → 4k        中字 → sub
 //
-// **8K 与「流出」推不出来**（上游把 8k 归进 4K 那一档；流出与破解是同一个标志位），
-// 所以自动这条路永远不贴 8k.png —— 那两个只能手选。
+// **自动这条路不贴 leak（「无码流出」）**。原来是无码/欧美/FC2 一律贴，
+// 2026-10-04 用户要求去掉：「有点多余」—— 无码片每张海报都挂一个「无码流出」
+// 反而吵，而且那个信息在标题/标签里本来就有。
+//
+// ⚠️ 编辑页仍然可以**手贴** leak（那组单选保留了「无码 / 流出」两个选项）。
+// 之所以不把手贴也一起砍掉：`leak.png` 那张图还在、`Available` 里也还列着，
+// 用户想给某部片单独挂一个仍然做得到 —— 只是**默认不再自动挂**。
+// 自动与手贴的判据从此**不再是同一份**，改任一处时别看错地方。
+//
+// **8K 推不出来**（上游把 8k 归进 4K 那一档），所以自动这条路永远不贴 8k.png
+// —— 它只能手选。
 func watermarkIDsForSidecar(doc *emby.SidecarDoc) []string {
 	if doc == nil {
 		return nil
 	}
-	ids := make([]string, 0, 4)
-	if !doc.IsCensored() {
-		ids = append(ids, "leak")
-	}
+	ids := make([]string, 0, 3)
 	if doc.HasCNSub || doc.Quality.Subtitle {
 		ids = append(ids, "sub")
 	}

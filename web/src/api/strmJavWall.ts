@@ -139,7 +139,12 @@ export interface JavWallWatermarkState {
   /** 大小 / 边距，百分数（18 = 水印宽占海报宽的 18%）。 */
   scale: number;
   margin: number;
-  /** 「有码/无码」那组的预置依据：true = 有码（不贴 leak）。 */
+  /**
+   * 影片属性：true = 有码。
+   *
+   * **只用来显示那行灰字，不参与任何勾选**（2026-10-04 起）：无码片原来
+   * 会自动挂「无码流出」水印，用户要求去掉，于是属性与「贴不贴」拆开了。
+   */
   censored: boolean;
   /** 认得的水印 id，前端据此渲染选项。 */
   available: string[];
