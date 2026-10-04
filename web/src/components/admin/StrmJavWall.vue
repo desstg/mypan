@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { getApiErrorMessage } from "@/api/client";
 import {
   fetchJavWallItems,
@@ -139,21 +139,87 @@ function subtitle(item: JavWallItem): string {
 // 倍数算，长列表里首屏渲染就会把下面好几屏的图一起排队（实测 50 张全发、2 MB 多、
 // 最后一张要几秒）。所以关掉原生懒加载，改由这里按滚动位置发牌。
 //
-// 窗口取「首屏 + 前后各一屏」，滚动时节流重算：往前留一屏是为了**往回滚**时图已经在
-// 手里，不至于滚动条停下来才开始加载。
-const imageBudget = ref(0);
-const rowHeightPx = 300; // 卡片 + 文字的高度上限，只用于估一屏多少张
+// # 是**滑动窗口**，不是「前 N 张」（2026-10-04 修）
+//
+// 原来这里算的是一个「一屏 × 3」的**数字**，`imageSrc` 写成 `index >= budget` 就返回空
+// —— 那只能表达「前 N 张」，表达不了「当前这一段」。于是滚动时算出来的永远是同一个
+// 数，**第 N+1 张往后永远没有图**：群晖上一页 94 张、N 算出来 72，滚到底最后 22 张
+// 清一色是占位骨架。用户看到的就是「有些显示、有些不显示」，切 tab / 切视图时数字
+// 一变又会好一阵 —— 像极了缓存问题。
+//
+// 现在按**滚动位置**算出一段区间 `[start, end)`：当前视口那一屏，前后各多给一屏。
+// 往前留一屏是为了**往回滚**时图已经在手里。
+//
+// # 已经发过图的下标**不再撤回**
+//
+// 窗口滑动时区间会往前移，真按它去撤图，往回滚就会看到图闪一下重新加载。
+// 所以另记一个「已经发过图的下标区间」`[loadedMin, loadedMax)`：窗口的并集。
+// `imageSrc` 只对**从没进过窗口**的下标返回空串。
+//
+// ⚠️ 用**两个 ref** 而不是一个 `Set`：Set 的增删不会触发 Vue 重渲染，
+// 第一版写成 Set 时整面墙一张图都不出（`imageSrc` 加了新下标但组件没重渲染）。
+/** 已经进过窗口的下标区间（并集）。空集用 min=+∞ / max=0 表示。 */
+const loadedMin = ref(Number.POSITIVE_INFINITY);
+const loadedMax = ref(0);
 
-/** 一屏大概几张：按视口高度估行数，再乘当前列数（拿第一行的实际列数）。 */
-function perScreen(): number {
-  const cols = Math.max(1, Math.round((window.innerWidth - 48) / 154));
-  const rows = Math.max(1, Math.ceil(window.innerHeight / rowHeightPx));
-  return cols * rows;
+/** 视口高度：优先用滚动容器自己的（它才是真正被裁切的那个盒子）。 */
+function viewportHeight(): number {
+  const box = scrollTarget.value;
+  return box instanceof HTMLElement ? box.clientHeight : window.innerHeight;
 }
 
+/** 量出网格的列数与行高（含间距）。量不到时回落估算（宁可多给，别少给）。 */
+function measureGrid(): { cols: number; rowH: number } {
+  const cards = gridEl.value?.querySelectorAll<HTMLElement>(".jav-card");
+  if (cards && cards.length > 0) {
+    const firstTop = cards[0].offsetTop;
+    let cols = 0;
+    for (const card of cards) {
+      if (card.offsetTop !== firstTop) break;
+      cols++;
+    }
+    if (cols > 0) {
+      const cardH = cards[0].offsetHeight;
+      const secondRow = cards[cols];
+      const gap = secondRow ? secondRow.offsetTop - firstTop - cardH : (view.value === "thumb" ? 16 : 14);
+      return { cols, rowH: Math.max(1, cardH + Math.max(0, gap)) };
+    }
+  }
+  // 回落：列数按海报视图的 minmax(140px)+gap14 反推，行高按 300 估。
+  const cols = Math.max(1, Math.floor((window.innerWidth - 48 + 14) / (140 + 14)));
+  return { cols, rowH: 300 };
+}
+
+/**
+ * 按当前滚动位置重算窗口，并把新区间并入 `loaded`。
+ *
+ * 用 `getBoundingClientRect` 而不是 `offsetTop`：后者相对 offsetParent，而滚动量在
+ * 滚动盒子上，两个坐标系拼起来容易差一截（差一屏就是「滚到底还有一排没图」）。
+ */
 function refreshImageBudget() {
-  // 首屏 + 前后各一屏（3 屏），上限就是当前这一页的张数。
-  imageBudget.value = Math.min(items.value.length, perScreen() * 3);
+  const total = items.value.length;
+  if (total === 0) {
+    return;
+  }
+  const grid = gridEl.value;
+  if (!grid) return;
+
+  const { cols, rowH } = measureGrid();
+  const box = scrollTarget.value;
+  const viewTop = box instanceof HTMLElement ? box.getBoundingClientRect().top : 0;
+  const gridTop = grid.getBoundingClientRect().top;
+
+  // 视口顶落在网格里的第几行（往上滚过头时为负 → 夹到 0）
+  const firstRow = Math.max(0, Math.floor((viewTop - gridTop) / rowH));
+  const rowsOnScreen = Math.max(1, Math.ceil(viewportHeight() / rowH));
+  // 前后各留一屏
+  const startRow = Math.max(0, firstRow - rowsOnScreen);
+  const endRow = firstRow + rowsOnScreen * 2;
+
+  const start = Math.max(0, Math.min(total, startRow * cols));
+  const end = Math.max(start, Math.min(total, endRow * cols));
+  if (start < loadedMin.value) loadedMin.value = start;
+  if (end > loadedMax.value) loadedMax.value = end;
 }
 
 let onScrollTimer: number | undefined;
@@ -170,8 +236,47 @@ function scheduleBudgetRefresh() {
  * 卡片进出视口而反复卸载/重载图片（那种抖动比多下几张图更难受）。
  */
 function imageSrc(item: JavWallItem, index: number): string {
-  if (index >= imageBudget.value) return "";
+  if (index < loadedMin.value || index >= loadedMax.value) return "";
   return view.value === "poster" ? (item.poster_url ?? "") : (item.thumb_url ?? "");
+}
+
+// ————————————————————— 滚动容器 —————————————————————
+//
+// 图片窗口要跟着**真正在滚的那个盒子**走。这个组件在后台里是挂在 `.admin__body`
+// 下面的（`overflow-y: auto`），而它自己不知道这件事 —— 所以往上找第一个
+// 「overflow-y 是 auto/scroll 且真的能滚」的祖先，找不到才回落 `window`。
+//
+// ⚠️ 别改回 `window.addEventListener("scroll", …)`：那样一次都不会触发，
+// 而失败是**静默**的（图少了一半，没有任何报错）。
+//
+// 挂在 `document` 上用**捕获**阶段监听：scroll 事件不冒泡，但**捕获阶段能收到
+// 所有后代的滚动**，所以不用去猜是哪个祖先在滚，也不会漏掉布局变化后换容器的情形。
+const gridEl = ref<HTMLElement | null>(null);
+/** 当前认定的滚动盒子（只用于读视口高度；找不到时是 null = 用 window）。 */
+const scrollTarget = ref<HTMLElement | null>(null);
+
+/** 找到这个元素所在的那个滚动盒子（找不到返回 null = 用 window）。 */
+function findScrollBox(from: HTMLElement | null): HTMLElement | null {
+  let el = from?.parentElement ?? null;
+  while (el && el !== document.body && el !== document.documentElement) {
+    const overflowY = getComputedStyle(el).overflowY;
+    if ((overflowY === "auto" || overflowY === "scroll") && el.scrollHeight > el.clientHeight) {
+      return el;
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
+
+/** 重新认定滚动盒子（布局或内容变了之后调）。 */
+function bindScrollTarget() {
+  scrollTarget.value = findScrollBox(gridEl.value);
+}
+
+/** 捕获阶段的滚动处理：任何后代的滚动都会走到这里。 */
+function onAnyScroll() {
+  if (!scrollTarget.value) bindScrollTarget();
+  scheduleBudgetRefresh();
 }
 
 watch(() => props.taskId, () => {
@@ -187,18 +292,36 @@ watch(() => props.keyword, () => {
 });
 
 // 列表换了（首屏、翻档、搜索）→ 重新发一轮图；滚动/改窗口大小 → 节流补发。
-watch(items, refreshImageBudget);
+watch(items, () => {
+  // 换了一批条目就**重置**：上一批的「进过窗口」的下标对新一批没有意义
+  // （新的一批可能只有几部，也可能几百部，而第 50 个下标指向的是另一部片）。
+  loadedMin.value = Number.POSITIVE_INFINITY;
+  loadedMax.value = 0;
+  void nextTick(() => {
+    bindScrollTarget();
+    refreshImageBudget();
+  });
+});
+
+// 视图切换（海报 ↔ 缩略图）会换掉卡片高度与列数，窗口要跟着重量一次。
+watch(view, () => {
+  void nextTick(refreshImageBudget);
+});
 
 onMounted(() => {
-  refreshImageBudget();
-  window.addEventListener("scroll", scheduleBudgetRefresh, { passive: true });
+  void nextTick(() => {
+    bindScrollTarget();
+    refreshImageBudget();
+  });
+  // 捕获阶段：scroll 不冒泡，但 document 的捕获阶段能收到**所有后代**的滚动。
+  document.addEventListener("scroll", onAnyScroll, { passive: true, capture: true });
   window.addEventListener("resize", scheduleBudgetRefresh);
   void load();
 });
 onUnmounted(() => {
   window.clearTimeout(keywordTimer);
   window.clearTimeout(onScrollTimer);
-  window.removeEventListener("scroll", scheduleBudgetRefresh);
+  document.removeEventListener("scroll", onAnyScroll, { capture: true } as EventListenerOptions);
   window.removeEventListener("resize", scheduleBudgetRefresh);
 });
 
@@ -266,7 +389,7 @@ defineExpose({ refreshMeta, load });
       这个任务的输出目录里还没有番号影片。先在「STRM 任务」里同步一次，或确认任务的媒体类型与输出目录。
     </div>
 
-    <div v-else class="jav-wall__grid" :class="`jav-wall__grid--${view}`">
+    <div v-else ref="gridEl" class="jav-wall__grid" :class="`jav-wall__grid--${view}`">
       <article v-for="(item, index) in items" :key="item.id" class="jav-card jav-card--wall">
         <div class="jav-card__cover" :class="{ 'jav-card__cover--poster': view === 'poster' }">
           <!-- 两个视图各自的 URL；都没有或加载失败 → 统一占位图。
