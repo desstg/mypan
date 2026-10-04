@@ -670,3 +670,82 @@ func TestJavPendingDetailMovieIDs(t *testing.T) {
 		t.Errorf("试满之后计数应当归零（否则进度永远显示「还剩 N 部」），got %d", n)
 	}
 }
+
+// TestJavMovieUpsertPreservesPreviewImagesAndFlags 摘要行**不许**冲掉剧照与四个标记。
+//
+// 起因（2026-10-05 真机）：用户报「详情页打开有些内容是空的、要等自动获取才显示」。
+// 实测群晖库 8178 部抓过详情的片子里 **425 部的 raw_json 里有剧照（最多 19 张）
+// 而 preview_images_json 是空数组** —— 摘要行不带剧照，而无条件写会把它冲掉。
+//
+// 详情页首屏走 DetailLocal（只读本地），assembleDetail 直接把这一列塞进响应，
+// 所以被冲空的片子**剧照那一块整个不渲染**，直到 hydrate / 「重新获取」再抓一次详情。
+//
+// 这一组列的共同点：**0 / false 都是合法值**（真的没有磁链、真的不能播），
+// 所以判据不能是「值非零」，只能是「这次是不是详情路」（raw_json 非空）。
+func TestJavMovieUpsertPreservesPreviewImagesAndFlags(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// 第一次：详情接口的完整数据
+	if err := s.JavMovies.Upsert(ctx, &domain.JavMovie{
+		ID: "det1", Number: "NIMA-086", Title: "详情标题",
+		PreviewImages:    []string{"https://example.test/p1.jpg", "https://example.test/p2.jpg"},
+		MagnetsCount:     21,
+		ReviewsCount:     12,
+		HasCNSub:         true,
+		HasPreviewImages: true,
+		HasPreviewVideo:  true,
+		CanPlay:          true,
+		RawJSON:          `{"id":"det1"}`,
+		FetchedAt:        time.Now(),
+	}); err != nil {
+		t.Fatalf("第一次 upsert: %v", err)
+	}
+
+	// 第二次：榜单摘要 —— 没有剧照、没有 raw、四个标记全是零值
+	if err := s.JavMovies.Upsert(ctx, &domain.JavMovie{
+		ID: "det1", Number: "NIMA-086", Title: "榜单给的标题",
+		MagnetsCount: 0, ReviewsCount: 0,
+	}); err != nil {
+		t.Fatalf("第二次 upsert: %v", err)
+	}
+
+	got, err := s.JavMovies.Get(ctx, "det1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.PreviewImages) != 2 {
+		t.Errorf("剧照被摘要行冲掉了：%v", got.PreviewImages)
+	}
+	if got.MagnetsCount != 21 {
+		t.Errorf("magnets_count 被冲掉了：%d", got.MagnetsCount)
+	}
+	if got.ReviewsCount != 12 {
+		t.Errorf("reviews_count 被冲掉了：%d", got.ReviewsCount)
+	}
+	if !got.HasCNSub || !got.HasPreviewImages || !got.HasPreviewVideo || !got.CanPlay {
+		t.Errorf("四个标记被冲掉了：cnsub=%v prevImg=%v prevVid=%v play=%v",
+			got.HasCNSub, got.HasPreviewImages, got.HasPreviewVideo, got.CanPlay)
+	}
+
+	// 第三次：**详情路**（带 raw）—— 这次该覆盖，包括「真的变成 0 / false」
+	if err := s.JavMovies.Upsert(ctx, &domain.JavMovie{
+		ID: "det1", Number: "NIMA-086", Title: "详情标题",
+		MagnetsCount: 0, ReviewsCount: 0, CanPlay: false,
+		RawJSON:   `{"id":"det1","re":1}`,
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("第三次 upsert: %v", err)
+	}
+	got, err = s.JavMovies.Get(ctx, "det1")
+	if err != nil {
+		t.Fatalf("get after detail: %v", err)
+	}
+	if got.MagnetsCount != 0 || got.CanPlay {
+		t.Errorf("详情路该覆盖这几个值：magnets=%d can_play=%v", got.MagnetsCount, got.CanPlay)
+	}
+	// 剧照这一列是「非空才覆盖」—— 详情这次也没带，所以保留上一次的
+	if len(got.PreviewImages) != 2 {
+		t.Errorf("详情这次没带剧照，不该清空：%v", got.PreviewImages)
+	}
+}

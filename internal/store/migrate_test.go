@@ -798,3 +798,71 @@ func TestMigrationAddsSidecarSyncedAt(t *testing.T) {
 		t.Errorf("新行的 detail_attempts 应当是 0，got %d", attempts)
 	}
 }
+
+// 迁移 0052：把「列表入库冲掉详情字段」剩下的几列补完，并回填存量。
+//
+// 起因（2026-10-05 真机）：用户报「详情页打开有些内容是空的、要等自动获取才显示」。
+// 实测群晖库 425 部的 raw_json 里有剧照（最多 19 张）而 preview_images_json 是空数组。
+//
+// 这一条钉两件事：
+//  1. **从 raw 重拼时只留 large_url**（raw 里是 `[{large_url,thumb_url}]`，
+//     列里是字符串数组）—— 直接 json_extract 出来写进去会让前端拿到一堆对象；
+//  2. **两道闸门**（json_valid + 非空）—— 真库里有一批 raw 是空串/半截，
+//     少了 json_valid 会整条语句报 malformed JSON 而**一条都不更新**。
+func TestMigrationBackfillsPreviewImages(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	raw := `{"id":"x","preview_images":[{"large_url":"https://a/1.jpg","thumb_url":"https://a/1t.jpg"},` +
+		`{"large_url":"https://a/2.jpg","thumb_url":"https://a/2t.jpg"}],` +
+		`"magnets_count":21,"reviews_count":12,"has_cnsub":1,"preview_video_url":"https://a/v.mp4"}`
+	seed := func(id, number, rawJSON, previews string) {
+		t.Helper()
+		if _, err := db.write.ExecContext(ctx,
+			`INSERT INTO jav_movies(id, number, title, raw_json, preview_images_json) VALUES(?,?,?,?,?)`,
+			id, number, "t", rawJSON, previews); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	seed("x", "NIMA-086", raw, "[]") // 有图但列空 → 该被补
+	seed("y", "B", "", "[]")         // raw 空 → 不动
+	seed("z", "C", `{"broken`, "[]") // raw 半截 → 不动（json_valid 挡住）
+
+	// 这条迁移已经随建表跑过了，把它清掉重跑（幂等，安全）
+	if _, err := db.write.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = 52`); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	var previews string
+	var hasPrevImg, magnets, reviews, hasVid, hasSub int
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT preview_images_json, has_preview_images, magnets_count, reviews_count, has_preview_video, has_cnsub
+		   FROM jav_movies WHERE id='x'`).
+		Scan(&previews, &hasPrevImg, &magnets, &reviews, &hasVid, &hasSub); err != nil {
+		t.Fatalf("read x: %v", err)
+	}
+	// 只留 large_url 的**字符串**数组
+	if previews != `["https://a/1.jpg","https://a/2.jpg"]` {
+		t.Errorf("剧照回填 = %s（应当只留 large_url 的字符串数组）", previews)
+	}
+	if hasPrevImg != 1 || magnets != 21 || reviews != 12 || hasVid != 1 || hasSub != 1 {
+		t.Errorf("标记/计数回填不对：prevImg=%d magnets=%d reviews=%d vid=%d sub=%d",
+			hasPrevImg, magnets, reviews, hasVid, hasSub)
+	}
+
+	// 另两行一个字段都不该动
+	for _, id := range []string{"y", "z"} {
+		var p string
+		var hpi int
+		if err := db.read.QueryRowContext(ctx,
+			`SELECT preview_images_json, has_preview_images FROM jav_movies WHERE id=?`, id).Scan(&p, &hpi); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if p != "[]" || hpi != 0 {
+			t.Errorf("%s 不该被动：previews=%s has_preview_images=%d", id, p, hpi)
+		}
+	}
+}

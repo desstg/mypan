@@ -77,7 +77,16 @@ ON CONFLICT(id) DO UPDATE SET
     series_id=excluded.series_id, series_name=excluded.series_name,
     -- tags_json 同 duration：列表接口不给标签，空数组不该盖掉详情抓来的。
     tags_json=CASE WHEN excluded.tags_json NOT IN ('', '[]') THEN excluded.tags_json ELSE jav_movies.tags_json END,
-    preview_images_json=excluded.preview_images_json,
+    -- preview_images_json 与 tags_json **逐字同形**（原来它漏了这道保护）。
+    --
+    -- 起因（2026-10-05 真机）：用户报「详情页打开有些内容是空的、要等自动获取才显示」。
+    -- 实测群晖库 8178 部抓过详情的片子里 **425 部的 raw_json 里有剧照（最多 19 张）
+    -- 而这一列是「空数组」** —— 摘要行（榜单 / 影库同步 / 搜索）不带剧照，无条件写就把它冲掉了。
+    --
+    -- 详情页首屏走 DetailLocal（只读本地），assembleDetail 直接把这一列塞进响应，
+    -- 所以被冲空的片子**剧照那一块整个不渲染**，直到 hydrate / 「重新获取」再抓一次详情。
+    -- 与 duration / score / tags / type 那一批是同一个 bug 的同一个位置（443fe11 漏了它）。
+    preview_images_json=CASE WHEN excluded.preview_images_json NOT IN ('', '[]') THEN excluded.preview_images_json ELSE jav_movies.preview_images_json END,
     -- preview_video_url 同 javbus_cover：**只有详情接口才给得出它**，榜单/影库那些
     -- 列表入库时不带这个字段，无条件写会把详情抓来的地址冲成空串 —— 实测 60 部里
     -- 空掉了 15 部，而且看不出是谁干的。
@@ -86,9 +95,25 @@ ON CONFLICT(id) DO UPDATE SET
     -- 这道保护只保证「同一天内的列表刷新不会白抹一次」，真要播还是得现取
     -- （见 jav.FreshPreviewVideoURL）。
     preview_video_url=CASE WHEN excluded.preview_video_url <> '' THEN excluded.preview_video_url ELSE jav_movies.preview_video_url END,
-    magnets_count=excluded.magnets_count, reviews_count=excluded.reviews_count,
-    has_cnsub=excluded.has_cnsub, has_preview_images=excluded.has_preview_images,
-    has_preview_video=excluded.has_preview_video, can_play=excluded.can_play,
+    -- magnets_count / reviews_count / 四个布尔标记：**按「这次是不是详情路」整组判**
+    -- （判据「raw_json 非空」，与下面 type 那条同一个道理）。
+    --
+    -- 为什么不逐列判「值是不是 0」：这几个的 0 / false 都是**合法值**
+    -- （真的没有磁链、真的不能播），光看值分不出「真没有」与「列表接口没给」。
+    -- 而实测摘要行带进来的是列表页上的磁链数（常常是 0）、布尔一律 false，
+    -- 于是详情的真值被盖掉 —— 抽样 400 部里 237 部「raw 有磁链但 can_play=0」。
+    --
+    -- 判据取 raw_json 而不是「值非零」的代价：**摘要行永远不更新这几列**。
+    -- 这是刻意的取舍（宁可漏更新，不可冲空），与 type 那条一致。
+    --
+    -- ⚠️ 六列必须**整组**同判据：它们是一组快照（有没有磁链 / 有没有剧照 / 能不能播），
+    -- 半新半旧会出现「has_preview_images=1 而 preview_images_json=[]」这种自相矛盾的行。
+    magnets_count=CASE WHEN excluded.raw_json <> '' THEN excluded.magnets_count ELSE jav_movies.magnets_count END,
+    reviews_count=CASE WHEN excluded.raw_json <> '' THEN excluded.reviews_count ELSE jav_movies.reviews_count END,
+    has_cnsub=CASE WHEN excluded.raw_json <> '' THEN excluded.has_cnsub ELSE jav_movies.has_cnsub END,
+    has_preview_images=CASE WHEN excluded.raw_json <> '' THEN excluded.has_preview_images ELSE jav_movies.has_preview_images END,
+    has_preview_video=CASE WHEN excluded.raw_json <> '' THEN excluded.has_preview_video ELSE jav_movies.has_preview_video END,
+    can_play=CASE WHEN excluded.raw_json <> '' THEN excluded.can_play ELSE jav_movies.can_play END,
     -- type 也**只有详情接口才给得出**，而且判据必须挂在 raw_json 上 ——
     -- 因为 '0'（有码）**既是合法值、也是 MovieTypeOf 的兜底值**：
     -- 列表接口不返回 type，归一化时 strings.TrimSpace(m.Type.String()) 是空串，
