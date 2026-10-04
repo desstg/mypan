@@ -49,7 +49,18 @@ ON CONFLICT(id) DO UPDATE SET
     -- javbus_cover 只在本次带值时才覆盖：榜单刷新时上游给不出它，
     -- 无条件写会把之前 JAVBUS 抓到的干净封面抹成空串。
     javbus_cover=CASE WHEN excluded.javbus_cover <> '' THEN excluded.javbus_cover ELSE jav_movies.javbus_cover END,
-    duration=excluded.duration, release_date=excluded.release_date, score=excluded.score,
+    -- duration / score / tags_json 三列**同 javbus_cover**：只有详情接口才给得出它们。
+    --
+    -- 起因（2026-10-04 真机）：用户说「打开详情页总是信息不全」。实测全库 2194 部
+    -- 有 raw_json 的片里，**score 被冲空 481 部（21%）、tags 338 部（15%）、
+    -- duration 28 部** —— 而 raw_json 里那些值**都好好的**（那正是它存在的意义）。
+    --
+    -- 冲它的是**摘要行**（榜单刷新 / 影库同步 / 搜索，upsertSummaries 那条路）：
+    -- 列表接口不返回这三项，归一化后就是 0 / 空数组，而无条件写会盖掉详情抓来的值。
+    -- 实测被冲的那批 updated_at 集中在 2026-09（448 部），与榜单/影库同步跑过的时间吻合。
+    duration=CASE WHEN excluded.duration > 0 THEN excluded.duration ELSE jav_movies.duration END,
+    release_date=excluded.release_date,
+    score=CASE WHEN excluded.score > 0 THEN excluded.score ELSE jav_movies.score END,
     -- summary / review 同 javbus_cover：**只有详情接口才给得出它们**，
     -- 榜单与影库同步那些列表入库不带这两个字段（实测列表入库时它们是空串）。
     -- 现在库里的数据还没被冲过（三处一致），但这两列一直没这道保护 ——
@@ -63,7 +74,9 @@ ON CONFLICT(id) DO UPDATE SET
     maker_id=excluded.maker_id, maker_name=excluded.maker_name,
     publisher_id=excluded.publisher_id, publisher_name=excluded.publisher_name,
     series_id=excluded.series_id, series_name=excluded.series_name,
-    tags_json=excluded.tags_json, preview_images_json=excluded.preview_images_json,
+    -- tags_json 同 duration：列表接口不给标签，空数组不该盖掉详情抓来的。
+    tags_json=CASE WHEN excluded.tags_json NOT IN ('', '[]') THEN excluded.tags_json ELSE jav_movies.tags_json END,
+    preview_images_json=excluded.preview_images_json,
     -- preview_video_url 同 javbus_cover：**只有详情接口才给得出它**，榜单/影库那些
     -- 列表入库时不带这个字段，无条件写会把详情抓来的地址冲成空串 —— 实测 60 部里
     -- 空掉了 15 部，而且看不出是谁干的。
@@ -75,7 +88,19 @@ ON CONFLICT(id) DO UPDATE SET
     magnets_count=excluded.magnets_count, reviews_count=excluded.reviews_count,
     has_cnsub=excluded.has_cnsub, has_preview_images=excluded.has_preview_images,
     has_preview_video=excluded.has_preview_video, can_play=excluded.can_play,
-    type=excluded.type, number_letter=excluded.number_letter,
+    -- type 也**只有详情接口才给得出**，而且判据必须挂在 raw_json 上 ——
+    -- 因为 '0'（有码）**既是合法值、也是 MovieTypeOf 的兜底值**：
+    -- 列表接口不返回 type，归一化时 strings.TrimSpace(m.Type.String()) 是空串，
+    -- 于是兜底成 '0'。光看值分不出「真是有码」与「没给」。
+    --
+    -- 而 raw_json 只有详情路才带（摘要行传的是空串）—— 所以拿它当判据是唯一可靠的。
+    -- 代价：**摘要行永远不更新 type**。这是刻意的取舍（宁可漏更新，不可冲空），
+    -- 将来上游若在列表里也给了 type，这条得改成「列表也带 raw」之类的方案。
+    --
+    -- 实测代价（2026-10-04）：63 部**无码片**（raw 里 type='1'）被摘要行冲成了 '0'，
+    -- 表现是详情页/水印判定把它们当有码。
+    type=CASE WHEN excluded.raw_json <> '' THEN excluded.type ELSE jav_movies.type END,
+    number_letter=excluded.number_letter,
     -- raw_json 同理：摘要是从列表接口来的、没有 raw，别把详情的 raw 冲掉。
     raw_json=CASE WHEN excluded.raw_json <> '' THEN excluded.raw_json ELSE jav_movies.raw_json END,
     fetched_at=excluded.fetched_at,
