@@ -35,8 +35,6 @@ const props = defineProps<{
 /** 隐藏名单变了（或拿到新的一份）时把名单抛给外面：页头那颗按钮要显示「隐藏 N 个目录」。 */
 const emit = defineEmits<{
   "hidden-dirs": [string[]];
-  /** 墙上那句「xx 已隐藏」旁边的「调整」：请父组件打开勾选弹窗。 */
-  "open-hidden-dirs": [];
 }>();
 
 const loading = ref(false);
@@ -235,12 +233,6 @@ defineExpose({ refreshMeta, load });
         >
           {{ cat.name || "根目录" }}<span class="jav-tab__count">{{ cat.count }}</span>
         </button>
-        <span v-if="result?.hidden_dirs?.length" class="jav-wall__hidden">
-          {{ result.hidden_dirs.join("/") }} 已隐藏
-          <button type="button" class="jav-wall__hidden-link" @click="emit('open-hidden-dirs')">
-            调整
-          </button>
-        </span>
       </div>
 
       <!-- 搜索与排序都挪到页头那两个按钮上了（与 tmdb 那套外观一致、功能各是各的），
@@ -327,11 +319,6 @@ defineExpose({ refreshMeta, load });
 .jav-wall__bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .jav-wall__tabs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .jav-tab__count { margin-left: 6px; font-size: 11px; opacity: 0.7; }
-.jav-wall__hidden { font-size: 12px; color: var(--text-muted); }
-.jav-wall__hidden-link {
-  margin-left: 6px; padding: 0; border: 0; background: none;
-  color: var(--brand); font-size: 12px; cursor: pointer; text-decoration: underline;
-}
 .jav-wall__tools { display: flex; align-items: center; gap: 8px; }
 .jav-wall__view { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-pill); overflow: hidden; }
 .jav-wall__view-btn { padding: 5px 12px; font-size: 12px; background: transparent; border: 0; color: var(--text-muted); cursor: pointer; }

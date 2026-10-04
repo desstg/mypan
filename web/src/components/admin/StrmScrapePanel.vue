@@ -1064,7 +1064,6 @@ defineExpose({
       :keyword="javKeyword"
       :sort="javSortKey"
       @hidden-dirs="javHiddenCount = $event.length"
-      @open-hidden-dirs="javHiddenOpen = true"
     />
 
     <template v-else-if="!loading">
