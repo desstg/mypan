@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"litepan/internal/jav/emby/actormap"
 )
 
 // MovieMeta 是 nfo 的**完整内容**：`<movie>` 里每个元素的值。
@@ -188,10 +190,29 @@ func MovieMetaFromSidecar(doc *SidecarDoc, opts NFOOptions) *MovieMeta {
 		CountryCode:  "JP",
 		Names:        opts.Names,
 	}
+	// 演员名统一（`actormap`）：同一个演员的多个艺名归并成一个，
+	// 表里没有的**原样保留**（用户明确要求：缺条目不能出错，回到现在的行为）。
+	//
+	// **只作用在这一步**（生成 nfo 用的内容模型）：数据库、界面、演员订阅都不动 ——
+	// 那几处要的是上游给的原始名字，改了会让演员页与订阅目标对不上。
+	//
+	// 顺带**去重**：两个别名归到同一个统一名时（表里大量存在），
+	// `<actor>` 里出现两条同名是最容易被当成 bug 的那种输出。
+	actorTbl := actormap.Default()
+	seenActor := make(map[string]struct{}, len(doc.Actors))
 	for _, a := range doc.Actors {
-		if name := strings.TrimSpace(a.Name); name != "" {
-			meta.Actors = append(meta.Actors, name)
+		name := strings.TrimSpace(a.Name)
+		if name == "" {
+			continue
 		}
+		if actorTbl != nil {
+			name = strings.TrimSpace(actorTbl.Resolve(name))
+		}
+		if _, dup := seenActor[name]; dup {
+			continue
+		}
+		seenActor[name] = struct{}{}
+		meta.Actors = append(meta.Actors, name)
 	}
 	// 合集在这一刻算一次（上游顺序 + 性别都已经在手），算完就丢掉性别 ——
 	// 性别不是 nfo 的内容，`<actor>` 只有 name/type。
