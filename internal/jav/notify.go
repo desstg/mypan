@@ -40,6 +40,40 @@ func (s *Service) notifyPush(level, title, message string, refID int64) {
 	})
 }
 
+// notifyBackfill 报一轮「详情回填」的结果。
+//
+// 三条规矩（都来自「这条循环要跑几小时、用户要能看见进度」）：
+//
+//   - **补到了才报**（success）。一部都没补上时**不发通知** —— 那多半是上游不通
+//     或这一批全是下游没有的冷门片，而这条循环会自己重来；每轮都发一条
+//     「补了 0 部」只会变成噪声（与 notifyScheduledPush 里「一部都没推出去不发通知」
+//     同一条取向）。
+//   - **收工时多报一条**：这一批跑完、库里再没有候选了 —— 那时「还剩 0 部」正是
+//     用户想知道的结论（否则他分不清「补完了」与「还在跑」）。
+//   - 正文写**还剩多少**，那比「补了多少」更能回答「还要跑多久」。
+func (s *Service) notifyBackfill(done, remaining int, stopped bool) {
+	if s == nil || s.bus == nil {
+		return
+	}
+	finished := remaining == 0
+	if done == 0 && !finished {
+		return // 什么都没补上、也还没完：不发（见上面第一条）
+	}
+	msg := "本轮补了 " + strconv.Itoa(done) + " 部详情，还剩 " + strconv.Itoa(remaining) + " 部"
+	if stopped {
+		msg += "（本轮时间用完，下轮接着来）"
+	}
+	if finished {
+		msg = "详情回填完成：本轮补了 " + strconv.Itoa(done) + " 部，库里已经没有没抓过详情的影片了"
+	}
+	s.bus.Publish(context.Background(), eventbus.NotificationCreated{
+		Level:    "success",
+		Category: domain.NotificationCategoryJavBackfill,
+		Title:    "番号详情回填",
+		Message:  msg,
+	})
+}
+
 // notifyScheduledPush 报一轮定时推送的结果。
 //
 // 三种结论分开报（2026-09-27 重写）：

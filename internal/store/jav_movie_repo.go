@@ -20,7 +20,8 @@ const javMovieColumns = `id, number, title, origin_title, title_zh, title_zh_sou
        director_id, director_name, maker_id, maker_name, publisher_id, publisher_name,
        series_id, series_name, tags_json, preview_images_json, preview_video_url,
        magnets_count, reviews_count, has_cnsub, has_preview_images, has_preview_video,
-       can_play, type, number_letter, raw_json, fetched_at, last_viewed_at, created_at, updated_at`
+       can_play, type, number_letter, raw_json, fetched_at, last_viewed_at, created_at, updated_at,
+       sidecar_synced_at`
 
 // Upsert 写入或覆盖影片元数据。
 //
@@ -794,6 +795,90 @@ func (r *javMovieRepo) BumpSummaryAttempts(ctx context.Context, movieID string) 
 	return wrapDB(err)
 }
 
+// PendingDetailMovieIDs 取「从没抓过详情」的影片 id（raw_json 为空），最近碰过的优先。
+//
+// 判据与理由见 domain.JavMovieRepository 里那条注释。排序照 PendingSummaryMovieIDs：
+// 用户最近看过 / 刚入库的先补。
+//
+// **只挑有番号的**：番号是上游详情的入口（`/v4/movies/{id}` 用的是库里的 id，
+// 但回填失败时日志与排查要靠番号定位），而真库里那 12813 部全都有番号 ——
+// 加这一条是为了让「没有番号的行」永远不进候选，免得每轮都挑出来空跑一次。
+func (r *javMovieRepo) PendingDetailMovieIDs(ctx context.Context, limit int) ([]string, error) {
+	rows, err := r.db.read.QueryContext(ctx, `
+SELECT id FROM jav_movies
+ WHERE (raw_json IS NULL OR raw_json = '')
+   AND number IS NOT NULL AND number <> ''
+   AND detail_attempts < ?
+ ORDER BY COALESCE(NULLIF(last_viewed_at, ''), fetched_at) DESC, id
+ LIMIT ?`, detailMaxAttempts, clampLimit(limit, 100))
+	if err != nil {
+		return nil, wrapDB(err)
+	}
+	defer rows.Close()
+	out := make([]string, 0, 64)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, wrapDB(err)
+		}
+		out = append(out, id)
+	}
+	return out, wrapDB(rows.Err())
+}
+
+// CountPendingDetail 数「还没抓过详情」的部数（回填循环报进度用）。
+//
+// 用同一套判据（raw_json 为空 + 有番号），别另写一份 —— 两处一分家，
+// 进度里说的「还剩 M 部」与实际每轮挑出来的批就对不上。
+func (r *javMovieRepo) CountPendingDetail(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.read.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM jav_movies
+ WHERE (raw_json IS NULL OR raw_json = '')
+   AND number IS NOT NULL AND number <> ''
+   AND detail_attempts < ?`, detailMaxAttempts).Scan(&n)
+	return n, wrapDB(err)
+}
+
+// detailMaxAttempts 是「同一部片最多试几轮详情」。
+//
+// 取 3（与 summaryMaxAttempts 同值，理由也同源）：一轮里问一次上游，
+// 3 轮就是「上游三次都说没有」。再往上加只会让那批**上游根本没有**的片
+// （国产/素人，实测真库里占比不小）每轮都白打一次 —— 而不封顶的话
+// 「还剩 M 部」这个进度数永远不会归零，用户分不清「补完了」与「卡住了」。
+//
+// 成功不涨计数（raw_json 一写进去就自动离开候选集），只有失败才 +1。
+const detailMaxAttempts = 3
+
+// BumpDetailAttempts 把「这部片的详情没抓到」的次数 +1。
+//
+// 与 BumpSummaryAttempts 同一套语义：失败要记账，否则那批永远补不上的片
+// 会每轮重来一遍。**成功不调它** —— 成功的判据是 raw_json 被写进去了。
+func (r *javMovieRepo) BumpDetailAttempts(ctx context.Context, movieID string) error {
+	movieID = strings.TrimSpace(movieID)
+	if movieID == "" {
+		return nil
+	}
+	_, err := r.db.write.ExecContext(ctx,
+		`UPDATE jav_movies SET detail_attempts = detail_attempts + 1, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		movieID)
+	return wrapDB(err)
+}
+
+// MarkSidecarSynced 记下这部片的元数据已经回写过本地侧车。
+//
+// **找到侧车就记**（改了没改都记）—— 侧车里已经是新值就不必再走一遍 Walk。
+// 「没找到侧车」要不要记由调用方判断，见 domain.JavMovieRepository 里那条注释。
+func (r *javMovieRepo) MarkSidecarSynced(ctx context.Context, movieID string) error {
+	movieID = strings.TrimSpace(movieID)
+	if movieID == "" {
+		return nil
+	}
+	_, err := r.db.write.ExecContext(ctx,
+		`UPDATE jav_movies SET sidecar_synced_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, movieID)
+	return wrapDB(err)
+}
+
 // MarkSwept 记下这部片的评论已经扫过一遍（见 domain 里那条注释）。
 // 重复标记是幂等的，只刷新时间。
 func (r *javReviewRepo) MarkSwept(ctx context.Context, movieID string) error {
@@ -919,19 +1004,22 @@ type javRowScanner interface{ Scan(dest ...any) error }
 
 func scanJavMovie(sc javRowScanner) (*domain.JavMovie, error) {
 	var (
-		m          domain.JavMovie
-		duration   sql.NullInt64
-		score      sql.NullFloat64
-		tags       string
-		previews   string
-		fetchedAt  sql.NullString
-		lastView   sql.NullString
-		createdAt  sql.NullString
-		updatedAt  sql.NullString
-		hasCN      int
-		hasPrevImg int
-		hasPrevVid int
-		canPlay    int
+		m         domain.JavMovie
+		duration  sql.NullInt64
+		score     sql.NullFloat64
+		tags      string
+		previews  string
+		fetchedAt sql.NullString
+		lastView  sql.NullString
+		createdAt sql.NullString
+		updatedAt sql.NullString
+		// sidecarSyncedAt 是 0051 加的列。用 NullString 而不是 time.Time：
+		// 绝大多数行是 NULL（还没回写过），而 NULL 与零值时间必须区分得开。
+		sidecarSyncedAt sql.NullString
+		hasCN           int
+		hasPrevImg      int
+		hasPrevVid      int
+		canPlay         int
 	)
 	err := sc.Scan(&m.ID, &m.Number, &m.Title, &m.OriginTitle, &m.TitleZH, &m.TitleZHSource,
 		&m.CoverURL, &m.ThumbURL, &m.JavbusCover,
@@ -939,7 +1027,8 @@ func scanJavMovie(sc javRowScanner) (*domain.JavMovie, error) {
 		&m.DirectorID, &m.DirectorName, &m.MakerID, &m.MakerName, &m.PublisherID, &m.PublisherName,
 		&m.SeriesID, &m.SeriesName, &tags, &previews, &m.PreviewVideoURL,
 		&m.MagnetsCount, &m.ReviewsCount, &hasCN, &hasPrevImg, &hasPrevVid,
-		&canPlay, &m.Type, &m.NumberLetter, &m.RawJSON, &fetchedAt, &lastView, &createdAt, &updatedAt)
+		&canPlay, &m.Type, &m.NumberLetter, &m.RawJSON, &fetchedAt, &lastView, &createdAt, &updatedAt,
+		&sidecarSyncedAt)
 	if err != nil {
 		return nil, wrapDB(err)
 	}
@@ -959,6 +1048,7 @@ func scanJavMovie(sc javRowScanner) (*domain.JavMovie, error) {
 	m.LastViewed = parseTS(lastView)
 	m.CreatedAt = parseTS(createdAt)
 	m.UpdatedAt = parseTS(updatedAt)
+	m.SidecarSyncedAt = parseTS(sidecarSyncedAt)
 	return &m, nil
 }
 

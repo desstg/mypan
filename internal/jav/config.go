@@ -70,6 +70,20 @@ type ConfigView struct {
 	// （元数据侧车，见 sidecar.go）。默认开。
 	SidecarEnabled bool `json:"sidecar_enabled"`
 
+	// SidecarSyncEnabled 控制后台要不要把库里**已经有的**元数据回写进本地那份侧车
+	// （见 loops.go 的 sidecarSyncLoop）。默认开。
+	//
+	// 与 SidecarEnabled 是两个问题：那个是「推送时写不写」，这个是
+	// 「推送之后，库里补齐的演员/导演/时长要不要补回那份侧车」。
+	SidecarSyncEnabled bool `json:"sidecar_sync_enabled"`
+
+	// DetailBackfillEnabled 控制后台要不要给**从没抓过详情**的影片补详情
+	// （见 loops.go 的 detailBackfillLoop）。默认**关** —— 它是全模块唯一一条会
+	// 持续几小时占用上游通道的长活（实测真库 12813 部 × 1.8 秒 ≈ 6.4 小时）。
+	DetailBackfillEnabled bool `json:"detail_backfill_enabled"`
+	// DetailBackfillBudgetMin 是每轮的时间预算（分钟）。到点收手，剩下的留给下一轮。
+	DetailBackfillBudgetMin int `json:"detail_backfill_budget_min"`
+
 	// —— 番号海报水印（见 internal/jav/emby/watermark.go）——
 	//
 	// WatermarkEnabled 只管**自动**那条路（重刮 / 扫描生成海报）贴不贴，默认关；
@@ -127,7 +141,11 @@ type ConfigInput struct {
 	SubIntervalMaxSec   *int     `json:"sub_interval_max_sec"`
 	SubTimeoutSec       *int     `json:"sub_timeout_sec"`
 
-	SidecarEnabled *bool `json:"sidecar_enabled"`
+	SidecarEnabled     *bool `json:"sidecar_enabled"`
+	SidecarSyncEnabled *bool `json:"sidecar_sync_enabled"`
+
+	DetailBackfillEnabled   *bool `json:"detail_backfill_enabled"`
+	DetailBackfillBudgetMin *int  `json:"detail_backfill_budget_min"`
 
 	WatermarkEnabled *bool `json:"watermark_enabled"`
 	WatermarkScale   *int  `json:"watermark_scale"`
@@ -201,7 +219,11 @@ func (s *Service) Config(ctx context.Context) (ConfigView, error) {
 		SubIntervalMaxSec:   s.settings.Int(settings.KeyJavSubIntervalMaxSec),
 		SubTimeoutSec:       s.settings.Int(settings.KeyJavSubTimeoutSec),
 
-		SidecarEnabled: s.sidecarEnabled(),
+		SidecarEnabled:     s.sidecarEnabled(),
+		SidecarSyncEnabled: s.sidecarSyncEnabled(),
+
+		DetailBackfillEnabled:   s.settings.Bool(settings.KeyJavDetailBackfillEnabled),
+		DetailBackfillBudgetMin: s.settings.Int(settings.KeyJavDetailBackfillBudgetMin),
 
 		WatermarkEnabled: s.WatermarkEnabled(),
 		WatermarkScale:   s.WatermarkScalePercent(),
@@ -367,6 +389,15 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 	}
 	if in.SidecarEnabled != nil {
 		patch[settings.KeyJavSidecarEnabled] = boolString(*in.SidecarEnabled)
+	}
+	if in.SidecarSyncEnabled != nil {
+		patch[settings.KeyJavSidecarSyncEnabled] = boolString(*in.SidecarSyncEnabled)
+	}
+	if in.DetailBackfillEnabled != nil {
+		patch[settings.KeyJavDetailBackfillEnabled] = boolString(*in.DetailBackfillEnabled)
+	}
+	if in.DetailBackfillBudgetMin != nil {
+		patch[settings.KeyJavDetailBackfillBudgetMin] = strconv.Itoa(*in.DetailBackfillBudgetMin)
 	}
 	if in.WatermarkEnabled != nil {
 		patch[settings.KeyJavWatermarkEnabled] = boolString(*in.WatermarkEnabled)

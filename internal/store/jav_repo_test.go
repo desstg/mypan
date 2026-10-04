@@ -601,3 +601,72 @@ func TestJavPushCountsBySubscription(t *testing.T) {
 		t.Errorf("sub 10 = %+v, want 全 0", got)
 	}
 }
+
+// TestJavPendingDetailMovieIDs 详情回填的候选判据。
+//
+// 判据是 `raw_json` 为空 —— 它是**唯一可靠**的「抓过详情没有」的凭据
+// （榜单/影库同步入库的只有 number/title/cover，列表接口不给详情）。
+// 少挑一部就是那部永远补不上；多挑一部就是白打一次上游。
+func TestJavPendingDetailMovieIDs(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	seed := func(id, number, raw string) {
+		t.Helper()
+		if err := s.JavMovies.Upsert(ctx, &domain.JavMovie{
+			ID: id, Number: number, Title: "t", RawJSON: raw, FetchedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	seed("done", "SSIS-001", `{"id":"done"}`) // 抓过详情 → 不该被挑
+	seed("todo", "SSIS-002", "")              // 从没抓过 → 该被挑
+	seed("nonum", "", "")                     // 连番号都没有 → 永远不该进候选
+
+	ids, err := s.JavMovies.PendingDetailMovieIDs(ctx, 10)
+	if err != nil {
+		t.Fatalf("PendingDetailMovieIDs: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "todo" {
+		t.Errorf("候选 = %v，期望只有 [todo]", ids)
+	}
+
+	// 计数用**同一套判据** —— 两处一分家，进度里的「还剩 M 部」就对不上实际批次
+	n, err := s.JavMovies.CountPendingDetail(ctx)
+	if err != nil {
+		t.Fatalf("CountPendingDetail: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("CountPendingDetail = %d，期望 1", n)
+	}
+
+	// 补完之后它应当退出候选（成功的判据就是 raw_json 被写进去了）
+	seed("todo", "SSIS-002", `{"id":"todo"}`)
+	if ids, err := s.JavMovies.PendingDetailMovieIDs(ctx, 10); err != nil || len(ids) != 0 {
+		t.Errorf("补完之后不该再有候选：ids=%v err=%v", ids, err)
+	}
+	if n, _ := s.JavMovies.CountPendingDetail(ctx); n != 0 {
+		t.Errorf("补完之后计数应当是 0，got %d", n)
+	}
+
+	// 失败那一路：**试到上限就不再挑它**。
+	//
+	// 这条是「进度数会不会归零」的凭据 —— 上游根本没有这部片时（国产/素人，
+	// 真库那 12813 部里占比不小），不封顶的话它每轮都会被重挑、白打一次上游。
+	seed("never", "ZZZZ-999", "")
+	for i := 0; i < 3; i++ {
+		ids, err := s.JavMovies.PendingDetailMovieIDs(ctx, 10)
+		if err != nil || len(ids) != 1 || ids[0] != "never" {
+			t.Fatalf("第 %d 轮候选 = %v（期望 [never]）err=%v", i+1, ids, err)
+		}
+		if err := s.JavMovies.BumpDetailAttempts(ctx, "never"); err != nil {
+			t.Fatalf("BumpDetailAttempts: %v", err)
+		}
+	}
+	if ids, err := s.JavMovies.PendingDetailMovieIDs(ctx, 10); err != nil || len(ids) != 0 {
+		t.Errorf("试满 3 轮之后不该再挑它：ids=%v err=%v", ids, err)
+	}
+	if n, _ := s.JavMovies.CountPendingDetail(ctx); n != 0 {
+		t.Errorf("试满之后计数应当归零（否则进度永远显示「还剩 N 部」），got %d", n)
+	}
+}

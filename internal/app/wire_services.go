@@ -267,6 +267,28 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	javSvc.SetTitleZHSidecarSink(func(number, titleZH string) (bool, error) {
 		return strmSvc.ApplySidecarTitleZHByNumber(context.Background(), number, titleZH), nil
 	})
+	// 整批字段回写：补缺链刚跑完那一刻推这一部（上面两条管不到的那些字段 ——
+	// 演员、导演、片商、时长、评分、标签）。
+	//
+	// 为什么不复用上面两条：那两条是**单个字符串字段**的专用通道，而这次要写的
+	// 字段里有数组（actors/tags）、数字（duration/score）与对象（director 的 id+name）。
+	javSvc.SetFieldsSidecarSink(func(number string, fields map[string]any) (bool, error) {
+		return strmSvc.ApplySidecarFieldsByNumber(context.Background(), number, fields), nil
+	})
+	// 存量补齐走**整批遍历**：按库里的番号逐个去 Walk 媒体库目录是
+	// 「几千部 × 几千个文件」，跑不完 —— 所以反过来，由 strm 遍历一次侧车目录，
+	// 按番号回问 jav「库里这部有什么」（见 strm.SyncSidecarsFromRepo）。
+	javSvc.SetSidecarSyncSink(func(ctx context.Context, fieldsFor func(string) (map[string]any, bool)) (jav.SidecarSyncResult, error) {
+		res, err := strmSvc.SyncSidecarsFromRepo(ctx, fieldsFor)
+		if err != nil {
+			return jav.SidecarSyncResult{}, err
+		}
+		return jav.SidecarSyncResult{
+			Scanned: res.Scanned,
+			Written: res.Written,
+			Numbers: res.Numbers,
+		}, nil
+	})
 
 	// 用户自己那套水印图标放哪 —— 那是 jav 模块的设置项（jav_watermark_dir），
 	// strm 这边不该知道键名，所以走一个取值函数注入（同 SetJavImageFetcher 的理由）。

@@ -834,6 +834,14 @@ func (s *Service) ingestMovie(ctx context.Context, id string, enrich bool) (*dom
 		}
 	}
 
+	// 详情抓回来了 → 顺手把库里这份元数据推给本地侧车（只补空）。
+	//
+	// 放在这里而不是 enrichAndSave 里：**用户路径（ingestMovieDetailOnly）不走补缺链**，
+	// 而它同样会刷新演员/标签/导演这些侧车要的字段 —— 只在 enrichAndSave 推的话，
+	// 「重新获取」那颗按钮补到的元数据永远到不了侧车。补缺链那一段跑完还会再推一次
+	// （enrichAndSave），那是有意的：它补到的是简介/中文标题这些**它才知道**的字段。
+	s.pushMovieFieldsToSidecar(ctx, n.ID)
+
 	// 补缺放在**入库之后**：它失败（或被预算截断）只影响「简介 / 中文标题这些锦上添花
 	// 的字段」，不该让上面那份已经拿到的数据一起丢掉。
 	if enrich {
@@ -886,6 +894,43 @@ func (s *Service) enrichAndSave(ctx context.Context, rec *domain.JavMovie, n *ja
 		// 中文标题同样要落到本地那份 json 上（侧车那边是**替换 title**）。
 		s.pushTitleZHToSidecar(work.Number, patch.TitleZH)
 	}
+	// 补缺链补到的字段（简介/时长/导演/片商/标签…）也一并推一次。
+	//
+	// 单靠上面那两条会漏：它们只管 summary 与 title_zh，而这一轮**同时**可能补到了
+	// 时长与导演（javbus 给的），那些字段没有自己的通道 —— 见 SetFieldsSidecarSink。
+	// 这里推的是**库里那份重新读过的**（current），不是 patch 本身：
+	// patch 只带「这次补到的」，而侧车要的是「这部片现在有什么」。
+	s.pushMovieFieldsToSidecar(ctx, current.ID)
+}
+
+// pushMovieFieldsToSidecar 把库里**当前**的元数据打包推给本地侧车（只补空，best-effort）。
+//
+// 传 movieID 而不是字段：打包要连**演员关联**一起取（侧车的 actors 是关联表，
+// 不是 jav_movies 上的列），而调用点手上未必有那份关联。
+//
+// ⚠️ **不要把它挂进循环**：这个函数的开头就是两次查库（Get + ListActors），
+// 而它的调用点是「详情抓回来那一刻」。挂在循环里等于每轮对每部片查两次库，
+// 而回写的真正入口是**整批那条**（`SyncSidecarsFromRepo`，一次遍历 + 按番号查库）——
+// 单部这条的存在意义只是「刚补到的立刻落盘」。
+func (s *Service) pushMovieFieldsToSidecar(ctx context.Context, movieID string) {
+	movieID = strings.TrimSpace(movieID)
+	if movieID == "" || s.movies == nil {
+		return
+	}
+	movie, err := s.movies.Get(ctx, movieID)
+	if err != nil || movie == nil {
+		return
+	}
+	actors, err := s.movies.ListActors(ctx, movieID)
+	if err != nil {
+		s.logWarn("jav push sidecar fields load actors failed", "movie", movieID, "err", err)
+		actors = nil
+	}
+	number, fields, ok := sidecarFieldsFor(movie, actors)
+	if !ok {
+		return
+	}
+	s.pushFieldsToSidecar(number, fields)
 }
 
 // patchFromNormalized 比出「补缺链到底补到了什么」。
@@ -1685,4 +1730,68 @@ func (s *Service) pushSummaryToSidecar(number, summary string) {
 	if _, err := sink(number, summary); err != nil {
 		s.logWarn("写本地侧车简介失败", "number", number, "err", err)
 	}
+}
+
+// ————————————————————— 侧车元数据回写 —————————————————————
+
+// FieldsSidecarSink 把**一批字段**写进本地那份侧车 json（见 strm.ApplySidecarFieldsByNumber）。
+//
+// 与前面两条（SummarySidecarSink / TitleZHSidecarSink）的关系：那两条是**单个字符串
+// 字段**的专用通道，在补缺链跑完那一刻推；这一条是「库里已经有的一整批字段」的通道，
+// 由后台回写循环推。三条并存不是冗余 —— 前两条的触发时机（刚补到）与这一条
+// （存量补齐）根本不同，合并会让「补到的那一刻」也要走一遍全字段打包。
+type FieldsSidecarSink func(number string, fields map[string]any) (bool, error)
+
+// SetFieldsSidecarSink 注入整批字段的侧车通道。
+func (s *Service) SetFieldsSidecarSink(fn FieldsSidecarSink) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fieldsSink = fn
+}
+
+// pushFieldsToSidecar 把一批字段推给侧车（best-effort，失败只记 warn）。
+// 返回是否在本地找到了那一部的侧车。
+func (s *Service) pushFieldsToSidecar(number string, fields map[string]any) bool {
+	if strings.TrimSpace(number) == "" || len(fields) == 0 {
+		return false
+	}
+	s.mu.Lock()
+	sink := s.fieldsSink
+	s.mu.Unlock()
+	if sink == nil {
+		return false
+	}
+	found, err := sink(number, fields)
+	if err != nil {
+		s.logWarn("写本地侧车字段失败", "number", number, "err", err)
+		return false
+	}
+	return found
+}
+
+// SidecarSyncSink 遍历**所有番号任务输出目录**里的侧车，按番号回写库里的元数据。
+//
+// 与 FieldsSidecarSink 是同一件事的两个粒度，**两个都要有**：
+//
+//   - 单部（FieldsSidecarSink）：补缺链跑完那一刻，手上只有这一部；
+//   - 整批（这一条）：存量回写。**必须由 strm 侧发起遍历**，因为要回写的片子
+//     是「有侧车 json 的那些」，而侧车在哪只有 strm 知道。反过来按库里的番号
+//     逐个去 Walk 目录，就是「几千部 × 几千个文件」——跑不完。
+type SidecarSyncSink func(ctx context.Context, fieldsFor func(number string) (map[string]any, bool)) (SidecarSyncResult, error)
+
+// SidecarSyncResult 是一次整批回写的结果。
+type SidecarSyncResult struct {
+	// Scanned 是扫到的侧车份数（能解析、有番号的那些）。
+	Scanned int
+	// Written 是真的改写了内容的份数（侧车里已经是新值的不算）。
+	Written int
+	// Numbers 是扫到侧车的番号，给调用方记账用（见 sidecarSyncLoop）。
+	Numbers []string
+}
+
+// SetSidecarSyncSink 注入整批回写通道（见 SidecarSyncSink）。
+func (s *Service) SetSidecarSyncSink(fn SidecarSyncSink) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sidecarSyncSink = fn
 }

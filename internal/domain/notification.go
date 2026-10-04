@@ -13,6 +13,12 @@ const NotificationCategoryTGSubscribeWarn = "tg_subscribe_warn"
 // NotificationCategoryJavPush 番号订阅的推送结果：定时那一轮的汇总，以及手动推送的每一次。
 const NotificationCategoryJavPush = "jav_push"
 
+// NotificationCategoryJavBackfill 番号的后台回填结果（详情回填一轮跑完的汇总）。
+//
+// 与 JavPush 分开是**必须**的：通知中心按 category 合并同键通知（见通知合并那条），
+// 混在一起会让「补了 N 部详情」把用户真正要查的「某条订阅推送失败」挤掉。
+const NotificationCategoryJavBackfill = "jav_backfill"
+
 type Notification struct {
 	ID        int64
 	Level     string

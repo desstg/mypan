@@ -126,6 +126,13 @@ type Service struct {
 	summarySink SummarySidecarSink
 	// titleZHSink 是「把补到的中文标题写进本地侧车 json」的钩子（见 SetTitleZHSidecarSink）。
 	titleZHSink TitleZHSidecarSink
+	// fieldsSink 是「把一批字段写进本地侧车 json」的钩子（见 SetFieldsSidecarSink）。
+	fieldsSink FieldsSidecarSink
+	// sidecarSyncSink 是「整批回写」的钩子（见 SetSidecarSyncSink）。
+	//
+	// 与 fieldsSink 的分工：这个是**存量补齐**（扫侧车目录 → 按番号查库 → 回写），
+	// 那个是单部（补缺链跑完那一刻推）。两个都要有，理由写在 SidecarSyncSink 的注释里。
+	sidecarSyncSink SidecarSyncSink
 
 	// synopsisSrcs 是「补剧情简介」的来源（JAVDB 大面积没给，见 synopsis 包）。
 	// nil 表示不补 —— 与「设置没配就不抓」的取向一致。

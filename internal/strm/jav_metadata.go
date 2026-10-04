@@ -3,6 +3,7 @@ package strm
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -1038,14 +1039,14 @@ func (s *Service) RebuildJavArtifactsAll(ctx context.Context, task *domain.StrmT
 		return 0, 0, domain.Errorf(domain.CodeValidation, "输出目录里没有 .strm 文件：%s", root)
 	}
 	res := generateJavArtifacts(ctx, javArtifactRequest{
-		Root:          root,
-		StrmFiles:     relPaths,
-		Items:         s.scanSettings().JavMetaItems,
-		Overwrite:     true,
-		RefetchImages: true,
-		Images:        s.javImages,
-		Subtitles:     s.javSubtitles,
-		PosterQueue:   s.javPosters,
+		Root:             root,
+		StrmFiles:        relPaths,
+		Items:            s.scanSettings().JavMetaItems,
+		Overwrite:        true,
+		RefetchImages:    true,
+		Images:           s.javImages,
+		Subtitles:        s.javSubtitles,
+		PosterQueue:      s.javPosters,
 		WatermarkEnabled: s.scanSettings().JavWatermarkEnabled,
 		WatermarkScale:   s.scanSettings().JavWatermarkScale,
 		WatermarkMargin:  s.scanSettings().JavWatermarkMargin,
@@ -1207,6 +1208,177 @@ func (s *Service) applySidecarFieldByNumber(ctx context.Context, number, field, 
 	return false
 }
 
+// SidecarSyncResult 是一次整批回写的结果（见 SyncSidecarsFromRepo）。
+type SidecarSyncResult struct {
+	// Scanned 是扫到并**能当侧车解析**的份数。
+	Scanned int
+	// Written 是真的改写了内容的份数（侧车里已经是新值的不算）。
+	Written int
+	// Numbers 是扫到侧车的番号（去重）。调用方拿它记账 ——
+	// 侧车文件名带质量后缀（`SSIS-001-U.json`），而库里的番号是裸的，
+	// 所以这个清单只能从 json 里的 `number` 字段取，不能从文件名切。
+	Numbers []string
+}
+
+// SyncSidecarsFromRepo 遍历**所有番号任务输出目录**里的侧车 json，按番号向调用方
+// 要一份「库里当前的字段」并回写进去（只补空值）。
+//
+// # 为什么是「整批遍历」而不是「按番号找」
+//
+// 存量回写要处理的是「有侧车 json 的那些片」，而**侧车在哪只有本包知道**
+// （任务边界、GroupDir / OutputFolder 怎么拼、SafeName 怎么消毒）。
+// 反过来按库里的番号逐个去 Walk 目录就是「几千部 × 几千个文件」——
+// 实测那种做法跑不完（见 ApplySidecarFieldsByNumber 的注释）。
+//
+// 所以方向反过来：本包负责「在哪」（遍历一次），jav 负责「写什么」（fieldsFor 回调）。
+//
+// # 与单部那条（ApplySidecarFieldsByNumber）的关系
+//
+// 两条都会调同一个 writeFieldsIntoFile，判据完全一致；差别只在遍历粒度。
+// 单部那条给「补缺链刚跑完」用（手上只有这一部），这条给存量补齐用。
+//
+// fieldsFor 返回 false 表示库里没有这一部（番号对不上、或用户清过库）——
+// 那份侧车原样跳过，不凭空造字段。ctx 取消时立刻停下（遍历中途返回 ctx.Err()）。
+func (s *Service) SyncSidecarsFromRepo(
+	ctx context.Context,
+	fieldsFor func(number string) (map[string]any, bool),
+) (SidecarSyncResult, error) {
+	var res SidecarSyncResult
+	if s == nil || s.repo == nil || fieldsFor == nil {
+		return res, nil
+	}
+	tasks, err := s.repo.List(ctx)
+	if err != nil {
+		return res, err
+	}
+	seenNumber := map[string]struct{}{}
+	for _, task := range tasks {
+		if task == nil || task.MediaKind != domain.StrmMediaKindJav {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		// 任务输出目录 = strmDir + 「分组目录/输出文件夹」。
+		// TaskRelDir 里的 SafeName 保证至少有一段（空串会兜底成 `_`），
+		// 所以这里不会拿到空路径。
+		root := TaskOutputDir(s.strmDir, TaskRelDir(task.GroupDir, task.OutputFolder))
+		if st, statErr := os.Stat(root); statErr != nil || !st.IsDir() {
+			continue // 这个任务还没产出任何东西：正常，跳过
+		}
+		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil // 单个条目读不到不该让整趟停下
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if d.IsDir() {
+				// 深度上限与 walkForSidecar 一致（那里是 3）：侧车与视频同层，
+				// 再深就不是我们的目录结构了，别把用户放的其他 json 也卷进来。
+				if depth := strings.Count(filepath.ToSlash(path), "/") - strings.Count(filepath.ToSlash(root), "/"); depth > 3 {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.EqualFold(filepath.Ext(path), ".json") {
+				return nil
+			}
+			raw, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			// **用 emby.Parse 判「这是不是侧车」**：它会校验 schema 与番号，
+			// 网盘上顺带同步下来的那些配置 json 因此被自然排除。
+			doc, parseErr := emby.Parse(raw)
+			if parseErr != nil {
+				return nil
+			}
+			number := strings.TrimSpace(doc.Number)
+			if number == "" {
+				return nil
+			}
+			res.Scanned++
+			if _, dup := seenNumber[number]; !dup {
+				seenNumber[number] = struct{}{}
+				res.Numbers = append(res.Numbers, number)
+			}
+			fields, ok := fieldsFor(number)
+			if !ok || len(fields) == 0 {
+				return nil // 库里没有这一部：跳过，不凭空造
+			}
+			changed, writeErr := writeFieldsIntoFile(path, fields)
+			if writeErr != nil {
+				s.log.Warn("番号侧车回写失败", "path", path, "number", number, "err", writeErr)
+				return nil
+			}
+			if changed {
+				res.Written++
+			}
+			return nil
+		})
+		if walkErr != nil && walkErr != context.Canceled && walkErr != context.DeadlineExceeded {
+			// 遍历本身的错误（不是 ctx 取消）：记一笔继续下一个任务，
+			// 不因为一个目录读不动就把整趟回写翻成失败。
+			s.log.Warn("番号侧车遍历失败", "root", root, "err", walkErr)
+		}
+	}
+	return res, ctx.Err()
+}
+
+// ApplySidecarFieldsByNumber 按番号找到侧车，**一次 Walk 改多个字段**。
+//
+// # 为什么不能复用上面那条单字段的路
+//
+// 单字段那条每调一次就 Walk 一遍目录（几千个文件）。补一部片的演员 + 标签 + 导演 +
+// 时长 + 评分 + 简介…是**七八个字段**，逐字段调就是七八次全目录遍历；存量几千部
+// 片子回写一遍就是几万次 —— 那不是慢，是根本跑不完。
+//
+// 所以这里一次 Walk、一次读 json、一次写盘，把整批字段一起处理掉。
+//
+// # 字段的形态
+//
+// fields 的键是**点分路径**（`director.name`、`images.cover`），值是 JSON 能表达的东西
+// （string / number / bool / []string / []map）。用点分路径而不是嵌套 map，是因为
+// 要写的字段里有 `director` / `maker` / `publisher` / `series` 这四个
+// `{id, name}` 对象 —— 整块写会把对侧那个非空的值一起冲掉（比如只补 name 时
+// 把已有的 id 抹了）。逐叶子写才是「只补空」。
+//
+// # 只补空
+//
+// 与 store 里 Upsert 的「空值不覆盖」同一条原则：**侧车里已经有值的一律不动** ——
+// 那份 json 是别的工具也可能读、用户也可能手改的文件。判据见 isEmptyJSONValue。
+//
+// 返回是否**真的在本地找到了那一部的侧车**（不是「改了没有」）：调用方要拿它
+// 判断该不该记账（见 jav.sidecarSyncLoop）。
+//
+// 找到之后顺带把同目录 nfo 里缺的元素补上（见 fillNFOFieldsIfMissing）——
+// 只改 json 的话，「补到了」对用户没有任何可见效果：nfo 是从 json 生成一次的，
+// 不点重刮就永远空着。
+func (s *Service) ApplySidecarFieldsByNumber(ctx context.Context, number string, fields map[string]any) bool {
+	number = strings.TrimSpace(number)
+	if number == "" || len(fields) == 0 || s.repo == nil {
+		return false
+	}
+	tasks, err := s.repo.List(ctx)
+	if err != nil {
+		return false
+	}
+	for _, task := range tasks {
+		if task == nil || task.MediaKind != domain.StrmMediaKindJav {
+			continue
+		}
+		root := TaskOutputDir(s.strmDir, TaskRelDir(task.GroupDir, task.OutputFolder))
+		if found := walkForSidecar(root, number, func(path string) error {
+			_, err := writeFieldsIntoFile(path, fields)
+			return err
+		}); found {
+			return true
+		}
+	}
+	return false
+}
+
 // 下面是「按番号找侧车并改一个字段」那两条的公共骨架（简介 / 中文标题共用）。
 //
 // walkForSidecar 在 root 下找「文件名里带这个番号」的侧车 json，找到就交给 apply。
@@ -1296,8 +1468,400 @@ func writeFieldIntoFile(path, field, value string) error {
 	return nil
 }
 
-// fillNFOPlotIfMissing 在 nfo **连 <plot> 元素都没有**时，就地补上简介。
+// writeFieldsIntoFile 把一批字段写进一个已存在的侧车 json（**只补空**）。
+// 返回是否真的改写了内容（没改就不写盘、也不碰 nfo）。
 //
+// 与 writeFieldIntoFile 的关系：那个是「一个字符串字段」的专用版，本函数是它的推广
+// （多字段、多类型、点分路径）。两条路都在用，别把其中一个删了去替另一个 ——
+// 单字段那条带着 fillNFOPlotIfMissing 的历史包袱（补简介顺手补 nfo），
+// 而它服务的两条 sink 现在还在线上跑着。
+//
+// 规矩与 writeFieldIntoFile 三条一致：
+//
+//  1. **值没变就不写**（免得白刷 mtime，进而触发下游重算）；
+//  2. 写回用 MarshalIndent，保持与生成器同样的可读形状；
+//  3. 只动指定的这几个字段，其余原样（侧车是「当时收到了什么」的记录）。
+//
+// 额外多一条：**只补空值**。侧车里已经有值的一律不动 —— 那份 json 用户可能手改过，
+// 也是别的工具可能读的中间产物。判据见 isEmptyJSONValue。
+func writeFieldsIntoFile(path string, fields map[string]any) (bool, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	// **用 map 解析而不是侧车结构体**：后者只认识它用得上的那些字段，写回去会把
+	// 其余字段（磁链指纹、落盘现场、画质档位…）整块丢掉。
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return false, err
+	}
+
+	changed := false
+	for _, key := range sortedFieldPaths(fields) {
+		value := fields[key]
+		if isEmptyJSONValue(value) {
+			continue // 我们手上就没值，没什么可补的
+		}
+		if !setIfEmptyPath(doc, key, value) {
+			continue
+		}
+		changed = true
+	}
+	if !changed {
+		return false, nil // 侧车里已经是新的了：不写盘，也不碰 nfo
+	}
+
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	if err := writeFileInPlace(path, out); err != nil {
+		return false, err
+	}
+	// 顺手把 nfo 里**缺的元素**补上 —— 否则「补到了」对用户没有任何可见效果
+	// （nfo 由 json 生成，而生成器是「存在即跳过」，不点重刮就永远空着）。
+	fillNFOFieldsIfMissing(path, doc)
+	return true, nil
+}
+
+// sortedFieldPaths 把字段键排个序。map 的遍历顺序是随机的，而写盘的顺序决定了
+// 「同一次回写」在不同机器上会不会产生不同的字节 —— 排一下，diff 才有意义。
+func sortedFieldPaths(fields map[string]any) []string {
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// setIfEmptyPath 在 doc 的 `a.b.c` 路径上「只在当前为空时」写入 value。
+// 返回是否真的写了。
+//
+// 中间层不存在时**按需建**（`images` 不存在就建一个空 map）；中间层存在但不是 map
+// （形状被人改坏了）时**放弃这一条**而不是覆盖它 —— 我们只补空，不修别人的结构。
+func setIfEmptyPath(doc map[string]any, path string, value any) bool {
+	segs := strings.Split(path, ".")
+	if len(segs) == 0 {
+		return false
+	}
+	cur := doc
+	for _, seg := range segs[:len(segs)-1] {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			return false
+		}
+		next, ok := cur[seg]
+		if !ok || next == nil {
+			child := map[string]any{}
+			cur[seg] = child
+			cur = child
+			continue
+		}
+		child, ok := next.(map[string]any)
+		if !ok {
+			return false // 中间层不是对象：不猜，也不覆盖
+		}
+		cur = child
+	}
+	leaf := strings.TrimSpace(segs[len(segs)-1])
+	if leaf == "" {
+		return false
+	}
+	if !isEmptyJSONValue(cur[leaf]) {
+		return false // 已经有值了：那是用户的（或上一次补的），不动
+	}
+	cur[leaf] = value
+	return true
+}
+
+// isEmptyJSONValue 报告一个 JSON 值算不算「空」——也就是「值得被我们补掉」。
+//
+// 判据按类型分（与 store 里 Upsert 的「空值不覆盖」同一套语义）：
+//
+//	null / 缺键      → 空
+//	空串 / 全空白串   → 空
+//	0 / false        → 空（侧车里 0 分、0 分钟就是「没给」，不是「真的零」）
+//	空数组           → 空
+//	map 里所有叶子都空 → 空（`{"id":"","name":""}` 这种占位对象）
+//
+// **字符串数组里的空元素不算空**：`[""]` 长度是 1，我们不会去覆盖它 ——
+// 那是别人写进去的东西，宁可留着。
+func isEmptyJSONValue(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(t) == ""
+	case bool:
+		return !t
+	case float64:
+		return t == 0
+	case float32:
+		return t == 0
+	case int:
+		return t == 0
+	case int64:
+		return t == 0
+	case uint64:
+		return t == 0
+	case []any:
+		return len(t) == 0
+	case []string:
+		return len(t) == 0
+	case []map[string]any:
+		// 打包侧车字段时用的是这个具体类型（不是 json 解出来的 []any），
+		// 少了这一条会让空数组被当成「有值」而写出去。
+		return len(t) == 0
+	case map[string]any:
+		for _, item := range t {
+			if !isEmptyJSONValue(item) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// ————————————————————— nfo 就地补缺 —————————————————————
+
+// sidecarNFOField 是「侧车里有哪些字段、nfo 里对应哪个元素」的一张表。
+//
+// 存在的意义是让补缺那段代码不写成一串 if：加一个字段只改这里一行。
+type sidecarNFOField struct {
+	// Name 是给人看的名字，只用在日志里。
+	Name string
+	// Value 从侧车取一个「要补进去的值」，空表示侧车也没有。
+	Value func(*emby.SidecarDoc) string
+	// Missing 报告 nfo 里对应的元素**不存在**（注意：不是「为空」）。
+	Missing func(emby.NFOPresence) bool
+}
+
+// sidecarNFOStringFields 是「一个侧车字段 ↔ 一个 nfo 元素」的那批。
+//
+// 刻意**不含** `<genre>` / `<tag>` / `<set>` / `<actor>` / `<ratings>`：
+// 那几处是列表或合成结构，补起来要连同 buildGenres 的顺序契约一起处理，
+// 单独放在 fillNFOFieldsIfMissing 里。
+//
+// 也**不含** `<plot>`：简介那条路已经有 fillNFOPlotIfMissing 在走（写单字段那条
+// sink 会调它），这里再来一次就是两套判据。
+var sidecarNFOStringFields = []sidecarNFOField{
+	{Name: "director", Value: func(d *emby.SidecarDoc) string { return d.Director.Name },
+		Missing: func(p emby.NFOPresence) bool { return !p.Director }},
+	{Name: "maker", Value: func(d *emby.SidecarDoc) string { return d.Maker.Name },
+		Missing: func(p emby.NFOPresence) bool { return !p.Maker }},
+	{Name: "publisher", Value: func(d *emby.SidecarDoc) string { return d.Publisher.Name },
+		Missing: func(p emby.NFOPresence) bool { return !p.Publisher }},
+	{Name: "series", Value: func(d *emby.SidecarDoc) string { return d.Series.Name },
+		Missing: func(p emby.NFOPresence) bool { return !p.Series }},
+	{Name: "trailer", Value: func(d *emby.SidecarDoc) string { return d.PreviewVideoURL },
+		Missing: func(p emby.NFOPresence) bool { return !p.Trailer }},
+	{Name: "cover", Value: func(d *emby.SidecarDoc) string { return d.CoverURL() },
+		Missing: func(p emby.NFOPresence) bool { return !p.Cover }},
+}
+
+// fillNFOFieldsIfMissing 把侧车里**已有**的元数据补进同目录那份 nfo 里**缺的元素**。
+//
+// # 判据（与 fillNFOPlotIfMissing 同一条，这里逐字重申）
+//
+// 「元素**不存在**」而不是「元素为空」：
+//
+//   - 生成器写的 nfo：值为空时**整个元素都不输出**（见 emby.cdata 与各处 omitempty）
+//     —— 所以「没有 `<actor>`」= 生成时侧车里就没有演员；
+//   - 用户在编辑器里保存的 nfo：即使值是空的，元素也在。
+//
+// 于是「元素不存在」= 这份 nfo 是生成器写的、当时没这个值 —— 补它**不可能覆盖
+// 用户的手改**。反过来，只要元素在（哪怕是空的），就一律不动：那是用户的编辑。
+//
+// # 为什么走 ParseNFO → BuildNFOFromMeta 而不是拼 XML 字符串
+//
+// 拼出来的元素必须与生成器的输出**逐字节一致**，否则用户点一次「打开编辑器 → 保存」
+// 就会得到一份满是 diff 的文件（`emby.TestParseNFORoundTripByteEqual` 钉的就是这条）。
+// 唯一能保证一致的办法就是**用同一个序列化器**。
+//
+// # 不碰的东西
+//
+//   - `<genre>` / `<tag>`：它们是 buildGenres 合成的（标签 → 4K → 番号字母 → 演员 →
+//     破解 → 系列:/片商:/发行:）。补了演员/标签之后合成列表**本该**跟着变，
+//     但重算会把用户手工删掉的合成项加回来 —— 所以这里只在「原列表 + 追加缺的
+//     那几项」的前提下动，且只在 **nfo 里一条 genre 都没有**时才补（那种 nfo 是
+//     生成器在侧车全空时写的，一个词都没有，追加不会与用户的选择冲突）。
+//   - `<set>`：同上，而且合集是**按性别算**的，读回来的 nfo 里没有性别 ——
+//     重算只能靠侧车那份演员表，与 genre 同一条件（一条 <set> 都没有时才补）。
+//
+// 失败只记不报（best-effort，与补简介同一条取向）。
+func fillNFOFieldsIfMissing(sidecarPath string, doc map[string]any) {
+	dir := filepath.Dir(sidecarPath)
+	stem := strings.TrimSuffix(filepath.Base(sidecarPath), filepath.Ext(sidecarPath))
+	nfoPath := filepath.Join(dir, stem+".nfo")
+	raw, err := os.ReadFile(nfoPath)
+	if err != nil {
+		return // 还没生成过 nfo：等生成那一步自己带进去
+	}
+	sidecar, err := emby.Parse(marshalJSON(doc))
+	if err != nil {
+		return // 侧车自己都读不通（schema 不认识 / 没番号）：不猜
+	}
+	presence := emby.ParseNFOPresence(raw)
+
+	// 番号字母与有码/无码两个量 nfo 里读不出来，从侧车递进去 —— 与编辑器那条路
+	// （strmscrape.javWallDetail）用的是同一对 hints，不这么给的话
+	// 「番号字母」会被当成真标签留在列表里，往返一次就多出一个 genre。
+	meta, err := emby.ParseNFO(raw, emby.NFOReadHints{
+		NumberLetter: sidecar.NumberLetter,
+		Censored:     sidecar.IsCensored(),
+	})
+	if err != nil {
+		return // 不是 <movie> 结构（比如 tvshow.nfo）：别乱动
+	}
+
+	// nfo 里**已经有** `<genre>` → 把磁盘上那份钉住，别让下面那次重建按
+	// Tags/演员重算。重算会把用户手工删掉的合成项（「片商: X」「系列: Y」）加回来，
+	// 而这条路的全部意义就是「只补缺、不动用户的编辑」（见 MovieMeta.GenresOverride）。
+	//
+	// 注意 `ParseNFO` 已经把合成项剥干净了（meta.Tags 只剩真标签），所以这里拿
+	// `<genre>` 原文而不是 meta —— `GenresOverride` 要的正是「原样那一份」。
+	//
+	// 一个 `<genre>` 都没有时**不设**：那是生成器在侧车全空时写的，
+	// 此时重算正是我们要的（补进来的演员/片商本该出现在合成列表里）。
+	if presence.Genres > 0 {
+		meta.GenresOverride = parsedGenres(raw)
+	}
+
+	touched := false
+
+	// ① 一字段一元素的那批
+	for _, f := range sidecarNFOStringFields {
+		if !f.Missing(presence) {
+			continue
+		}
+		value := strings.TrimSpace(f.Value(sidecar))
+		if value == "" {
+			continue
+		}
+		if setNFOStringField(meta, f.Name, value) {
+			touched = true
+		}
+	}
+
+	// ② 数值那两个（<runtime> / <ratings>）
+	if !presence.Runtime && sidecar.Duration > 0 && meta.Duration == 0 {
+		meta.Duration = sidecar.Duration
+		touched = true
+	}
+	if !presence.Rating && sidecar.Score > 0 && sidecar.ScoreMax > 0 && meta.Score == 0 {
+		meta.Score = sidecar.Score
+		meta.ScoreMax = sidecar.ScoreMax
+		meta.Votes = sidecar.ReviewsCount
+		touched = true
+	}
+
+	// ③ 演员（<actor> + 跟着它的 <set>）
+	//
+	// 分开判：`<actor>` 与 `<set>` 在生成器里是**同时**写或不写的（没有女演员时
+	// 一个 <set> 都没有，但 <actor> 可能还有男优），所以两个判据各判各的。
+	if presence.Actors == 0 && len(sidecar.Actors) > 0 && len(meta.Actors) == 0 {
+		for _, a := range sidecar.Actors {
+			if name := strings.TrimSpace(a.Name); name != "" {
+				meta.Actors = append(meta.Actors, name)
+			}
+		}
+		if len(meta.Actors) > 0 {
+			touched = true
+		}
+	}
+	if presence.Sets == 0 && len(meta.Sets) == 0 {
+		// 合集按性别算，且名字要过归并表 —— 复用生成器那条路，
+		// 免得「补出来的 <set>」与「重刮出来的 <set>」不是同一批。
+		if sets := emby.ActorSets(sidecar.Actors); len(sets) > 0 {
+			meta.Sets = sets
+			touched = true
+		}
+	}
+
+	// ④ `<genre>` / `<tag>` **不在这里补** —— 它们在 BuildNFOFromMeta 里是从
+	// meta.Tags / 演员 / 番号字母 / 标记**现算**出来的，所以上面 ③ 把演员补进 meta
+	// 之后，下面那次 BuildNFOFromMeta 自然会把演员名带进合成列表。
+	//
+	// 这也正是「只在元素不存在时才补」这条判据在这里的价值：如果 nfo 里本来就有
+	// `<genre>`（用户删过某些合成项），我们一个都不动 —— 重算会把删掉的加回来。
+
+	if !touched {
+		return
+	}
+	body, err := emby.BuildNFOFromMeta(meta)
+	if err != nil {
+		return
+	}
+	_ = writeFileInPlace(nfoPath, body)
+}
+
+// parsedGenres 取一份 nfo 里 `<genre>` 的**原文列表**（按出现顺序、含空串以外的全部）。
+//
+// 与 `emby.ParseNFO` 的 `meta.Tags` 不同：那个已经按 buildGenres 的顺序把合成项
+// 剥干净了，只剩真标签；这里要的是**原样那一份** —— 补缺那条路拿它钉住
+// `<genre>`，让重建不发生（见 emby.MovieMeta.GenresOverride）。
+func parsedGenres(raw []byte) []string {
+	var doc struct {
+		Genres []string `xml:"genre"`
+	}
+	if err := xml.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(doc.Genres))
+	for _, g := range doc.Genres {
+		if g = strings.TrimSpace(g); g != "" {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// setNFOStringField 按名字把值写进 meta 里对应的字段。
+//
+// 用名字而不是直接给字段指针：那张表要能加字段而不改结构，而 nfo 的字符串字段
+// 就这几个，switch 比反射清楚。
+func setNFOStringField(meta *emby.MovieMeta, name, value string) bool {
+	switch name {
+	case "director":
+		meta.Director = value
+	case "maker":
+		meta.Maker = value
+		if meta.Label == "" {
+			// <label> 与 <maker> 同值（样本如此），补 maker 时一起补上，
+			// 否则会写出一份「有 <maker> 没有 <label>」的 nfo，与生成器的输出不一致。
+			meta.Label = value
+		}
+	case "publisher":
+		meta.Publisher = value
+	case "series":
+		meta.Series = value
+	case "trailer":
+		meta.TrailerURL = value
+	case "cover":
+		meta.CoverURL = value
+	default:
+		return false
+	}
+	return true
+}
+
+// marshalJSON 把已经解析好的 map 再序列化回字节。
+//
+// 回写那条路手里是一份 `map[string]any`（要就地改字段），而 fillNFOFieldsIfMissing
+// 要的是 emby.SidecarDoc。与其让它也吃 map（那它就得自己认每个字段的形状，
+// 与 emby 那边两份声明漂移），不如绕一下 —— 一次内存里的序列化，代价可忽略。
+func marshalJSON(doc map[string]any) []byte {
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// fillNFOPlotIfMissing 在 nfo **连 <plot> 元素都没有**时，就地补上简介。
 // 判据是「没有 `<plot>` 元素」，不是「plot 为空」—— 这条区分很关键：
 //
 //   - 生成器写的 nfo：简介为空时**整个元素都不输出**（见 emby.cdata：空串返回 nil）；

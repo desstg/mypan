@@ -754,3 +754,47 @@ func TestMigrationAddsMagnetSweeps(t *testing.T) {
 		t.Errorf("重复记账应当只有一行，got %d", n)
 	}
 }
+
+// 迁移 0051：给 jav_movies 加 sidecar_synced_at（侧车回写的记账列）。
+//
+// 这一条钉的是「列真的存在、且默认是 NULL」—— 少了它，回写循环的
+// `WHERE sidecar_synced_at IS NULL` 会**每轮都报 SQL 错误**（而它是个后台循环，
+// 报错只进日志，界面上看不出来）。
+func TestMigrationAddsSidecarSyncedAt(t *testing.T) {
+	db := newTestDB(t)
+	if _, err := db.write.ExecContext(context.Background(),
+		`INSERT INTO jav_movies(id, number, title) VALUES('x', 'SSIS-001', '标题')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	var synced any
+	if err := db.read.QueryRowContext(context.Background(),
+		`SELECT sidecar_synced_at FROM jav_movies WHERE id='x'`).Scan(&synced); err != nil {
+		t.Fatalf("sidecar_synced_at 这一列不存在？%v", err)
+	}
+	if synced != nil {
+		t.Errorf("新行的 sidecar_synced_at 应当是 NULL（还没回写过），got %v", synced)
+	}
+	// 记一笔之后不该是 NULL
+	if _, err := db.write.ExecContext(context.Background(),
+		`UPDATE jav_movies SET sidecar_synced_at=CURRENT_TIMESTAMP WHERE id='x'`); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := db.read.QueryRowContext(context.Background(),
+		`SELECT sidecar_synced_at FROM jav_movies WHERE id='x'`).Scan(&synced); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if synced == nil {
+		t.Error("记过账之后不该还是 NULL")
+	}
+
+	// 第二列 detail_attempts：默认 0（**不能是 NULL** —— 候选判据是
+	// `detail_attempts < 3`，NULL 参与比较恒为 NULL，那部片会**永远不进候选**）
+	var attempts int
+	if err := db.read.QueryRowContext(context.Background(),
+		`SELECT detail_attempts FROM jav_movies WHERE id='x'`).Scan(&attempts); err != nil {
+		t.Fatalf("detail_attempts 这一列不存在？%v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("新行的 detail_attempts 应当是 0，got %d", attempts)
+	}
+}

@@ -107,6 +107,30 @@ type MovieMeta struct {
 	// **读出来的那份要原样保留**：目录布局可能已经从独占翻成平铺（或反过来），
 	// 照 TargetNames 现算会指向一个不存在的文件，而 Emby 那边只表现为「海报没了」。
 	Names Names `json:"names"`
+
+	// GenresOverride 是「`<genre>` 列表**原样用这一份**，不要按 Tags/演员重算」。
+	//
+	// # 为什么需要它
+	//
+	// `<genre>` / `<tag>` 是 buildGenres 合成出来的，而合成的输入里**有演员名**
+	// —— 所以「就地补 nfo 缺的元素」那条路（`strm.fillNFOFieldsIfMissing`）一旦把
+	// 演员补进 meta，重算就会把演员名也塞进 genre/tag，同时把用户手工删掉的合成项
+	// （「片商: X」这类）**加回来**。而那条路的全部意义就是「只补缺、不动用户的编辑」。
+	//
+	// 所以那份 nfo 里**已经有** `<genre>` 时，把磁盘上那份原样带过来，让重算不发生。
+	// nfo 里一个 genre 都没有时（生成器在侧车全空时写的）保持 nil —— 那时重算正是
+	// 我们要的：补进来的演员/片商本该出现在合成列表里。
+	//
+	// # 为什么是 json:"-"
+	//
+	// 它**不是 nfo 的内容**，只是「这一轮别重算」的一个开关；进编辑器的 JSON 只会
+	// 多出一个前端不认识的字段。与 SubtitleExt / SubtitleLang 同一类。
+	//
+	// # 谁**不该**设它
+	//
+	// 编辑器保存那条路（`strmscrape.SaveJavWallMeta`）：那里用户改的正是 Tags，
+	// 而 genre 该跟着 Tags 变。只有「补缺」那条路才该把它钉住。
+	GenresOverride []string `json:"-"`
 }
 
 // maxActorSets 是一部片最多写几个 <set>。
@@ -123,6 +147,15 @@ const maxActorSets = 5
 // 本包只依赖 domain 的类型（见 sidecar.go 顶部说明），而这一条是纯约定，
 // 复制一个常量比多引一层清楚。
 const genderMale = 1
+
+// ActorSets 是 actorSets 的导出形态：**给「就地补 nfo 缺的元素」那条路用**
+// （`strm.fillNFOFieldsIfMissing`）。
+//
+// 之所以要导出而不是让 strm 自己按性别算一遍：合集名要过 actormap 归并表，
+// 而且「一位女演员一个、男优不写、上限 5 个」这三条判据必须与生成 nfo 那条路
+// **逐字一致** —— 否则补出来的 `<set>` 与重刮出来的 `<set>` 不是同一批，
+// 用户会看到合集在「补一次」与「重刮一次」之间反复变。
+func ActorSets(actors []SidecarActor) []string { return actorSets(actors) }
 
 // actorSets 按「一位女演员一个合集」算出 <set> 的名字，上限 maxActorSets。
 //
@@ -358,16 +391,22 @@ func BuildNFOFromMeta(meta *MovieMeta) ([]byte, error) {
 
 	// <genre> 里的演员名**不区分性别、也不截断**：那是 nfo 的「演员」词条，
 	// 与 <set>（合集）是两回事 —— 男优也要出现在 genre/tag 里，样本如此。
-	genres := buildGenres(genreInput{
-		tags:      meta.Tags,
-		fourK:     meta.FourK,
-		letter:    meta.NumberLetter,
-		actors:    meta.Actors,
-		uncensor:  meta.Uncensored,
-		series:    meta.Series,
-		maker:     meta.Maker,
-		publisher: meta.Publisher,
-	})
+	//
+	// 例外是 GenresOverride 非空：那是「就地补 nfo 缺的元素」那条路带进来的
+	// 「磁盘上原样那一份」，此时**不重算**（见 MovieMeta.GenresOverride 的说明）。
+	genres := meta.GenresOverride
+	if genres == nil {
+		genres = buildGenres(genreInput{
+			tags:      meta.Tags,
+			fourK:     meta.FourK,
+			letter:    meta.NumberLetter,
+			actors:    meta.Actors,
+			uncensor:  meta.Uncensored,
+			series:    meta.Series,
+			maker:     meta.Maker,
+			publisher: meta.Publisher,
+		})
+	}
 	m.Genres = genres
 	// <tag> 与 <genre> 是**同一批词、两种排法**：样本里 genre 是「标签 → 标记 → 演员 →
 	// 系列/片商/发行」的语义顺序，tag 是同一批词按码位排序。照做，两边的成员集合

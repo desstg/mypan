@@ -171,6 +171,14 @@ type JavMovie struct {
 	LastViewed time.Time
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+	// SidecarSyncedAt 是「库里的元数据已经回写过**本地侧车 json**」的时刻。
+	//
+	// 与 EnrichedAt 分开是必须的（见迁移 0051）：那个字段是「简介补缺链」的候选判据
+	// （`PendingSummaryMovieIDs`），而那条链要打 4~6 个外站。共用一列会让简介补缺
+	// 静默失效 —— 表现只是「简介一直空着」，看不出是谁干的。
+	//
+	// 零值 = 还没回写过。
+	SidecarSyncedAt time.Time
 }
 
 // Cover 返回卡片实际要用的封面，优先级与源码一致：cover_url → javbus_cover → thumb_url。
@@ -536,6 +544,37 @@ type JavMovieRepository interface {
 	// BumpSummaryAttempts 记的是「还没补到、问了几次」—— 到上限才收手，
 	// 这样上游补了料 / 我们加了新源时，那批空简介还能被重新问一遍。
 	BumpSummaryAttempts(ctx context.Context, movieID string) error
+
+	// MarkSidecarSynced 记下这部片的元数据已经回写过本地侧车。
+	//
+	// **找到侧车就记**（改了没改都记）—— 它回答的是「这部片回写过没有」，
+	// 不是「这次改了什么」（后者由 strm 那边的返回值统计）。
+	//
+	// 「没找到侧车」要不要记由调用方判断：从没推送过的记（将来推送时写的是当时的库，
+	// 本来就是新的），推送过却没找到的**不记**（那份 json 还在网盘上，等同步下来再补）。
+	MarkSidecarSynced(ctx context.Context, movieID string) error
+
+	// PendingDetailMovieIDs 取「**从没抓过详情**」的影片 id（raw_json 为空），
+	// 最近碰过的优先。给后台详情回填循环用（见 jav/loops.go 的 detailBackfillLoop）。
+	//
+	// 判据是 `raw_json` 为空 —— 它是**唯一可靠**的「抓过详情没有」的凭据：
+	// 榜单刷新与影库同步入库的只有 number/title/cover（列表接口不给详情），
+	// 而 raw_json 只有详情那条路才带。实测真库 15007 部里 12813 部为空。
+	//
+	// 另有 `detail_attempts < 上限` 这一条（见 store 里的 detailMaxAttempts）：
+	// 上游**根本没有**这部片时（国产/素人，真库里占比不小）它会一直留在候选里，
+	// 不封顶的话「还剩 M 部」这个进度数永远不归零。
+	PendingDetailMovieIDs(ctx context.Context, limit int) ([]string, error)
+
+	// CountPendingDetail 数「还没抓过详情」的部数（回填进度报告用）。
+	// 与 PendingDetailMovieIDs **同一套判据**，别另写一份。
+	CountPendingDetail(ctx context.Context) (int, error)
+
+	// BumpDetailAttempts 把「这部片的详情没抓到」的次数 +1。
+	//
+	// **成功不调它**（成功的判据是 raw_json 被写进去了，那部片自动离开候选集）；
+	// 只有失败才涨 —— 否则上游没有的那批片会每轮重来一遍。
+	BumpDetailAttempts(ctx context.Context, movieID string) error
 }
 
 // JavMovieFilter 是本地影库列表的筛选条件。

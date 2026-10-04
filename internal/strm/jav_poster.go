@@ -88,17 +88,36 @@ func (q *javPosterQueue) Start(ctx context.Context) {
 	go q.run(ctx)
 }
 
-// SchedulePoster 入队。队列满 / 未启动时静默丢弃（记 Debug）。
+// SchedulePoster 入队。队列没启动时记 warn 丢弃；队列满时记 Debug 留到下一轮。
 //
-// 去重按 PosterPath：同一张海报在一轮扫描里可能被两个入口算出同一个路径
+// # 去重是**一轮之内**的事，不是永久的
+//
+// 用途只有一个：同一张海报在一轮扫描里可能被两个入口算出同一个路径
 // （扫描 + 手动「生成当前目录」），做两遍纯属浪费。
+//
+// ⚠️ **记录必须在处理完之后删掉**（见 process）。这一条踩过真机：
+// 原来 `seen` 只增不减，而键是**绝对路径** —— 于是删掉任务、用同一个输出目录
+// 重建之后，新任务算出来的路径与旧的一模一样，**每一张都被当成重复静默丢掉**。
+// 症状是「扫描跑完一张 poster 都没有，日志里也一条都不见」（去重这条路不记日志），
+// 而跑一次**全量**扫描又能出来 —— 因为全量走 `Overwrite`，绕过了去重。
+// 群晖上就是这么表现的，查了很久。
+//
+// 只在一轮内去重是安全的：真正的「这张海报已经写好了没有」由 process 里的
+// artifactExists 再判一次，那才是最后一道、也是唯一可靠的闸门。
 func (q *javPosterQueue) SchedulePoster(job javPosterJob) {
 	if q == nil || job.ThumbPath == "" || job.PosterPath == "" {
 		return
 	}
-	// ⚠️ 去重只在**非强制**时生效。`seen` 是一张只增不减的表（故意不清理：清了就等于
-	// 每轮重算），强制作业要是也走去重，第二次「全量恢复」就会命中第一次留下的记录、
-	// 被静默丢掉 —— 表现是「第一次恢复成功、之后再也恢复不了」。
+	// ⚠️ 队列**没启动**时必须记 warn：那时 job 会被静默丢掉（下面那个 select 的
+	// default），而「一张 poster 都没生成」与「队列满了」在日志里长得一模一样。
+	// 这是 2026-10-04 排查群晖那个问题时的第二个盲点。
+	if !q.started() {
+		q.log.Warn("番号元数据：海报队列未启动，这一张被丢弃",
+			"poster", job.PosterPath, "hint", "strm.Service.Start 没跑到？")
+		return
+	}
+	// 去重只在**非强制**时生效：强制作业（全量恢复 / 手动重刮）本来就要重算，
+	// 走去重会让第二次「全量恢复」命中第一次留下的记录、被静默丢掉。
 	q.mu.Lock()
 	if !job.Overwrite {
 		if _, dup := q.seen[job.PosterPath]; dup {
@@ -118,6 +137,20 @@ func (q *javPosterQueue) SchedulePoster(job javPosterJob) {
 		q.mu.Unlock()
 		q.log.Debug("番号元数据：海报队列已满，这一张留到下一轮", "poster", job.PosterPath)
 	}
+}
+
+// started 报告工作者起来了没有（Start 被调用过）。
+func (q *javPosterQueue) started() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.ctx != nil
+}
+
+// forget 撤掉一条去重记录（一个作业处理完之后）。
+func (q *javPosterQueue) forget(posterPath string) {
+	q.mu.Lock()
+	delete(q.seen, posterPath)
+	q.mu.Unlock()
 }
 
 func (q *javPosterQueue) run(ctx context.Context) {
@@ -146,6 +179,10 @@ func (q *javPosterQueue) process(parent context.Context, job javPosterJob) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
+	// 处理完就撤掉去重记录：它只用来挡「同一轮里的重复入队」，
+	// 留着会让删任务重建之后**每一张都被当成重复丢掉**（见 SchedulePoster 的注释）。
+	defer q.forget(job.PosterPath)
+
 	if !job.Overwrite && artifactExists(job.PosterPath) {
 		return
 	}
@@ -161,6 +198,9 @@ func (q *javPosterQueue) process(parent context.Context, job javPosterJob) {
 		q.log.Warn("番号元数据：海报裁切降级为原图", "poster", job.PosterPath, "err", err)
 	}
 	if len(poster) == 0 {
+		// 走到这里说明 BuildPoster 连原图都没带回来 —— 那不该发生，
+		// 而它以前是**静默返回**的（队列里唯一一处无声的出口）。
+		q.log.Warn("番号元数据：海报裁切产出空字节，这一张没有写", "poster", job.PosterPath)
 		return
 	}
 	// 水印：best-effort（贴不上就按无水印写出去），与上面裁切失败的处理一致。

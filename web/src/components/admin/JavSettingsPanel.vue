@@ -111,6 +111,9 @@ type JavDraft = {
   sub_interval_max_sec: number;
   sub_timeout_sec: number;
   sidecar_enabled: boolean;
+  sidecar_sync_enabled: boolean;
+  detail_backfill_enabled: boolean;
+  detail_backfill_budget_min: number;
   default_account_id: number;
   default_parent_id: string;
   default_display_path: string;
@@ -143,6 +146,9 @@ const draft = reactive<JavDraft>({
   sub_interval_max_sec: 10,
   sub_timeout_sec: 30,
   sidecar_enabled: true,
+  sidecar_sync_enabled: true,
+  detail_backfill_enabled: false,
+  detail_backfill_budget_min: 30,
   default_account_id: 0,
   default_parent_id: "",
   default_display_path: "",
@@ -175,6 +181,9 @@ function snapshot() {
     sub_interval_max_sec: draft.sub_interval_max_sec,
     sub_timeout_sec: draft.sub_timeout_sec,
     sidecar_enabled: draft.sidecar_enabled,
+    sidecar_sync_enabled: draft.sidecar_sync_enabled,
+    detail_backfill_enabled: draft.detail_backfill_enabled,
+    detail_backfill_budget_min: draft.detail_backfill_budget_min,
     default_account_id: draft.default_account_id,
     default_parent_id: draft.default_parent_id,
     default_display_path: draft.default_display_path,
@@ -214,6 +223,9 @@ function applyConfig(cfg: JavConfig) {
   draft.sub_interval_max_sec = cfg.sub_interval_max_sec;
   draft.sub_timeout_sec = cfg.sub_timeout_sec;
   draft.sidecar_enabled = cfg.sidecar_enabled;
+  draft.sidecar_sync_enabled = cfg.sidecar_sync_enabled;
+  draft.detail_backfill_enabled = cfg.detail_backfill_enabled;
+  draft.detail_backfill_budget_min = cfg.detail_backfill_budget_min;
   draft.default_account_id = cfg.default_account_id;
   draft.default_parent_id = cfg.default_parent_id;
   draft.default_display_path = cfg.default_display_path;
@@ -759,6 +771,60 @@ onMounted(async () => {
                 <input v-model="draft.sidecar_enabled" type="checkbox" />
                 启用
               </label>
+            </template>
+          </SettingsRow>
+
+
+          <SettingsRow>
+            <template #info>
+              <SettingsRowLabel
+                label="后台把库里的元数据补回 JSON"
+                help-title="后台把库里的元数据补回 JSON"
+                help-text="JSON 是推送那一刻的快照，写它的时候库里可能还没有演员（实测用户库 76 份里有 22 份演员为空），而库里后来补齐的那些**不会自己回写** —— 于是 nfo 里的演员、导演、时长、评分永远空着。打开这一项后，后台每小时扫一遍媒体库目录，把库里**已经有的**元数据补进对应的 JSON（只补空的，已有值一律不动，用户手工改过的内容不会被覆盖），并顺手补上同目录 nfo 里缺的元素（同样只补缺，nfo 里已有的元素一个都不动）。整条链**不请求上游**，所以既不占用抓取限流、也不会触发封号。"
+              />
+            </template>
+            <template #control>
+              <label style="display: inline-flex; gap: 5px; align-items: center; font-size: 12.5px">
+                <input v-model="draft.sidecar_sync_enabled" type="checkbox" />
+                启用
+              </label>
+            </template>
+          </SettingsRow>
+
+
+          <SettingsRow>
+            <template #info>
+              <SettingsRowLabel
+                label="后台回填影片详情"
+                help-title="后台回填影片详情"
+                help-text="影库里有很多影片是从榜单/影库同步进来的，那时只拿到番号、标题和封面（列表接口不给详情），所以演员、简介、导演、片商、系列、评分、时长、标签、剧照全都是空的。打开这一项后，后台会在**空闲时**逐部去 JAVDB 抓一次详情补齐（用户一回来就立刻收手，下一轮接着来）。注意：这一项**会持续占用上游抓取通道**，实测全量跑完约 6.4 小时（每部之间有限流等待，这是防封号必需的）。可以随时关掉，下一轮就停；已补好的不会重跑。"
+              />
+            </template>
+            <template #control>
+              <label style="display: inline-flex; gap: 5px; align-items: center; font-size: 12.5px">
+                <input v-model="draft.detail_backfill_enabled" type="checkbox" />
+                启用
+              </label>
+            </template>
+          </SettingsRow>
+
+          <SettingsRow>
+            <template #info>
+              <SettingsRowLabel
+                label="详情回填每轮时长"
+                help-title="详情回填每轮时长"
+                help-text="每一轮最多跑多少分钟，到点就收手，剩下的留给下一轮（默认 30 分钟 ≈ 1000 部）。它是「别让一轮占满整段时间」的闸门 —— 调大跑得快些、占用上游更久，调小则相反。"
+              />
+            </template>
+            <template #control>
+              <input
+                v-model.number="draft.detail_backfill_budget_min"
+                type="number"
+                min="1"
+                max="1440"
+                style="width: 90px"
+              />
+              分钟
             </template>
           </SettingsRow>
 

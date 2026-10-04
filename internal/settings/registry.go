@@ -260,6 +260,35 @@ const (
 	// 而 JAVDB 会封号。见 internal/jav/sidecar.go。
 	KeyJavSidecarEnabled = "jav_sidecar_enabled"
 
+	// KeyJavSidecarSyncEnabled 控制后台要不要把库里**已经有的**元数据回写进
+	// 本地那份侧车 json（见 internal/jav/loops.go 的 sidecarSyncLoop）。
+	//
+	// 与 KeyJavSidecarEnabled 是两个问题：那个是「推送时写不写侧车」，
+	// 这个是「推送之后，库里补齐的演员/导演/时长要不要补回那份侧车」。
+	//
+	// 默认**开**：整条链不打上游（只读库 + 写本地文件），所以既没有封号风险，
+	// 也没有理由默认关 —— 而关掉的话，那批「推送时库里还没演员」的侧车
+	// （实测 76 份里 22 份）会永远空着，nfo 里也跟着永远缺。
+	KeyJavSidecarSyncEnabled = "jav_sidecar_sync_enabled"
+
+	// KeyJavDetailBackfillEnabled 控制后台要不要给**从没抓过详情**的影片补一次详情
+	// （见 internal/jav/loops.go 的 detailBackfillLoop）。
+	//
+	// 这是**唯一一条会大量打上游的**回填循环：实测真库 15007 部里 12813 部
+	// 从没抓过详情（榜单/影库同步入库的只有 number/title/cover），而按现有闸门
+	// （min_interval 500ms + request_gap 1000ms）算，全量跑完约 **6.4 小时**。
+	//
+	// 默认**关**：不是因为它危险（限流闸门都在，且每一轮都有时间预算），
+	// 而是因为它是一条会持续几小时占用上游通道的长活 —— 该由用户看过那条说明
+	// 再决定什么时候开。打开后可以随时关掉，下一轮就停。
+	KeyJavDetailBackfillEnabled = "jav_detail_backfill_enabled"
+
+	// KeyJavDetailBackfillBudgetMin 是详情回填**每轮的时间预算**（分钟）。
+	//
+	// 到点就收手、把剩下的留给下一轮 —— 与 check.go 的 actorFilmographyIngestBudget
+	// 同一条思路（按时间封顶才是「一轮别跑太久」这个意图的直接表达）。
+	KeyJavDetailBackfillBudgetMin = "jav_detail_backfill_budget_min"
+
 	// 番号海报水印（见 internal/jav/emby/watermark.go）：贴不贴、贴多大、离边多远。
 	//
 	// 三个键分开是因为它们回答的是不同问题：
@@ -694,6 +723,15 @@ func defaultSpecs() []Spec {
 		// 在推送成功之后多写一个几 KB 的 JSON，不做多余的上游请求。
 		// 不想要的人自己去「番号相关设置」里关掉。
 		{Key: KeyJavSidecarEnabled, Type: TypeBool, Default: "true", Hidden: true},
+		// 同上，默认 true。这条链**不打上游**（读库 + 写本地 json/nfo），
+		// 所以没有「默默替你打了几千次上游」的顾虑。
+		{Key: KeyJavSidecarSyncEnabled, Type: TypeBool, Default: "true", Hidden: true},
+		// 默认**关**：这条会持续几小时占用上游通道（12813 部 × 1.8 秒 ≈ 6.4 小时）。
+		// 该由用户看过说明再决定什么时候开 —— 与上面那条「不打上游、默认开」相反，
+		// 差别就在这一点上。
+		{Key: KeyJavDetailBackfillEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		// 每轮预算默认 30 分钟：一轮约补 1000 部，13 轮跑完；用户随时能关。
+		{Key: KeyJavDetailBackfillBudgetMin, Type: TypeInt, Default: "30", Min: intp(1), Max: intp(1440), Hidden: true},
 
 		// 水印：默认**关**（自动那条路不贴），大小 18%（真图出样张定的），
 		// 边距 6%（1/16）。两个数值都是百分数，前端滑杆直接用整数。

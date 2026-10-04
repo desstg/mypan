@@ -559,6 +559,12 @@ export interface JavConfig {
   sub_timeout_sec: number;
   /** 推送成功后要不要在资源所在目录写 `<番号>.json`（元数据侧车）。 */
   sidecar_enabled: boolean;
+  /** 后台把库里已有的元数据回写进本地侧车 json（默认开，不请求上游）。 */
+  sidecar_sync_enabled: boolean;
+  /** 后台给「从没抓过详情」的影片补详情（默认关：会持续几小时占用上游通道）。 */
+  detail_backfill_enabled: boolean;
+  /** 详情回填每轮的时间预算（分钟）。到点收手，剩下的留给下一轮。 */
+  detail_backfill_budget_min: number;
 
 
   default_account_id: number;
@@ -600,6 +606,9 @@ export interface JavConfigInput {
   sub_interval_max_sec?: number;
   sub_timeout_sec?: number;
   sidecar_enabled?: boolean;
+  sidecar_sync_enabled?: boolean;
+  detail_backfill_enabled?: boolean;
+  detail_backfill_budget_min?: number;
   default_account_id?: number;
   default_parent_id?: string;
   default_display_path?: string;

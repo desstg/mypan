@@ -26,6 +26,93 @@ type NFOReadHints struct {
 	Censored bool
 }
 
+// NFOPresence 报告一份 nfo 里**哪些元素真的存在**。
+//
+// # 为什么需要它
+//
+// 「元素不存在」与「元素存在但为空」在 nfo 里是**两件不同的事**：
+//
+//   - 生成器写的 nfo：值为空时**整个元素都不输出**（见 nfo.go 的 cdata 与各处
+//     `omitempty`）—— 所以「没有 `<plot>`」= 生成时就没有简介；
+//   - 用户在编辑器里保存的 nfo：即使值是空的，元素也在（`<plot><![CDATA[]]></plot>`）。
+//
+// 回写那条路（`strm.fillNFOFieldsIfMissing`）就是靠这条区分做到「只补生成器留下的空、
+// 绝不碰用户的编辑」：**元素在就一律不动**。判据必须来自这份报告，不能拿
+// `ParseNFO` 的结果去猜 —— 那边把「没这个元素」与「空元素」都还原成了零值。
+//
+// 实现上借 encoding/xml 的语义：`*struct{}` 只在元素出现时非 nil，`[]struct{}` 的
+// 长度就是出现次数（`<poster></poster>` 这种空元素也算出现）。
+// 刻意**不**用 `*string` / `*int`：那两种虽然也能区分存在与缺失，
+// 但会让人以为「元素里的值」也在这里 —— 值在 ParseNFO 那边。
+type NFOPresence struct {
+	Plot      bool
+	Actors    int // <actor> 的个数
+	Director  bool
+	Runtime   bool
+	Trailer   bool
+	Rating    bool // <ratings>
+	Genres    int  // <genre> 的个数
+	Sets      int  // <set> 的个数
+	Series    bool
+	Maker     bool
+	Publisher bool
+	Studio    bool
+	Cover     bool
+	Poster    bool
+	Thumb     bool
+	Fanart    bool
+}
+
+// nfoPresenceRead 是 NFOPresence 的解析载体，字段顺序与上面一一对应。
+type nfoPresenceRead struct {
+	XMLName   xml.Name   `xml:"movie"`
+	Plot      *struct{}  `xml:"plot"`
+	Actors    []struct{} `xml:"actor"`
+	Director  *struct{}  `xml:"director"`
+	Runtime   *struct{}  `xml:"runtime"`
+	Trailer   *struct{}  `xml:"trailer"`
+	Rating    *struct{}  `xml:"ratings"`
+	Genres    []struct{} `xml:"genre"`
+	Sets      []struct{} `xml:"set"`
+	Series    *struct{}  `xml:"series"`
+	Maker     *struct{}  `xml:"maker"`
+	Publisher *struct{}  `xml:"publisher"`
+	Studio    *struct{}  `xml:"studio"`
+	Cover     *struct{}  `xml:"cover"`
+	Poster    *struct{}  `xml:"poster"`
+	Thumb     *struct{}  `xml:"thumb"`
+	Fanart    *struct{}  `xml:"fanart"`
+}
+
+// ParseNFOPresence 解出「哪些元素存在」。解析失败返回零值 ——
+// 调用方（回写那条路）拿到全 false 就什么都不会补，这是安全的默认。
+//
+// 根元素不是 `<movie>` 时也返回零值：那不是我们认识的结构，别乱动。
+func ParseNFOPresence(data []byte) NFOPresence {
+	var raw nfoPresenceRead
+	if err := xml.Unmarshal(data, &raw); err != nil || raw.XMLName.Local != "movie" {
+		return NFOPresence{}
+	}
+	return NFOPresence{
+		Plot:      raw.Plot != nil,
+		Actors:    len(raw.Actors),
+		Director:  raw.Director != nil,
+		Runtime:   raw.Runtime != nil,
+		Trailer:   raw.Trailer != nil,
+		Rating:    raw.Rating != nil,
+		Genres:    len(raw.Genres),
+		Sets:      len(raw.Sets),
+		Series:    raw.Series != nil,
+		Maker:     raw.Maker != nil,
+		Publisher: raw.Publisher != nil,
+		Studio:    raw.Studio != nil,
+		Cover:     raw.Cover != nil,
+		Poster:    raw.Poster != nil,
+		Thumb:     raw.Thumb != nil,
+		Fanart:    raw.Fanart != nil,
+	}
+}
+
 // nfoMovieRead 是 `<movie>` 的读侧结构。
 //
 // 与写侧的 nfoMovie **刻意分开**：那个是输出顺序表（`Plot` 等用 cdataText），

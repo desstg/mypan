@@ -110,6 +110,314 @@ func (s *Service) startLoops(ctx context.Context) {
 	go s.checkLoop(ctx)
 	// 给影库里**没有磁链**的片后台补磁链（见 magnetSweepLoop）。
 	go s.magnetSweepLoop(ctx, gate)
+	// 把库里**已经有的**元数据回写进本地侧车 json（见 sidecarSyncLoop）。
+	// 与上面那些不同：它**不打上游**，所以没有避让闸门，也不怕用户在用。
+	go s.sidecarSyncLoop(ctx, gate)
+	// 给**从没抓过详情**的影片补详情（见 detailBackfillLoop）。
+	// 这是全模块唯一一条会大量打上游的后台活：默认关，打开后按每轮时间预算慢慢跑。
+	go s.detailBackfillLoop(ctx, gate)
+}
+
+// ————————————————————— 详情回填（会打上游）————————————————————
+
+const (
+	// detailBackfillTick 醒来看看要不要开工。比 sidecarSyncLoop 密：
+	// 它要受「上游闲着 / 用户不在用」两道闸门管，醒来被挡回去是常态。
+	detailBackfillTick = 10 * time.Minute
+
+	// detailBackfillBatch 每批向库里要几部。真正截断一轮的是**时间预算**，
+	// 这个数只决定「一次 SQL 取多少」，取小了会多几次查库、取大了白占内存。
+	detailBackfillBatch = 50
+
+	// detailBackfillGap 每部之间的停顿。
+	//
+	// ⚠️ 这不是限流本身 —— 限流在 javdb.Client 里（`jav_min_interval_ms` 500ms +
+	// `jav_request_gap_ms` 1000ms ≈ 1.8 秒/请求）。这里再歇 300ms 是给**网盘/代理**
+	// 这类中间层留余量，也让「用户突然回来」时能更快收手（粒度 = 这一部跑完）。
+	detailBackfillGap = 300 * time.Millisecond
+
+	// detailBackfillBudget 兜底预算：设置项没配 / 配成 0 时用这个。
+	detailBackfillBudget = 30 * time.Minute
+)
+
+// detailBackfillLoop 给**从没抓过详情**的影片补一次详情。
+//
+// # 为什么需要它
+//
+// 库里 15007 部里 **12813 部的 `raw_json` 是空的** —— 也就是从没抓过详情。
+// 榜单刷新与影库同步入库的只有 number/title/cover（列表接口不给详情），
+// 于是那批片**缺全部元数据**：演员、简介、导演、片商、系列、评分、时长、标签、
+// 预告、剧照。详情页点开只有一张封面和一行标题。
+//
+// # 为什么不能挂在别处
+//
+// 它**只能**是后台循环，两个理由：
+//
+//  1. 一次详情 + 补缺链是几十秒到几分钟，挂在详情页那条路上会让用户干等
+//     （hydrate 队列已经承担了「用户点开的那一部」，它一次一部、优先级更高）；
+//  2. **绝不能挂在「写侧车」那一步同步抓** —— sidecar.go 的注释写着，那会在
+//     后台事件里打 JAVDB 的限流通道，一次批量推送就能触发封号。
+//
+// # 三道闸门（照抄 summaryBackfillLoop 那一套）
+//
+//  1. **默认关**（`jav_detail_backfill_enabled`）：12813 部 × 1.8 秒 ≈ 6.4 小时，
+//     该由用户看过说明再决定什么时候开；
+//  2. **上游闲着**（`sweepUpstreamIdle`）：通道凉了才开工；
+//  3. **用户不在用**（`UserActiveWithin`）：一轮跑到一半用户来了立刻收手。
+//
+// 外加**每轮时间预算**（设置项，默认 30 分钟）：到点收手，剩下的留给下一轮。
+//
+// # 记账
+//
+// **判据是 `raw_json` 本身**（抓成功就写进去了），但**失败要单独记一笔**：
+// `detail_attempts + 1`，到上限就不再进候选。
+//
+// 为什么不「失败不记账」：上游**根本没有**这部片时（国产/素人，实测真库里
+// 那 12813 部里占比不小）它会永远留在候选里，每轮白打一次上游，
+// 而「还剩 M 部」这个进度数**永远不会归零** —— 用户分不清「补完了」与「卡住了」。
+// 这与简介补缺那边「失败不记账」不同：那条失败多是限流（该重试），
+// 这条失败多是「上游没有」（重试无意义）。
+func (s *Service) detailBackfillLoop(ctx context.Context, gate <-chan struct{}) {
+	if !startupwait.Ready(ctx, gate) {
+		return
+	}
+	if !startupwait.Delay(ctx, startupDelayAfterAuth) {
+		return
+	}
+
+	ticker := time.NewTicker(detailBackfillTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		if !s.Enabled() || s.movies == nil {
+			continue
+		}
+		if s.settings == nil || !s.settings.Bool(settings.KeyJavDetailBackfillEnabled) {
+			continue
+		}
+		client, err := s.javdbClient()
+		if err != nil {
+			continue
+		}
+		// 两条判据语义不同（通道凉没凉 / 人在不在），都要满足，见 loops.go 顶部那段。
+		if time.Since(client.LastUsedAt()) < sweepUpstreamIdle {
+			continue
+		}
+		if s.UserActiveWithin(userActivityWindow) {
+			continue
+		}
+
+		budget := time.Duration(s.settings.Int(settings.KeyJavDetailBackfillBudgetMin)) * time.Minute
+		if budget <= 0 {
+			budget = detailBackfillBudget
+		}
+		s.detailBackfillOnce(ctx, budget)
+	}
+}
+
+// detailBackfillOnce 跑一轮详情回填，最多花 budget 那么久。
+func (s *Service) detailBackfillOnce(ctx context.Context, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	done := 0
+	stopped := false
+
+	for {
+		if time.Now().After(deadline) {
+			stopped = true
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		// 用户回来了立刻收手：这一轮剩下的留给下一轮（与 summaryBackfillLoop 同）。
+		if s.UserActiveWithin(userActivityWindow) {
+			stopped = true
+			break
+		}
+
+		ids, err := s.movies.PendingDetailMovieIDs(ctx, detailBackfillBatch)
+		if err != nil {
+			s.logWarn("jav detail backfill query failed", "err", err)
+			break
+		}
+		if len(ids) == 0 {
+			break // 补完了
+		}
+
+		for _, id := range ids {
+			if time.Now().After(deadline) {
+				stopped = true
+				break
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			if s.UserActiveWithin(userActivityWindow) {
+				stopped = true
+				break
+			}
+
+			// **走 ingestMovieDetailOnly，不走 IngestMovie**：补缺链（简介 / 中文标题）
+			// 要打 4~6 个外站、最坏 3 分钟一部，12813 部按它跑是**天级**的活；
+			// 而这一步要的是「把 JAVDB 那份详情落库」—— 演员/导演/时长/评分/标签/
+			// 剧照/预告全在里面。简介那批由 summaryBackfillLoop 另外慢慢补。
+			if _, err := s.ingestMovieDetailOnly(ctx, id); err != nil {
+				// 失败**记一笔**（到上限就不再挑它，见 detailMaxAttempts 的注释）——
+				// 上游根本没有这部片时，不记就是「每轮白打一次、进度永远不归零」。
+				// 记 info 而不是 error：冷门片上游 404 是常态，不是故障。
+				s.logInfo("jav detail backfill failed", "id", id, "err", err)
+				if berr := s.movies.BumpDetailAttempts(ctx, id); berr != nil {
+					s.logWarn("jav detail backfill bump failed", "id", id, "err", berr)
+				}
+				continue
+			}
+			done++
+			// 每部之间歇一下。它同时也是「用户回来了」的检查点粒度。
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(detailBackfillGap):
+			}
+		}
+	}
+
+	remaining, err := s.movies.CountPendingDetail(ctx)
+	if err != nil {
+		// 数不出来不该把这一轮的成果藏起来：报「还剩未知」也要报。
+		s.logWarn("jav detail backfill count failed", "err", err)
+		remaining = -1
+	}
+	s.logInfo("jav detail backfill done", "filled", done, "remaining", remaining, "stopped", stopped)
+	// remaining < 0 表示数不出来 —— 那种情况不报通知（宁可少报，别报一个假数）。
+	if remaining >= 0 {
+		s.notifyBackfill(done, remaining, stopped)
+	}
+}
+
+// ————————————————————— 侧车元数据回写 —————————————————————
+
+const (
+	// sidecarSyncInterval 多久回写一轮。
+	//
+	// 取 1 小时（比 summaryBackfillLoop 的 24 小时密得多）：这条循环**不打上游**，
+	// 一轮的代价只有本地磁盘 IO，而「用户刚推完一部、点开详情补到了演员，
+	// 侧车立刻跟上」这件事越快越好 —— 那是用户能直接看见的效果。
+	sidecarSyncInterval = time.Hour
+	// sidecarSyncTick 醒来看看够不够一轮的间隔。
+	sidecarSyncTick = 10 * time.Minute
+)
+
+// sidecarSyncLoop 把库里**已经有的**元数据回写进本地侧车 json，并顺手补上同目录
+// nfo 里缺的元素。
+//
+// # 为什么需要它
+//
+// 侧车 json 是**推送那一刻的快照**（sidecar.go 的 writeSidecar 只读本地库、不抓上游），
+// 而写它的时候库里可能还没有演员 —— 实测用户挂载目录里 76 份侧车有 22 份
+// `actors: []`。库里后来补齐了，侧车却只写一次，**永远不会回写**。
+//
+// nfo 同理：它是从**本地那份 json** 生成的（见 emby.BuildNFO 的调用点），
+// 所以侧车不回写，nfo 里就永远缺演员/导演/时长/评分。
+//
+// # 与其它后台循环的三处不同
+//
+//  1. **不打上游**：整条链只读库 + 写本地文件。所以没有限流/封号风险，
+//     与「不在写侧车时回头抓上游」那条铁律不冲突（那条禁的是**抓上游**）。
+//  2. **不看用户活动**：避让闸门（UserActiveWithin / sweepUpstreamIdle）是为了
+//     「别跟用户抢上游通道」。这条不碰上游，用户在用的时候正是最该补齐的时候。
+//  3. **走整批那条路**：遍历媒体库目录里的侧车，按番号查库回写 —— 一次遍历覆盖
+//     所有部，而不是「按库里的番号逐个 Walk 目录」（几千部 × 几千个文件，跑不完）。
+//
+// 遍历**只覆盖本地已有的侧车**：那份 json 还在网盘上（推送过但没同步下来）的
+// 这一轮够不着，等同步下来自然会被下一轮扫到。
+//
+// # 记账
+//
+// 用**单独一列** `sidecar_synced_at`（迁移 0051），不能复用 `enriched_at` ——
+// 那个是简介补缺链（要打 4~6 个外站）的候选判据，抢过来会让简介补缺静默失效。
+func (s *Service) sidecarSyncLoop(ctx context.Context, gate <-chan struct{}) {
+	if !startupwait.Ready(ctx, gate) {
+		return
+	}
+	if !startupwait.Delay(ctx, startupDelayAfterAuth) {
+		return
+	}
+
+	var lastRun time.Time
+	ticker := time.NewTicker(sidecarSyncTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		if !s.Enabled() || s.movies == nil {
+			continue
+		}
+		if !lastRun.IsZero() && time.Since(lastRun) < sidecarSyncInterval {
+			continue
+		}
+		if !s.sidecarSyncEnabled() {
+			continue
+		}
+		lastRun = time.Now()
+
+		s.sidecarSyncOnce(ctx)
+	}
+}
+
+// sidecarSyncOnce 跑一轮回写。
+func (s *Service) sidecarSyncOnce(ctx context.Context) {
+	s.mu.Lock()
+	sync := s.sidecarSyncSink
+	s.mu.Unlock()
+	if sync == nil {
+		return // 没注入（比如没接 strm 模块）：什么都不做，与两条单字段 sink 同一条取向
+	}
+
+	// ① 整批：遍历媒体库目录里的侧车，按番号查库回写。
+	//
+	// 这一趟同时把「哪些番号**有**侧车」收了回来（res.Numbers），下面记账就靠它 ——
+	// 侧车文件名带质量后缀（`SSIS-001-U.json`），只有 json 里的 number 字段是裸番号。
+	res, err := sync(ctx, func(number string) (map[string]any, bool) {
+		return s.sidecarSyncFields(ctx, number)
+	})
+	if err != nil {
+		s.logWarn("jav sidecar sync walk failed", "err", err)
+		return
+	}
+
+	// ② 记账：**扫到侧车的那些**记一笔。
+	//
+	// 为什么只记扫到的：没扫到的分两种 ——「从没推送过」（将来推送时写的是当时的库，
+	// 本来就是新的，记不记都行）与「推送过但本地还没同步下来」（那份 json 还在网盘上，
+	// **不能记**，记了就永远不会再补）。库里分不出这两种，所以一律不记，等它同步下来
+	// 自然会被下一轮扫到。
+	synced := 0
+	for _, number := range res.Numbers {
+		movie, gerr := s.movies.GetByNumber(ctx, number)
+		if gerr != nil || movie == nil {
+			continue
+		}
+		if merr := s.movies.MarkSidecarSynced(ctx, movie.ID); merr != nil {
+			s.logWarn("jav sidecar sync mark failed", "movie", movie.ID, "err", merr)
+			continue
+		}
+		synced++
+	}
+
+	// ③ 补缺链刚补到的那批（有 sidecar_synced_at 为空、但侧车不在本地）留给下一轮；
+	//    这里只报告，不发通知 —— 它是后台的慢活，通知会变成噪声。
+	if res.Scanned > 0 || res.Written > 0 {
+		s.logInfo("jav sidecar sync done", "scanned", res.Scanned, "written", res.Written, "marked", synced)
+	}
 }
 
 // magnetSweepLoop 给影库里**一颗磁链都没有**的片去上游问一遍，**一天一轮、只在空闲时跑**。
@@ -946,6 +1254,9 @@ func (s *Service) backfillSummary(ctx context.Context, movieID string) (bool, er
 	if patch.TitleZH != "" {
 		s.pushTitleZHToSidecar(movie.Number, patch.TitleZH)
 	}
+	// 这一轮补到的其余字段（时长/导演/片商/标签…）也推一次 —— 它们没有自己的通道，
+	// 而侧车要的是「这部片现在有什么」，不只是「这次补到了什么」。
+	s.pushMovieFieldsToSidecar(ctx, movieID)
 	if err := s.movies.MarkEnriched(ctx, movieID); err != nil {
 		return false, err
 	}

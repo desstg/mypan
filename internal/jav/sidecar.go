@@ -565,6 +565,17 @@ func (s *Service) sidecarEnabled() bool {
 	return s.settings.Bool(settings.KeyJavSidecarEnabled)
 }
 
+// sidecarSyncEnabled 报告后台要不要把库里已有的元数据回写进本地侧车（默认开）。
+//
+// 与 sidecarEnabled 分开：那个管「推送时写不写」，这个管「推送之后补不补」。
+// 两个都默认开，理由见 settings 里那两个键的注释。
+func (s *Service) sidecarSyncEnabled() bool {
+	if s.settings == nil {
+		return true
+	}
+	return s.settings.Bool(settings.KeyJavSidecarSyncEnabled)
+}
+
 // spawnSidecarWrite 异步写一份侧车。
 //
 // **必须异步**：eventbus 是单 goroutine 串行分发（internal/eventbus/bus.go 的

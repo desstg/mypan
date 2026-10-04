@@ -586,11 +586,11 @@ func TestGenerateJavArtifactsOverwriteRefetchesThumb(t *testing.T) {
 	}
 }
 
-// TestJavPosterQueueForceBypassesDedup 强制作业必须绕过那张只增不减的去重表。
+// TestJavPosterQueueForceBypassesDedup 强制作业必须绕过去重。
 //
-// 这条钉的是一个静默失效：`seen` 故意不清理（清了等于每轮重算），要是强制作业也走
-// 去重，第二次「全量恢复」就会命中第一次留下的记录被丢掉 —— 「第一次成功、之后再也
-// 恢复不了」，而且不报错。
+// 去重是**一轮之内**的事（记录在处理完之后就撤，见 TestJavPosterQueueForgetsAfterProcess），
+// 但即便在那一轮之内，强制作业（全量恢复 / 手动重刮）也不该被它挡住 ——
+// 用户点的是「重算这一张」，被当成重复丢掉就是静默失败。
 func TestJavPosterQueueForceBypassesDedup(t *testing.T) {
 	dir := t.TempDir()
 	thumb := filepath.Join(dir, "thumb.jpg")
