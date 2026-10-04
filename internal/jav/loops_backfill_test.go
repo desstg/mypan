@@ -2,6 +2,7 @@ package jav
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -90,5 +91,46 @@ func TestDetailBackfillDisabledByDefault(t *testing.T) {
 	// 侧车回写那条**不打上游**，默认开 —— 两者相反是有意的，别一起改
 	if !f.set.Bool(settings.KeyJavSidecarSyncEnabled) {
 		t.Error("jav_sidecar_sync_enabled 默认必须是 true（它不打上游）")
+	}
+}
+
+// TestDetailBackfillThresholdSkipsSmallBacklog 「攒够才开工」这道闸门。
+//
+// 存量补完之后这条循环每 10 分钟醒一次，不加这道闸门就是每天空跑 144 轮，
+// 或者「为榜单带进来的三五部新片开一轮 30 分钟的活」—— 而详情回填本来就不急。
+func TestDetailBackfillThresholdSkipsSmallBacklog(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	f.db.movieResult = javdb.Movie{ID: "m1", Number: "SSIS-001", Title: "标题"}
+
+	// 候选数 = 阈值以下：**一轮都不该跑**
+	for i := 0; i < detailBackfillMinPending-1; i++ {
+		seedPendingDetail(t, f, fmt.Sprintf("m%d", i), fmt.Sprintf("SSIS-%03d", i))
+	}
+	pending, err := f.st.JavMovies.CountPendingDetail(ctx)
+	if err != nil {
+		t.Fatalf("CountPendingDetail: %v", err)
+	}
+	if pending >= detailBackfillMinPending {
+		t.Fatalf("夹具造多了：%d", pending)
+	}
+	// 闸门本体（循环体里那句就是调它）
+	if f.svc.detailBackfillReady(ctx) {
+		t.Fatal("候选不足阈值时不该开工")
+	}
+
+	// 补到刚好等于阈值：该开工了
+	seedPendingDetail(t, f, "m-extra", "SSIS-999")
+	pending, _ = f.st.JavMovies.CountPendingDetail(ctx)
+	if pending != detailBackfillMinPending {
+		t.Fatalf("补到阈值：%d，期望 %d", pending, detailBackfillMinPending)
+	}
+	if !f.svc.detailBackfillReady(ctx) {
+		t.Fatal("到了阈值就该开工")
+	}
+	f.svc.detailBackfillOnce(ctx, 10*time.Second)
+	ids, _ := f.st.JavMovies.PendingDetailMovieIDs(ctx, 1000)
+	if len(ids) >= detailBackfillMinPending {
+		t.Errorf("到了阈值该真的跑一轮：候选 %d 部一个都没减少", len(ids))
 	}
 }

@@ -138,6 +138,22 @@ const (
 
 	// detailBackfillBudget 兜底预算：设置项没配 / 配成 0 时用这个。
 	detailBackfillBudget = 30 * time.Minute
+
+	// detailBackfillMinPending 是「攒够多少部没抓过详情的才值得开工」。
+	//
+	// 存量补完之后，这条循环每轮醒来都会发现「候选 0 部」而空跑一次
+	// （本地 SQL，代价很小，但一天 144 轮全是白醒）。更重要的是**新片入库的节奏**：
+	// 榜单 / 影库同步每轮只带进来几部，为三五部就开一轮 30 分钟的活，
+	// 会跟用户、跟别的后台链反复抢上游通道 —— 而详情回填本来就不急。
+	//
+	// 所以攒着：**候选不足这个数就整轮跳过**（连预算都不开始）。
+	// 取 200：实测存量那批是一夜 7119 部跑完的（37 部/分钟），
+	// 200 部约 6 分钟一轮 —— 既不至于「为几部开一轮」，也不会让新片等太久。
+	//
+	// 代价（有意）：候选长期停在 199 部时它就一直不动。那种情况只可能出现在
+	// 「上游持续少量入库」，而那时**别的链（hydrate 队列）会先处理用户点开的那几部**，
+	// 详情页并不缺数据。
+	detailBackfillMinPending = 200
 )
 
 // detailBackfillLoop 给**从没抓过详情**的影片补一次详情。
@@ -158,12 +174,15 @@ const (
 //  2. **绝不能挂在「写侧车」那一步同步抓** —— sidecar.go 的注释写着，那会在
 //     后台事件里打 JAVDB 的限流通道，一次批量推送就能触发封号。
 //
-// # 三道闸门（照抄 summaryBackfillLoop 那一套）
+// # 四道闸门（照抄 summaryBackfillLoop 那一套，外加一道「攒够才开工」）
 //
-//  1. **默认关**（`jav_detail_backfill_enabled`）：12813 部 × 1.8 秒 ≈ 6.4 小时，
-//     该由用户看过说明再决定什么时候开；
+//  1. **默认关**（`jav_detail_backfill_enabled`）：存量那批实测约 3 小时
+//     （7119 部 / 37 部每分钟），该由用户看过说明再决定什么时候开；
 //  2. **上游闲着**（`sweepUpstreamIdle`）：通道凉了才开工；
-//  3. **用户不在用**（`UserActiveWithin`）：一轮跑到一半用户来了立刻收手。
+//  3. **用户不在用**（`UserActiveWithin`）：一轮跑到一半用户来了立刻收手；
+//  4. **攒够才开工**（`detailBackfillMinPending`）：候选不足 200 部就整轮跳过。
+//     存量补完之后这条循环每 10 分钟醒一次，不加这道闸门就是每天空跑 144 轮、
+//     或者「为榜单带进来的三五部新片开一轮 30 分钟的活」。
 //
 // 外加**每轮时间预算**（设置项，默认 30 分钟）：到点收手，剩下的留给下一轮。
 //
@@ -212,12 +231,38 @@ func (s *Service) detailBackfillLoop(ctx context.Context, gate <-chan struct{}) 
 			continue
 		}
 
+		// **攒够才开工**：候选不足 detailBackfillMinPending 就整轮跳过
+		// （连预算都不开始）。存量补完之后这里每天都会醒 144 次，
+		// 不加这道闸门就是「为几部新片开一轮 30 分钟的活」——见常量那段的说明。
+		if !s.detailBackfillReady(ctx) {
+			continue
+		}
+
 		budget := time.Duration(s.settings.Int(settings.KeyJavDetailBackfillBudgetMin)) * time.Minute
 		if budget <= 0 {
 			budget = detailBackfillBudget
 		}
 		s.detailBackfillOnce(ctx, budget)
 	}
+}
+
+// detailBackfillReady 报告「攒够没」——候选数够不够开一轮。
+//
+// 抽出来是为了能单独测：闸门写在循环体里的话，用例只能把循环整个跑起来
+// （要等 10 分钟的 ticker），而这条判据恰恰是「存量补完之后每天空跑 144 轮」
+// 那个毛病的唯一防线。
+//
+// 查不出来（库出错）时**当成不足**：宁可这轮不跑，也不要拿一个错数去开一轮。
+func (s *Service) detailBackfillReady(ctx context.Context) bool {
+	if s == nil || s.movies == nil {
+		return false
+	}
+	pending, err := s.movies.CountPendingDetail(ctx)
+	if err != nil {
+		s.logWarn("jav detail backfill count failed", "err", err)
+		return false
+	}
+	return pending >= detailBackfillMinPending
 }
 
 // detailBackfillOnce 跑一轮详情回填，最多花 budget 那么久。
