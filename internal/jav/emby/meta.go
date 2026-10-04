@@ -135,8 +135,18 @@ const genderMale = 1
 //
 // 入参是**侧车的演员**而不是名字列表：性别只在这一个地方有用，而它正是
 // `<actor>` 元素里不存在的那个信息 —— 算完就丢掉，不进 MovieMeta。
+//
+// **名字也要过一遍归并表**（`actormap`）：合集名必须与 `<actor>` 里那个名字一致，
+// 否则同一个演员会在 Emby 里生成**两个**合集（`羽咲みはる` 一个、`羽咲美晴` 一个）。
+// 真机实测过：REBD-916 的 `<actor>` 已经是 `羽咲美晴`，而 `<set>` 还是 `羽咲みはる`。
+//
+// 为什么归并**在这里再做一次**、而不是复用上面那个循环的结果：上面那个循环算完
+// 就**丢掉性别**了（性别不是 nfo 的内容），而这里正是靠性别剔男优的。与其为了
+// 复用而多存一份中间列表，不如在这里再查一次表 —— 那是纯内存 map 查表，很便宜。
 func actorSets(actors []SidecarActor) []string {
+	tbl := actormap.Default()
 	var out []string
+	seen := make(map[string]struct{}, len(actors))
 	for _, a := range actors {
 		if a.Gender == genderMale {
 			continue
@@ -145,6 +155,14 @@ func actorSets(actors []SidecarActor) []string {
 		if name == "" {
 			continue
 		}
+		if tbl != nil {
+			name = strings.TrimSpace(tbl.Resolve(name))
+		}
+		// 两个别名归到同一个统一名时只写一个 —— 与 <actor> 那边同一套去重理由。
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
 		out = append(out, name)
 		if len(out) >= maxActorSets {
 			break
@@ -216,6 +234,10 @@ func MovieMetaFromSidecar(doc *SidecarDoc, opts NFOOptions) *MovieMeta {
 	}
 	// 合集在这一刻算一次（上游顺序 + 性别都已经在手），算完就丢掉性别 ——
 	// 性别不是 nfo 的内容，`<actor>` 只有 name/type。
+	//
+	// **名字要过归并表**（`actorSets` 内部会做）：合集名必须与 `<actor>` 里那个
+	// 名字一致，否则同一个演员会在 Emby 里生成**两个**合集 —— 真机实测过
+	// REBD-916 的 `<actor>` 已经是 `羽咲美晴`，而 `<set>` 还是 `羽咲みはる`。
 	//
 	// **不在 BuildNFOFromMeta 里现算**：那条路要同时服务「扫描生成」与「编辑器保存」，
 	// 而后者读回来的合集必须原样写回，不能重算（见 MovieMeta.Sets 的说明）。
