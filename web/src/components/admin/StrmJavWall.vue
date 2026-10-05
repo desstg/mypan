@@ -11,6 +11,7 @@ import {
 import AppButton from "@/components/base/AppButton.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
 import StrmJavMetaDrawer from "@/components/admin/StrmJavMetaDrawer.vue";
+import { findScrollBox, useFillViewport } from "@/composables/useFillViewport";
 import { toast } from "@/composables/useToast";
 import "@/styles/jav.css";
 
@@ -44,38 +45,89 @@ const category = ref<string>("");
 const view = ref<"thumb" | "poster">("poster");
 const busyStem = ref<string>("");
 
+// ————————————————————— 分页 —————————————————————
+//
+// 后端 `listJavWall` 本来就有 offset / limit / has_more，这里原来只调一次、写死
+// limit=200、不带 offset —— 于是**超过 200 张的部分永远看不到，界面上还没有任何提示**
+// （属于「静默变空」那一族）。现在改成拉到底续加载。
+//
+// 每页 200 = 后端上限（`maxItemListLimit`）。首次就把上限取满，是为了让手机竖屏
+// 也一次备够十屏，滚动时几乎碰不到「正在加载」。
+const PAGE_LIMIT = 200;
+const loadingMore = ref(false);
+/** 还有没有下一页 —— 来自后端，不靠「这一页拿满了没」去猜。 */
+const hasMore = ref(false);
+/** 过滤后的总条数（后端报的），底部状态行要显示「还有 N 条」。 */
+const total = ref(0);
+
 const drawerOpen = ref(false);
 const editing = ref<JavWallItem | null>(null);
 
 const items = computed(() => result.value?.items ?? []);
 const categories = computed(() => result.value?.categories ?? []);
 
+/** 底部状态行该不该占位置。首屏还在转圈时不显示，免得底部先冒一条文案又跳走。 */
+const showLoadMore = computed(() => !loading.value && items.value.length > 0);
+
 /** 把隐藏名单抛给外面（页头那颗「全部目录」按钮要显示「隐藏 N 个目录」）。 */
 function publishHiddenDirs() {
   emit("hidden-dirs", result.value?.hidden_dirs ?? []);
 }
 
-async function load(options: { silent?: boolean } = {}) {
+/**
+ * 取一页。`append` 为真时接在现有列表后面（拉到底续加载）。
+ *
+ * ⚠️ 追加时**不能**把 `loading` 置真：模板里 `v-if="loading"` 会把整片网格换成
+ * 「加载中…」，用户每滚一屏就看到列表闪一下没了。所以另开 `loadingMore`。
+ */
+async function load(options: { append?: boolean } = {}) {
   if (!props.taskId) {
     result.value = null;
+    hasMore.value = false;
+    total.value = 0;
     publishHiddenDirs();
     return;
   }
-  if (!options.silent) loading.value = true;
+  const append = Boolean(options.append);
+  if (append) {
+    if (loading.value || loadingMore.value || !hasMore.value) return;
+    loadingMore.value = true;
+  } else {
+    loading.value = true;
+  }
   try {
-    result.value = await fetchJavWallItems(props.taskId, {
+    const next = await fetchJavWallItems(props.taskId, {
       category: category.value,
       keyword: props.keyword ?? "",
       sort: props.sort ?? "added_desc",
-      limit: 200,
+      limit: PAGE_LIMIT,
+      offset: append ? (result.value?.items.length ?? 0) : 0,
     });
+    if (append && result.value) {
+      // 按 id 去重再拼：快照 TTL 是 60 秒，跨过一次重扫顺序可能挪位，
+      // 重复的 key 会让 Vue 报「Duplicate keys」并且渲染错位。
+      const seen = new Set(result.value.items.map((it) => it.id));
+      result.value.items = [...result.value.items, ...next.items.filter((it) => !seen.has(it.id))];
+      result.value.has_more = next.has_more;
+      result.value.total = next.total;
+    } else {
+      result.value = next;
+    }
+    hasMore.value = Boolean(result.value?.has_more);
+    total.value = result.value?.total ?? 0;
     publishHiddenDirs();
   } catch (error) {
-    toast.error(getApiErrorMessage(error, "读取番号海报墙失败"));
-    result.value = null;
-    publishHiddenDirs();
+    // 追加失败保持已有内容 —— 滚到一半一次请求失败，不该把看过的一屏清空。
+    if (!append) {
+      toast.error(getApiErrorMessage(error, "读取番号海报墙失败"));
+      result.value = null;
+      hasMore.value = false;
+      total.value = 0;
+      publishHiddenDirs();
+    }
   } finally {
     loading.value = false;
+    loadingMore.value = false;
   }
 }
 
@@ -88,8 +140,10 @@ async function refreshMeta() {
       category: category.value,
       keyword: props.keyword ?? "",
       sort: props.sort ?? "added_desc",
-      limit: 200,
+      limit: PAGE_LIMIT,
     });
+    hasMore.value = Boolean(result.value?.has_more);
+    total.value = result.value?.total ?? 0;
     publishHiddenDirs();
     toast.success("已重新读取本地文件");
   } catch (error) {
@@ -255,19 +309,6 @@ const gridEl = ref<HTMLElement | null>(null);
 /** 当前认定的滚动盒子（只用于读视口高度；找不到时是 null = 用 window）。 */
 const scrollTarget = ref<HTMLElement | null>(null);
 
-/** 找到这个元素所在的那个滚动盒子（找不到返回 null = 用 window）。 */
-function findScrollBox(from: HTMLElement | null): HTMLElement | null {
-  let el = from?.parentElement ?? null;
-  while (el && el !== document.body && el !== document.documentElement) {
-    const overflowY = getComputedStyle(el).overflowY;
-    if ((overflowY === "auto" || overflowY === "scroll") && el.scrollHeight > el.clientHeight) {
-      return el;
-    }
-    el = el.parentElement;
-  }
-  return null;
-}
-
 /** 重新认定滚动盒子（布局或内容变了之后调）。 */
 function bindScrollTarget() {
   scrollTarget.value = findScrollBox(gridEl.value);
@@ -279,33 +320,95 @@ function onAnyScroll() {
   scheduleBudgetRefresh();
 }
 
+// ————————————————————— 拉到底续加载 —————————————————————
+//
+// 两条路一起用：
+//   1. `IntersectionObserver` 盯底部哨兵 —— 「滚到底」那条路（哨兵常驻 DOM，见模板）；
+//   2. `useFillViewport` —— 「内容不足一屏、根本没法滚」那条路。光有 1 解决不了它：
+//      没有滚动空间时观察器只在挂载那一刻回调过一次，用户怎么拖都不动。
+const sentinel = ref<HTMLElement | null>(null);
+let loadMoreObserver: IntersectionObserver | null = null;
+
+function disconnectLoadMoreObserver() {
+  loadMoreObserver?.disconnect();
+  loadMoreObserver = null;
+}
+
+function setupLoadMoreObserver() {
+  disconnectLoadMoreObserver();
+  if (typeof IntersectionObserver === "undefined") return;
+  if (!hasMore.value || !sentinel.value) return;
+  loadMoreObserver = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      void load({ append: true });
+    },
+    // 提前 320px 开始拉，滚到底时下一页通常已经在了 —— 与榜单 / 影库同一档间距。
+    { rootMargin: "320px 0px" },
+  );
+  loadMoreObserver.observe(sentinel.value);
+}
+
+const { fill: fillViewportIfShort, reset: resetAutoFill } = useFillViewport({
+  sentinel,
+  hasMore,
+  busy: computed(() => loading.value || loadingMore.value),
+  loadMore: () => void load({ append: true }),
+});
+
+// ————————————————————— 列表变了 —————————————————————
+//
+// ⚠️ 「重置取图窗口」的判据是**查询条件变了**，不是**数组变了**。
+//
+// 加续加载之前，`items` 变了就等于「换了一批」（首屏、翻档、搜索），无条件重置没问题。
+// 加了追加之后这个假设不成立：**追加一页也会让 items 变**，无条件重置会把已经显示出来的
+// 图撤回去，往回滚就闪 —— 那正是用户说的「有些海报显示不出来」。
+//
+// 所以拆成两类 watch：
+//   * 条件变了 → 重置窗口 + 重列（换批才重置）
+//   * 只是变长了 → 不重置，只重新算一次窗口（新下标会被 refreshImageBudget 补进来）
+
+/** 换了一批（首屏 / 换档 / 搜索 / 换排序）：窗口归零，然后重列。 */
+function resetAndLoad() {
+  loadedMin.value = Number.POSITIVE_INFINITY;
+  loadedMax.value = 0;
+  resetAutoFill();
+  void load();
+}
+
+// taskId 变了只重置分类 —— 真正的重列由下面那条 watch 触发（category 也在它的源里，
+// 所以「换任务」与「换分类」各自只跑一次 load）。
 watch(() => props.taskId, () => {
   category.value = "";
-  void load();
 });
-watch([category, () => props.sort], () => void load());
+watch([category, () => props.sort], resetAndLoad);
 // 关键词来自页头那个输入框：那边是 v-model 直连，这里跟着 prop 变就重列（防抖）。
 let keywordTimer: number | undefined;
 watch(() => props.keyword, () => {
   window.clearTimeout(keywordTimer);
-  keywordTimer = window.setTimeout(() => void load(), 300);
+  keywordTimer = window.setTimeout(resetAndLoad, 300);
 });
 
-// 列表换了（首屏、翻档、搜索）→ 重新发一轮图；滚动/改窗口大小 → 节流补发。
-watch(items, () => {
-  // 换了一批条目就**重置**：上一批的「进过窗口」的下标对新一批没有意义
-  // （新的一批可能只有几部，也可能几百部，而第 50 个下标指向的是另一部片）。
-  loadedMin.value = Number.POSITIVE_INFINITY;
-  loadedMax.value = 0;
+watch(() => items.value.length, () => {
   void nextTick(() => {
     bindScrollTarget();
     refreshImageBudget();
+    // 网格渲染完再判一次「够不够一屏」—— 这时量到的哨兵位置才是最终的。
+    fillViewportIfShort();
   });
+});
+
+// 列表换完（首屏 / 追加）也要重挂观察器：hasMore 可能从 false 翻成 true。
+watch([sentinel, hasMore], () => {
+  void nextTick(setupLoadMoreObserver);
 });
 
 // 视图切换（海报 ↔ 缩略图）会换掉卡片高度与列数，窗口要跟着重量一次。
 watch(view, () => {
-  void nextTick(refreshImageBudget);
+  void nextTick(() => {
+    refreshImageBudget();
+    fillViewportIfShort();
+  });
 });
 
 onMounted(() => {
@@ -321,6 +424,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.clearTimeout(keywordTimer);
   window.clearTimeout(onScrollTimer);
+  disconnectLoadMoreObserver();
   document.removeEventListener("scroll", onAnyScroll, { capture: true } as EventListenerOptions);
   window.removeEventListener("resize", scheduleBudgetRefresh);
 });
@@ -423,6 +527,20 @@ defineExpose({ refreshMeta, load });
           <div class="jav-wall__sub">{{ subtitle(item) }}</div>
         </div>
       </article>
+    </div>
+
+    <!-- 拉到底续加载。哨兵**常驻 DOM**（不在上面的 v-if 分支里）—— 它一旦被移除，
+         挂在它上面的 IntersectionObserver 就再也收不到回调了。
+         没有文案时（首屏还在转圈 / 空列表）用 --idle 把高度收掉，免得底部留一条空白；
+         元素本身仍在 DOM 里、观察器仍挂着。 -->
+    <div
+      ref="sentinel"
+      class="jav-loadmore"
+      :class="{ 'jav-loadmore--idle': !showLoadMore }"
+    >
+      <span v-if="loadingMore">正在加载更多…</span>
+      <span v-else-if="hasMore">往下滚，还有 {{ total - items.length }} 条</span>
+      <span v-else-if="items.length">已全部加载（{{ total }} 条）</span>
     </div>
 
     <StrmJavMetaDrawer

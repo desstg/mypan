@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import JavMovieCard from "@/components/admin/JavMovieCard.vue";
+import { useFillViewport } from "@/composables/useFillViewport";
 import { getApiErrorMessage } from "@/api/client";
 import { fetchJavListMovies, fetchJavLocalMovies, searchJav } from "@/api/jav";
 import type { JavMovieCard as JavCard, JavSearchResult } from "@/types/jav";
@@ -258,6 +259,22 @@ onUnmounted(() => {
   observer?.disconnect();
   observer = null;
 });
+
+// 「内容不足一屏」那条路。观察器只管「滚到底」，而**没有滚动空间时它一次都不会再触发**
+// （内容不满一屏，页面根本滚不动）—— 手机竖屏看只有几条的分类时就是这个现象。
+// 补一条：哨兵还在视口内就继续拉，直到填满一屏。
+const { reset: resetAutoFill } = useFillViewport({
+  sentinel,
+  hasMore,
+  busy: computed(() => loading.value || loadingMore.value),
+  loadMore: () => void loadMore(),
+});
+
+// 换关键字 / 类型 / 标签 / 清单都会回第一页重查 —— 自动填充的额度也一起归零。
+watch(
+  () => [props.keyword, props.searchType, props.tag, props.listTarget?.id],
+  () => resetAutoFill(),
+);
 
 function pickSort(key: string, hasDir: boolean) {
   if (sortKey.value === key && hasDir) {

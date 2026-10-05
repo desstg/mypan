@@ -5,6 +5,7 @@ import JavMovieCard from "@/components/admin/JavMovieCard.vue";
 import { getApiErrorMessage } from "@/api/client";
 import { fetchJavRanking, javImageURL } from "@/api/jav";
 import MediaImage from "@/components/base/MediaImage.vue";
+import { useFillViewport } from "@/composables/useFillViewport";
 import {
   JAV_RANK_TYPE_TABS,
   javTopTypeOptions,
@@ -209,6 +210,18 @@ onMounted(() => {
   );
   observer.observe(sentinel.value);
 });
+
+// 「内容不足一屏」那条路。观察器只管「滚到底」，而**没有滚动空间时它一次都不会再触发**
+// （内容不满一屏，页面根本滚不动）—— 手机竖屏看只有几条的分类时就是这个现象。
+// 补一条：哨兵还在视口内就继续拉，直到填满一屏。
+const { reset: resetAutoFill } = useFillViewport({
+  sentinel,
+  hasMore,
+  busy: computed(() => loading.value || loadingMore.value),
+  loadMore: () => void load(true),
+});
+
+watch([() => kind.value, () => rankType.value, () => topType.value], () => resetAutoFill());
 
 onBeforeUnmount(() => {
   observer?.disconnect();
