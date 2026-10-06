@@ -394,7 +394,7 @@ func TestManualPushMarksPermanentFailureAsUnretryable(t *testing.T) {
 	s := newShareServiceForTest(t, drv, nil)
 	subID, recID := seedShareSubscription(t, s)
 
-	_, err := s.ManualPush(context.Background(), recID, subID)
+	_, err := s.ManualPush(context.Background(), recID, subID, true)
 	if err == nil {
 		t.Fatal("应当把驱动的错误透出来")
 	}
@@ -437,7 +437,7 @@ func TestManualPushKeepsRetryableFailureOnFailed(t *testing.T) {
 	s := newShareServiceForTest(t, drv, nil)
 	subID, recID := seedShareSubscription(t, s)
 
-	if _, err := s.ManualPush(context.Background(), recID, subID); err == nil {
+	if _, err := s.ManualPush(context.Background(), recID, subID, true); err == nil {
 		t.Fatal("应当把驱动的错误透出来")
 	}
 	rec, err := s.records.Get(context.Background(), recID)
@@ -473,7 +473,7 @@ func TestManualPushRefusesUnmatchedWithoutExplicitSubscription(t *testing.T) {
 		t.Fatalf("update record: %v", err)
 	}
 
-	_, err = s.ManualPush(ctx, recID, 0)
+	_, err = s.ManualPush(ctx, recID, 0, true)
 	if err == nil {
 		t.Fatal("未匹配的记录不指定订阅时应当报错，而不是推给候选订阅")
 	}
@@ -489,7 +489,7 @@ func TestManualPushRefusesUnmatchedWithoutExplicitSubscription(t *testing.T) {
 	if err := s.records.Update(ctx, rec); err != nil {
 		t.Fatalf("update record: %v", err)
 	}
-	if _, err := s.ManualPush(ctx, recID, 0); err == nil || !strings.Contains(err.Error(), "502") {
+	if _, err := s.ManualPush(ctx, recID, 0, true); err == nil || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("匹配上的记录该照常投递并透出驱动错误，实际: %v", err)
 	}
 	if drv.calls != 1 {

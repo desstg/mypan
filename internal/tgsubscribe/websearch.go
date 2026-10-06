@@ -380,9 +380,30 @@ func (s *Service) prepareWebRecord(
 	return webRecordCandidate{rec: rec, rel: parsed, decision: decision}, true
 }
 
+// finalizeWebRecord 给一条搜索命中做画质门槛与去重，返回「要不要落库」。
+//
+// 手动与自动两条搜索路径共用它，唯一的分歧在判成 pending 之后（见三个 ingest 函数）。
+//
+// ⚠️ **手动路径也必须过这道门**，这是有来历的：过去只有自动路径调 applyQualityAndDedupe，
+// 手动「搜网盘」直接标 ambiguous 落库 —— 于是画质方案的排除词对手动搜来的结果完全失效。
+// 实测后果：搜「起义」时搜到 `The.Uprising.2026.CAM.1080p`（枪版）与 `TCAM`，
+// 用户点一下「立即推送」就推进了网盘，而方案的 exclude_keywords 里明明写着 CAM/TS。
+func (s *Service) finalizeWebRecord(
+	ctx context.Context,
+	rec *domain.TGMatchRecord,
+	rel ReleaseName,
+	decision MatchDecision,
+) bool {
+	// applyQualityAndDedupe 会把状态定成 pending / filtered / duplicate，
+	// 并写进 QualityScore —— 排序、洗版基线、画质展示全靠它。
+	s.applyQualityAndDedupe(ctx, &rel, rec, decision)
+	return rec.Status != domain.TGRecordFiltered && rec.Status != domain.TGRecordDuplicate
+}
+
 // ingestWebHit 把一条搜索结果按「只落库」的链路处理，报告是否新落了一条记录。
 //
-// 手动「搜网盘」走这条：无条件标「待确认」，等用户自己看过再点推送。
+// 手动「搜网盘」走这条：**过一遍画质门槛**（排除词/最低分辨率/体积上限），
+// 过了就无条件标「待确认」，等用户自己看过再点推送。
 func (s *Service) ingestWebHit(
 	ctx context.Context,
 	hit webHit,
@@ -391,6 +412,12 @@ func (s *Service) ingestWebHit(
 ) bool {
 	cand, ok := s.prepareWebRecord(hit, subs, subID)
 	if !ok {
+		return false
+	}
+	if !s.finalizeWebRecord(ctx, cand.rec, cand.rel, cand.decision) {
+		// 被判成 filtered / duplicate（枪版、低于最低分辨率、已入库…）。
+		// 不落库：手动搜索的意图是「搜出来给我看看」，把注定不该推的东西
+		// 摆到用户面前，只会诱导他点下那个「立即推送」。
 		return false
 	}
 	cand.rec.Status = domain.TGRecordAmbiguous
@@ -417,7 +444,10 @@ func (s *Service) ingestWebHitAuto(
 	rec := cand.rec
 
 	// 这一步会把状态定成 pending / filtered / duplicate（见 handler.go:134）。
-	s.applyQualityAndDedupe(ctx, &cand.rel, rec, cand.decision)
+	if !s.finalizeWebRecord(ctx, rec, cand.rel, cand.decision) {
+		// filtered（枪版/低于门槛）与 duplicate（已入库/低于洗版基线）都不该占一条历史。
+		return false
+	}
 
 	if rec.Status == domain.TGRecordPending {
 		rec.Reason = "自动网盘搜索命中（" + cand.decision.Reason + "）"

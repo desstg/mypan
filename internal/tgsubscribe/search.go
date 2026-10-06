@@ -164,7 +164,10 @@ func (s *Service) ingestHistoryPost(
 			continue
 		}
 		rec := s.buildHistoryRecord(ch, msg, res)
-		decision := s.decide(ParseReleaseName(res.DisplayName), subs)
+		rel := ParseReleaseName(res.DisplayName)
+		rel.SizeBytes = res.SizeBytes
+		rel.NameSource = res.NameSource
+		decision := s.decide(rel, subs)
 		if decision.Best == nil || decision.Best.Subscription.ID != subID {
 			// 搜索是针对这条订阅做的：没匹配上它，就不该留下记录 ——
 			// 否则匹配历史会被「搜了但无关」的帖子刷满。
@@ -172,6 +175,15 @@ func (s *Service) ingestHistoryPost(
 		}
 		rec.SubscriptionID = subID
 		rec.MatchScore = decision.Best.Score
+
+		// 画质门槛与去重同样要过。翻旧账搜到的帖子里枪版、预告、已入库的集数
+		// 一样常见，把它们摆进「待确认」只会诱导用户点下那个「立即推送」。
+		// 只判画质，**不碰聚合窗口**：TouchPending / MarkMatched 是「新帖」语义，
+		// 对翻旧账不适用（这也是本函数刻意不复用 processResource 的原因）。
+		if !s.finalizeWebRecord(ctx, rec, rel, decision) {
+			continue
+		}
+
 		rec.Status = domain.TGRecordAmbiguous
 		rec.Reason = "历史搜索命中（" + decision.Reason + "），请确认后手动推送"
 

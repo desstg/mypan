@@ -377,17 +377,33 @@ defineExpose(
         <SettingsRow>
           <template #info>
             <SettingsRowLabel label="搜索服务地址" help-title="搜索服务地址">
-              <p>留空即用内置默认（公开的盘搜站点）。</p>
               <p>
-                每次搜索会把这个地址下的 /api/search 打一遍，一个关键词一次请求，
-                单次约 5–30 秒。
+                <strong>填哪个：</strong>自建盘搜的地址（<b>推荐</b>），或留空用内置默认。
+              </p>
+              <p>
+                <strong>怎么填：</strong>只填到端口，<b>不带</b> <code>/api/search</code>。
+                比如自建在 <code>192.168.31.4</code> 的 <code>805</code> 端口，
+                就填 <code>http://192.168.31.4:805</code>。局域网地址不要写
+                <code>127.0.0.1</code>。
+              </p>
+              <p>
+                <strong>为什么建议自建：</strong>内置默认是公开演示站
+                （<code>so.252035.xyz</code>），pansou 作者在 issue #46 里自己说过
+                「被薅到摆烂、返回 mock 数据，效果可忽略」。自建只需 Docker 一条命令，
+                <b>不需要 Telegram 的 api_id/api_hash</b>。
+              </p>
+              <p>
+                <strong>两个坑：</strong>① 盘搜要能连上 t.me 才有 TG 频道那一半结果，
+                容器里记得配代理（<code>HTTPS_PROXY</code>，地址写宿主机的局域网 IP，
+                <b>不能写 127.0.0.1</b>——那指的是容器自己）；② 地址是内网的话，
+                下面那个「走全局代理」要<b>关掉</b>。
               </p>
             </SettingsRowLabel>
           </template>
           <template #control>
             <AppInput
               v-model="draft.web_search_base_url"
-              placeholder="https://so.252035.xyz"
+              placeholder="http://192.168.31.4:805"
             />
           </template>
         </SettingsRow>
@@ -418,10 +434,19 @@ defineExpose(
         <SettingsRow>
           <template #info>
             <SettingsRowLabel label="走全局代理" help-title="走全局代理">
-              <p>默认关闭。搜索站是国内的，直连通常就通。</p>
               <p>
-                「系统设置 → 其他设置 → 网络代理」里那个代理是给 t.me / TMDB 配的，
-                套在搜索站上反而多一个失败点。只有直连不通时才需要打开。
+                <strong>自建在局域网就关掉它</strong>（默认就是关的）——
+                内网地址套一层代理是平白多一个失败点。
+              </p>
+              <p>
+                打开只有一种情况：搜索地址是<b>墙外</b>的站点，直连不通。
+                那时它会借用「系统设置 → 其他设置 → 网络代理」里那个代理
+                （那个本来是给 t.me / TMDB 配的）。
+              </p>
+              <p>
+                ⚠️ 它只决定<b>「本应用怎么连搜索服务」</b>，
+                不是「把代理借给盘搜用」。盘搜自己要连 t.me 的话，
+                得在<b>它的容器</b>里配 <code>HTTPS_PROXY</code>，这里改不了。
               </p>
             </SettingsRowLabel>
           </template>

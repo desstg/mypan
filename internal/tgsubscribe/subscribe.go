@@ -3,6 +3,7 @@ package tgsubscribe
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -1209,7 +1210,12 @@ func recordView(rec *domain.TGMatchRecord, subTitle string) RecordView {
 //
 // subscriptionID 非零时可以把记录改挂到用户手动指定的订阅上 —— 这正是
 // ambiguous 记录的处理方式：系统不敢赌，让用户点一下。
-func (s *Service) ManualPush(ctx context.Context, recordID, subscriptionID int64) (*RecordView, error) {
+//
+// force 为 false 时会先过一道「这条到底是不是这部片」的闸（见 pushRisk）：
+// 判不过就返回一条需要确认的错误、**不改任何状态**，由前端问过用户之后
+// 带 force=true 再来一次。按钮本身仍对任何状态可用 —— 拦的是「不知道自己在推什么」，
+// 不是「不许推」。
+func (s *Service) ManualPush(ctx context.Context, recordID, subscriptionID int64, force bool) (*RecordView, error) {
 	rec, err := s.records.Get(ctx, recordID)
 	if err != nil {
 		return nil, err
@@ -1254,6 +1260,33 @@ func (s *Service) ManualPush(ctx context.Context, recordID, subscriptionID int64
 			"当前版本只识别%s、不支持投递，无法手动推送", labelKind(recordKind(rec)))
 	}
 
+	// 手动推送**重算画质分**。
+	//
+	// 库里的 quality_score 有两个会误导的取值：
+	//   - 老记录（画质判定接入前入库的，或某条路径漏跑了判定）是 0；
+	//   - 手动搜索那条路在改成「也过画质门槛」之前，落库的分也是 0。
+	//
+	// 于是「明明画质对得上、分却是 0」，而 0 会写进洗版基线（MarkPushed 只升不降，
+	// 0 一旦成为基线就再也升不上去）—— 之后这个订阅的候选会全部被判成「未超过基线」。
+	// 所以推之前按当前的画质方案重算一次，把真实分数带回基线。
+	//
+	// ⚠️ 只重算、不拦截：用户点「立即推送」的意图就是「我要这一条」，
+	// 画质门槛不该在这里二次把关（那是进窗口时的职责）。
+	if verdict := Evaluate(ParseReleaseName(rec.RawName), s.qualityConfigForSub(ctx, sub)); verdict.Passed {
+		rec.QualityScore = verdict.Score
+	}
+
+	// 误推闸门：这一条到底是不是这部片。详见 pushRisk 的注释。
+	//
+	// ⚠️ 放在**投递之前**、且失败时**不改任何状态**：它拦下的是「用户还不知道自己
+	// 在推什么」，不是「这条不能推」。用户看完说明再点一次 force=true 就该照常走，
+	// 而不是被记成一次失败推送。
+	if !force {
+		if risk := s.pushRisk(ctx, rec, sub); risk != nil {
+			return nil, domain.Errorf(domain.CodeValidation, "需要确认：%s", risk.Description())
+		}
+	}
+
 	rec.SubscriptionID = sub.ID
 	if err := s.pushRecord(ctx, sub, rec); err != nil {
 		// 确定性失败（提取码错 / 分享失效 / 目录对不上）标成「不会重试」：
@@ -1274,6 +1307,89 @@ func (s *Service) ManualPush(ctx context.Context, recordID, subscriptionID int64
 	}
 	view := recordView(rec, sub.Title)
 	return &view, nil
+}
+
+// ————————————————————— 误推闸门 —————————————————————
+
+// riskyMatchThreshold 是「手动推送前要用户再确认一次」的匹配分下限。
+//
+// 取 ambiguous 的下界（55）而不是另一个新数字：低于它的记录，匹配算法的定义就是
+// 「没对上任何订阅」。实测踩到的后果 —— 一条 `电影：太空炮弹 (1987)`（match_score=0，
+// 它自己的 reason 白纸黑字写着「没有匹配上任何订阅」）被推进了「侠探杰克 (2022)」的
+// 目录，而转存成功时**没有任何迹象**，用户要翻网盘才会发现。
+//
+// 拦的不是「分低」本身（用户有权推任何东西），而是「用户不知道自己正在推什么」。
+const riskyMatchThreshold = matchAmbiguousThreshold
+
+// PushRisk 描述一次手动推送为什么需要用户二次确认。
+type PushRisk struct {
+	// Reason 是给用户看的一句话，说清这条记录哪里可疑。
+	Reason string `json:"reason"`
+	// CurrentScore 是记录当前的匹配分，0 表示从未匹配上过。
+	CurrentScore float64 `json:"current_score"`
+	// RecheckScore 是「按目标订阅重新算一遍」的匹配分（负数表示没算出来）。
+	//
+	// 它是**针对目标订阅**算的，而记录上那个分是「当初对着全量订阅挑出来的最高分」——
+	// 用户中途改了订阅、或这条来自另一条订阅的搜索，两者就会不一样。
+	RecheckScore float64 `json:"recheck_score"`
+	// MatchedTitle 是重新算分时命中的订阅名（没命中时为空）。
+	MatchedTitle string `json:"matched_title"`
+}
+
+// Description 拼一句人类可读的说明。
+func (r PushRisk) Description() string {
+	if r.MatchedTitle != "" {
+		return fmt.Sprintf("%s（与目标订阅「%s」的匹配分仅 %.0f）",
+			r.Reason, r.MatchedTitle, r.RecheckScore)
+	}
+	return fmt.Sprintf("%s（匹配分 %.0f，与目标订阅对不上）", r.Reason, r.RecheckScore)
+}
+
+// pushRisk 判断手动推送一条记录是否需要用户二次确认。返回 nil 表示可以直接推。
+//
+// 判据只有一条：**按目标订阅重算一遍**，看这条资源到底是不是这部片。
+// 记录自带的 match_score 是「当初对着全量订阅挑出来的最高分」，而用户可能中途
+// 改了订阅、或这条来自另一条订阅的搜索 —— 所以重算才是准的。
+//
+// 不拿「记录自己的分」直接下结论，也不去查来源频道比一遍：前者的口径与目标订阅
+// 无关，后者要假设记录的 channel_id 与 chat_title 是一起写进去的（事实并非总是如此，
+// 见过 channel_id=0 却有 chat_title 的老行）。少一个假设就少一条会误伤的路。
+//
+// ⚠️ 重算失败（订阅被删、片名解析不出）一律放行：拦在这里会把一条本来能推的
+// 资源卡死，而这道闸的全部意义只是「让用户看一眼」。
+func (s *Service) pushRisk(_ context.Context, rec *domain.TGMatchRecord, sub *domain.TGSubscription) *PushRisk {
+	if rec == nil || sub == nil {
+		return nil
+	}
+	if rec.MatchScore >= riskyMatchThreshold {
+		return nil
+	}
+
+	risk := &PushRisk{
+		Reason:       fmt.Sprintf("这条记录的匹配分只有 %.0f，低于「算匹配上」的门槛 %.0f", rec.MatchScore, riskyMatchThreshold),
+		CurrentScore: rec.MatchScore,
+		RecheckScore: -1,
+		MatchedTitle: sub.Title,
+	}
+
+	rel := ParseReleaseName(rec.RawName)
+	if rel.Raw == "" {
+		return risk
+	}
+	rel.SizeBytes = rec.SizeBytes
+	rel.NameSource = rec.NameSource
+
+	scored := ScoreCandidate(rel, sub)
+	risk.RecheckScore = scored.Score
+	if scored.Score >= riskyMatchThreshold {
+		// 片名年份都对得上，只是记录上那个分是别处写坏的 —— 放行。
+		return nil
+	}
+	risk.Reason = "这条资源与目标订阅对不上（片名/年份不符）"
+	if strings.TrimSpace(scored.Reason) != "" {
+		risk.Reason += "：" + scored.Reason
+	}
+	return risk
 }
 
 // IgnoreRecord 人工忽略一条记录。

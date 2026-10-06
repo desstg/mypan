@@ -654,6 +654,9 @@ func (h *Handler) getTGRecord(w http.ResponseWriter, r *http.Request) {
 
 type tgManualPushReq struct {
 	SubscriptionID int64 `json:"subscription_id"`
+	// Force 跳过「这条到底是不是这部片」的二次确认（见 Service.pushRisk）。
+	// 前端第一次推送不带它，拿到「需要确认」的错误后问过用户再带 true 重发。
+	Force bool `json:"force"`
 }
 
 // pushTGRecord 手动推送。待确认 / 未匹配 / 推送失败的兜底入口 ——
@@ -674,7 +677,7 @@ func (h *Handler) pushTGRecord(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	view, err := h.tgSubscribe.ManualPush(r.Context(), id, req.SubscriptionID)
+	view, err := h.tgSubscribe.ManualPush(r.Context(), id, req.SubscriptionID, req.Force)
 	if err != nil {
 		writeErr(w, err)
 		return

@@ -175,19 +175,61 @@ async function copyMagnet(record: TGMatchRecord) {
   else toast.error("复制失败，请手动选择");
 }
 
-/** 手动推送：待确认 / 未匹配 / 推送失败的兜底入口。 */
+/**
+ * 手动推送：待确认 / 未匹配 / 推送失败的兜底入口。
+ *
+ * 整理成两步而不是一步，是因为后端会对「匹配分低于门槛」的记录先拒一次，
+ * 报出「这条资源与目标订阅对不上」——那正是要拦的场景：实测有一条
+ * `电影：太空炮弹 (1987)`（它自己的理由白纸黑字写着「没有匹配上任何订阅」）
+ * 被推进了《侠探杰克》的目录，而转存成功时**没有任何迹象**，要翻网盘才发现。
+ *
+ * 那道闸**不改任何状态**，所以「问过用户再带 force 重发」是唯一正确的姿势；
+ * 也别在这里自己判分数 —— 判据在后端，前端复刻一份迟早漂移。
+ */
 async function manualPush() {
   if (!active.value) return;
+  const record = active.value;
   pushing.value = true;
+  let pushed = false;
   try {
-    await pushTGRecord(active.value.id, manualSubId.value);
+    await pushTGRecord(record.id, manualSubId.value);
+    pushed = true;
+  } catch (error) {
+    const message = getApiErrorMessage(error, "推送失败");
+    // 只有「需要确认」这一种错值得追问；其余（分享失效、不支持投递…）照原样报。
+    if (message.includes("需要确认")) {
+      let ok = false;
+      try {
+        await confirm({
+          title: "这条资源可能不是这部片",
+          message: `${message}\n\n确认仍要推送吗？`,
+          confirmText: "仍然推送",
+          danger: true,
+          icon: "warning",
+        });
+        ok = true;
+      } catch {
+        // 用户放弃 —— 什么都不做，弹窗留着让他看别的候选。
+      }
+      if (ok) {
+        try {
+          await pushTGRecord(record.id, manualSubId.value, true);
+          pushed = true;
+        } catch (retryError) {
+          toast.error(getApiErrorMessage(retryError, "推送失败"));
+        }
+      }
+    } else {
+      toast.error(message);
+    }
+  } finally {
+    pushing.value = false;
+  }
+  // 只有真推成功了才关弹窗、刷列表；失败时留着，用户要看到原因并接着处理。
+  if (pushed) {
     toast.success("已提交推送，稍后可在任务管理里看到离线任务");
     detailOpen.value = false;
     await load();
-  } catch (error) {
-    toast.error(getApiErrorMessage(error, "推送失败"));
-  } finally {
-    pushing.value = false;
   }
 }
 

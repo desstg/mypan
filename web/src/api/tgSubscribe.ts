@@ -245,9 +245,18 @@ export function fetchTGRecord(id: number) {
   return http.get<TGMatchRecord>(`${BASE}/records/${id}`);
 }
 
-/** 手动推送：待确认 / 未匹配 / 推送失败的兜底入口。 */
-export function pushTGRecord(id: number, subscriptionId = 0) {
-  return http.post<TGMatchRecord>(`${BASE}/records/${id}/push`, { subscription_id: subscriptionId });
+/**
+ * 手动推送：待确认 / 未匹配 / 推送失败的兜底入口。
+ *
+ * force=false 时后端会先做一次「这条到底是不是这部片」的确认，判不过就抛错
+ * （错误信息里带着可疑的原因），由调用方问过用户之后带 force=true 重发。
+ * 那个错误**不改任何状态**，所以问完再推一次是安全的。
+ */
+export function pushTGRecord(id: number, subscriptionId = 0, force = false) {
+  return http.post<TGMatchRecord>(`${BASE}/records/${id}/push`, {
+    subscription_id: subscriptionId,
+    force,
+  });
 }
 
 export function ignoreTGRecord(id: number) {

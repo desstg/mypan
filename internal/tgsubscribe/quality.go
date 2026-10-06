@@ -82,7 +82,7 @@ func Evaluate(rel ReleaseName, cfg domain.TGQualityConfig) QualityVerdict {
 
 // matchExcludeKeyword 返回第一个命中的排除词。
 //
-// 排除词同时检查原文（保留大小写语义的中文词）和归一化名（英文词不区分大小写）。
+// 分成两套判据，因为「短 ASCII 词」和「中文词 / 长英文词」的误伤面差着量级。
 func matchExcludeKeyword(rel ReleaseName, keywords []string) string {
 	if len(keywords) == 0 {
 		return ""
@@ -92,6 +92,12 @@ func matchExcludeKeyword(rel ReleaseName, keywords []string) string {
 	for _, kw := range keywords {
 		kw = strings.TrimSpace(kw)
 		if kw == "" {
+			continue
+		}
+		if isShortASCIIKeyword(kw) {
+			if matchShortExcludeKeyword(rel, haystackNormalized, kw) {
+				return kw
+			}
 			continue
 		}
 		lower := strings.ToLower(kw)
@@ -104,6 +110,63 @@ func matchExcludeKeyword(rel ReleaseName, keywords []string) string {
 		}
 	}
 	return ""
+}
+
+// shortExcludeKeywordMaxLen 是「必须整词命中」的短关键词长度上限。
+//
+// 这条规则是有来历的。排除词一直用子串匹配，而 `TS` 这种两三个字母的词当子串会
+// 吃掉一整类完全正常的资源 —— 实测本地库里 24 条被判「命中排除词 TS」的记录中
+// **21 条是误伤**：`CHS-ENG.BTSJ6`（压制组）、`DTS-HD.MA`（音轨）、`YTS.GG`（站点）、
+// `[SweetSub&VCB-Studio]`（字幕组）、`RDTSHDMA`（音轨）、`-Kitsune`/`-Tsun`（发布组）。
+// 它们全都是「ts 恰好出现在别的词里」。
+//
+// 长词（Trailer / Sample）与中文词（枪版 / 预告 / 抢先）没有这个问题：它们不会
+// 作为子串出现在无关的词里，所以继续按子串匹配，行为不变。
+const shortExcludeKeywordMaxLen = 4
+
+// matchShortExcludeKeyword 判断一个短 ASCII 排除词是否命中。
+//
+// 两条路，缺一不可：
+//   - 与解析出的**片源全等** —— 覆盖 `HDCAM` / `CAMRip` / `HDTS` 这类粘连写法：
+//     它们归一化后是单个词，整词比对认不出来，但 canonicalSource 早就认得出
+//     （`sourceFromRaw` 的候选表里本来就有 hdcam / cam / hdts / telesync）。
+//   - 归一化串里的**独立整词** —— 覆盖 `.CAM.` / `CAM-Rip` / `.avi.ts` 这类
+//     分隔清楚的写法（NormalizeName 已把 . - _ 等分隔符换成空格并转小写）。
+//
+// **刻意不做子串**：那正是把 BTSJ6 / DTS-HD / YTS.GG 判成 TS 的原因。
+//
+// 已知取舍：这样 `Rip` 这类词不再能匹配 `WEBRip` / `CAMRip`（粘连词只认片源全等）。
+// 但把 `Rip` 当排除词本来就会排掉绝大多数资源，不是有意义的配置。
+func matchShortExcludeKeyword(rel ReleaseName, normalizedHaystack, kw string) bool {
+	if strings.EqualFold(strings.TrimSpace(rel.Source), strings.TrimSpace(kw)) {
+		return true
+	}
+	want := strings.ToLower(strings.TrimSpace(kw))
+	for _, tok := range strings.Fields(normalizedHaystack) {
+		if tok == want {
+			return true
+		}
+	}
+	return false
+}
+
+// isShortASCIIKeyword 报告关键词是不是「短、且全是 ASCII 字母数字」。
+//
+// 按**字节**判断即可：多字节字符的每个字节都 >= 0x80，所以中文词天然返回 false，
+// 不必引入 unicode 包。
+func isShortASCIIKeyword(kw string) bool {
+	if kw == "" || len(kw) > shortExcludeKeywordMaxLen {
+		return false
+	}
+	for i := 0; i < len(kw); i++ {
+		c := kw[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // weightedQualityScore 按方案的三条有序优先级列表算加权分。
