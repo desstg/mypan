@@ -779,9 +779,31 @@ func (r *tgMatchRecordRepo) CountByChannel(ctx context.Context) (map[int64]int64
 	return out, wrapDB(rows.Err())
 }
 
+// pendingReviewStatuses 是「等用户处理」的状态 —— 按时间清理时要留下它们。
+//
+// 这些状态是**终态**：系统已经判完了，等的是用户点一下（推送 / 忽略）。
+// 用户还没看就被删掉，等于「我明明在匹配历史里见过一条，回头找不着了」。
+//
+// 它们不会无限增长：处理之后状态会变成 pushed / ignored，那时才轮到按时间清。
+// 未处理的那部分本来就是用户欠下的待办，不该由系统替他扔掉。
+var pendingReviewStatuses = []string{
+	domain.TGRecordAmbiguous,
+	domain.TGRecordUnmatched,
+	domain.TGRecordFailed,
+	domain.TGRecordUnretryable,
+	domain.TGRecordUnsupported,
+}
+
 func (r *tgMatchRecordRepo) ClearBefore(ctx context.Context, before time.Time) (int64, error) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(pendingReviewStatuses)), ",")
+	args := make([]any, 0, len(pendingReviewStatuses)+1)
+	args = append(args, before.UTC().Format(tsLayout))
+	for _, st := range pendingReviewStatuses {
+		args = append(args, st)
+	}
 	res, err := r.db.write.ExecContext(ctx,
-		`DELETE FROM tg_match_records WHERE created_at < ?`, before.UTC().Format(tsLayout))
+		`DELETE FROM tg_match_records WHERE created_at < ? AND status NOT IN (`+placeholders+`)`,
+		args...)
 	if err != nil {
 		return 0, wrapDB(err)
 	}

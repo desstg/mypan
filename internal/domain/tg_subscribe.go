@@ -300,5 +300,14 @@ type TGMatchRecordRepository interface {
 	// 帖子数一直涨、产出一直是 0，用户自己就能判断这个频道抓不到内容
 	// （最常见的原因是用「点击复制」按钮发资源，而网页预览不渲染这类按钮）。
 	CountByChannel(ctx context.Context) (map[int64]int64, error)
+	// ClearBefore 删除 before 之前的记录，**但保留用户还没处理过的那些**。
+	//
+	// ⚠️ 不能只按时间删。ambiguous（待确认）/ unmatched（未匹配）/ failed /
+	// unretryable / unsupported 这些状态的意思是「等你来看一眼」—— 用户还没处理
+	// 就被静默删掉，等于「我明明看到过一条，回头找不着了」。实测库里 1137 条记录里
+	// 有 93 条 ambiguous、618 条 unmatched，全都躺在那儿等用户。
+	//
+	// 保留它们不会无限增长：这些状态是终态，用户处理（推送 / 忽略）之后
+	// 会变成 pushed / ignored，那时才按时间被清掉。
 	ClearBefore(ctx context.Context, before time.Time) (int64, error)
 }

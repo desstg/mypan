@@ -270,6 +270,9 @@ func (s *Service) Start(ctx context.Context) {
 	// t.me 的限速语义，而这里打的是另一个站、另有自己的间隔与预算。两条都靠
 	// inner 的 cancel 退出，与抓取循环同一个生命周期。
 	go s.webSearchLoop(inner)
+	// 季集/别名快照刷新。独立 goroutine：它打的是 TMDB，与 t.me 抓取、
+	// 外部搜索站都不是同一套限速语义，靠 inner 的 cancel 退出。
+	go s.seasonsRefreshLoop(inner)
 }
 
 // Stop 停掉两个 loop。调用方必须保证它在 eventbus.Close 之前执行 ——

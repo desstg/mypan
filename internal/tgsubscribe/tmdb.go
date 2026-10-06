@@ -14,6 +14,7 @@ import (
 	"litepan/internal/domain"
 	"litepan/internal/mediaorganize/tmdb"
 	"litepan/internal/settings"
+	"litepan/internal/startupwait"
 )
 
 // 别名条目数上限。
@@ -173,6 +174,148 @@ func (s *Service) FetchSubscriptionMeta(ctx context.Context, tmdbID, mediaType s
 		}
 	}
 	return meta
+}
+
+// seasonsRefreshInterval 是「多久回 TMDB 刷一次季集快照」。
+//
+// 定在 12 小时：季集只会随播出增长，一天两次足够跟上任何剧的更新节奏；
+// 而订阅数一多，每刷一条就是 1 次 TMDB 请求（受 tmdbGap 限速），
+// 定太短会在订阅多时把配额吃掉。
+const seasonsRefreshInterval = 12 * time.Hour
+
+// seasonsRefreshBatch 是一轮最多刷几条订阅，避免一次开机就把配额打满。
+const seasonsRefreshBatch = 8
+
+// seasonsRefreshLoop 定期回 TMDB 刷新季集快照。
+//
+// 为什么非有它不可：`seasons_json` 是**建订阅时固化的一次性快照**，从不刷新。
+// 于是剧集播了新集之后，详情页仍按老的集数画格子 —— 新集**根本没有格子**，
+// 用户看不到「还缺第 9 集」，订阅也永远判不出「收齐了」（maybeComplete 拿的还是
+// 老数字）。实测：绿灯军团建订阅时记 8 集，而 TMDB 上已经播到第 9 集。
+//
+// 顺带一起刷别名：它同样是快照，而别名参与匹配打分（TMDB 会陆续补各地区译名，
+// 新译名往往正是频道里在用的那个）。
+//
+// 只改「变多了」的方向：季集数只增不减（除非 TMDB 修正错误数据），
+// 而无条件覆盖会把一次 TMDB 抖动（返回空数组）变成「订阅的季集被清空」。
+func (s *Service) seasonsRefreshLoop(ctx context.Context) {
+	if !startupwait.Ready(ctx, s.startupGate) {
+		return
+	}
+	if !startupwait.Delay(ctx, startupDelayAfterAuth) {
+		return
+	}
+	ticker := time.NewTicker(schedulerTick)
+	defer ticker.Stop()
+
+	next := make(map[int64]time.Time)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		subs, err := s.subs.List(ctx, "")
+		if err != nil {
+			continue
+		}
+		now := time.Now()
+		alive := make(map[int64]struct{}, len(subs))
+		refreshed := 0
+		for _, sub := range subs {
+			if sub == nil || sub.MediaType != domain.TGMediaTypeTV {
+				continue
+			}
+			alive[sub.ID] = struct{}{}
+			due, ok := next[sub.ID]
+			if !ok {
+				// 首轮加抖动，否则重启之后所有订阅挤在同一秒被串行刷一遍。
+				next[sub.ID] = now.Add(jitter(seasonsRefreshInterval))
+				continue
+			}
+			if due.After(now) || refreshed >= seasonsRefreshBatch {
+				continue
+			}
+			s.refreshSubscriptionSeasons(ctx, sub)
+			next[sub.ID] = time.Now().Add(seasonsRefreshInterval)
+			refreshed++
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		for id := range next {
+			if _, ok := alive[id]; !ok {
+				delete(next, id)
+			}
+		}
+	}
+}
+
+// refreshSubscriptionSeasons 刷一条订阅的季集与别名，只往「变多」的方向改。
+func (s *Service) refreshSubscriptionSeasons(ctx context.Context, sub *domain.TGSubscription) {
+	meta := s.FetchSubscriptionMeta(ctx, sub.TMDBID, sub.MediaType)
+	changed := false
+
+	if grew := seasonsGrew(sub.Seasons, meta.Seasons); grew {
+		sub.Seasons = meta.Seasons
+		sub.SeasonsSyncedAt = time.Now()
+		changed = true
+	}
+	// 别名：只在拿到非空结果时替换（TMDB 抖动回空时保住旧的那份）。
+	if len(meta.Aliases) > 0 && !sameAliases(sub.Aliases, meta.Aliases) {
+		sub.Aliases = meta.Aliases
+		sub.AliasesSyncedAt = time.Now()
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if err := s.subs.Update(ctx, sub); err != nil {
+		s.log.Warn("tg subscribe refresh seasons failed", "sub", sub.ID, "err", err)
+		return
+	}
+	s.InvalidateSnapshot()
+	s.log.Info("tg subscribe seasons refreshed", "sub", sub.ID, "title", sub.Title)
+}
+
+// seasonsGrew 报告新快照的「已播出集数」是不是比旧的多。
+//
+// 用已播出集数而不是数组长度比：季的增减不常见，而集数增长才是要追的东西。
+// 比不出来（任一侧解不出）时返回 false —— 宁可不刷，也不要拿一份解不出的
+// 数据去覆盖好的那份。
+func seasonsGrew(oldRaw, newRaw json.RawMessage) bool {
+	if len(newRaw) == 0 {
+		return false
+	}
+	now := time.Now()
+	oldTotal, okOld := airedEpisodeTotal(oldRaw, now)
+	newTotal, okNew := airedEpisodeTotal(newRaw, now)
+	if !okNew {
+		return false
+	}
+	if !okOld {
+		// 老快照解不出来（空数组 / 格式变了）→ 拿新的顶上。
+		return true
+	}
+	return newTotal > oldTotal
+}
+
+// sameAliases 比较两份别名清单是否等价（顺序无关）。
+func sameAliases(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(a))
+	for _, v := range a {
+		seen[v] = struct{}{}
+	}
+	for _, v := range b {
+		if _, ok := seen[v]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // extractAlternativeTitles 解析 alternative_titles 响应。

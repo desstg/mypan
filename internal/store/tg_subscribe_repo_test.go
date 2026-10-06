@@ -546,7 +546,13 @@ func TestTGMatchRecordListAndRetry(t *testing.T) {
 		t.Fatalf("unexpected counts: %+v", counts)
 	}
 
-	// ClearBefore：清掉历史，保留今天。
+	// ClearBefore：**只清「系统已经处理完」的那些**，等用户看一眼的状态要留下。
+	//
+	// 四种状态正好各代表一类：
+	//   h1 unmatched  → 等用户处理，留下
+	//   h2 filtered   → 系统判完了，可以清
+	//   h3 pending    → 在窗口里，可以清
+	//   h4 failed     → 等用户处理（或退避重试），留下
 	cleared, err := s.TGMatchRecords.ClearBefore(ctx, now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("clear before: %v", err)
@@ -558,8 +564,20 @@ func TestTGMatchRecordListAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clear before 2: %v", err)
 	}
-	if cleared != 4 {
-		t.Fatalf("expected 4 cleared, got %d", cleared)
+	if cleared != 2 {
+		t.Fatalf("expected 2 cleared (filtered + pending)，实际 %d", cleared)
+	}
+	list, total, err = s.TGMatchRecords.List(ctx, domain.TGMatchRecordFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("list after clear: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("库里该剩 2 条等用户处理的，实际 %d", total)
+	}
+	for _, rec := range list {
+		if rec.Status != domain.TGRecordUnmatched && rec.Status != domain.TGRecordFailed {
+			t.Errorf("不该留下 %q 状态的记录", rec.Status)
+		}
 	}
 	_ = store.Options{}
 }
