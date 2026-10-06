@@ -125,6 +125,17 @@ type StrmScanPatch struct {
 	RemovedCount   int64
 	LastScan       time.Time
 	LastScanStatus string
+	// PreserveStats 为真时，这一格里那几个**统计列**（计数、last_scan、
+	// last_scan_status）保持库里的原值不动，只写 status / paused_reason /
+	// error_message。
+	//
+	// 给「开跑前把状态改成 running」用的：那次调用手上没有任何统计，
+	// LastScan 是零值，而零值经 tsValue 落库是 NULL —— 于是任务一进 running，
+	// 上一次的扫描时间就被抹掉了。后果不只是界面上少一行：
+	// 调度器判「到点了吗」读的正是 last_scan，它变成零值之后
+	// `LastScan.IsZero()` 为真 → 间隔判据恒过。task 还在跑时靠 running 标志
+	// 挡着不至于并发，但**任何一次失败的扫描**之后它就会变成「每 30 秒一轮」。
+	PreserveStats bool
 }
 
 // StrmTaskRepository 定义 STRM 任务持久化端口。

@@ -137,10 +137,14 @@ func (s *Service) runTaskAsync(task *domain.StrmTask) {
 			reportProgress := s.beginLiveScan(task.ID)
 			defer s.endLiveScan(task.ID)
 
+			// 标记开跑。**必须 PreserveStats** —— 这次调用手上没有任何统计，
+			// LastScan 是零值，直接写下去会把上一次的扫描时间抹成 NULL。
+			// 详见 domain.StrmScanPatch.PreserveStats。
 			_ = s.updateScanPersist(task.ID, domain.StrmScanPatch{
-				Status:       domain.StrmStatusRunning,
-				PausedReason: "",
-				ErrorMessage: "",
+				Status:        domain.StrmStatusRunning,
+				PausedReason:  "",
+				ErrorMessage:  "",
+				PreserveStats: true,
 			})
 			token, err := s.ensureToken(ctx)
 			if err != nil {

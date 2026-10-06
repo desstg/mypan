@@ -94,6 +94,19 @@ func (r *strmTaskRepo) ListByAccount(ctx context.Context, accountID int64) ([]*d
 }
 
 func (r *strmTaskRepo) UpdateScan(ctx context.Context, id int64, patch domain.StrmScanPatch) error {
+	// PreserveStats：只写状态那三列。
+	//
+	// 见 domain.StrmScanPatch 上的说明：「开跑前标 running」那次调用手上没有统计，
+	// LastScan 是零值、经 tsValue 落库成 NULL —— 那会把上一次的扫描时间抹掉，
+	// 而调度器判「到点了吗」读的正是它。
+	if patch.PreserveStats {
+		_, err := r.db.write.ExecContext(ctx,
+			`UPDATE strm_tasks
+			 SET status=?,paused_reason=?,error_message=?,updated_at=CURRENT_TIMESTAMP
+			 WHERE id=?`,
+			patch.Status, patch.PausedReason, patch.ErrorMessage, id)
+		return wrapDB(err)
+	}
 	_, err := r.db.write.ExecContext(ctx,
 		`UPDATE strm_tasks
 		 SET status=?,paused_reason=?,error_message=?,

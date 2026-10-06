@@ -515,6 +515,11 @@ type JavMovieRepository interface {
 	// （详情抓回来的比从番号前缀猜的准）。逐条查库在几百条结果是几百次 SQL，
 	// 所以一次取回。
 	TypesByIDs(ctx context.Context, ids []string) (map[string]string, error)
+	// TagVocabulary 返回库里出现过的全部标签（去重、已排序）。
+	//
+	// 给「订阅 → 类别过滤」的下拉当选项源。见 store 里那条注释：选项必须来自
+	// 判定所用的同一份数据（tags_json），否则会给出选了也没用的空选项。
+	TagVocabulary(ctx context.Context) ([]string, error)
 	// GetMany 一次取回一批影片，供「给订阅列表补封面」这类批量展示用。
 	// 逐条 Get 在订阅上百条时就是上百次 SQL。
 	GetMany(ctx context.Context, ids []string) ([]*JavMovie, error)

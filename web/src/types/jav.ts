@@ -698,13 +698,27 @@ export function javTopTypeParams(value: string): { type: string; typeValue: stri
   return { type: "year", typeValue: v };
 }
 
-/** 订阅弹窗里可勾选的质量。 */
+/**
+ * 订阅弹窗里可勾选的质量。
+ *
+ * `exclusive: true` 的那几项之间是**互斥**的（选了高清就选不了超清，反之亦然），
+ * 与「字幕 / 破解」这种可叠加的正交条件不同。这一条是**上游源码就有的**规则 ——
+ * 源码弹窗里写的是「无 / 高清 / 超清 只能选一个；字幕、破解可叠加」，
+ * 我们的后端判定与它一致（`Tags.Has` 是蕴含关系：超清蕴含高清），
+ * 所以这里必须跟着互斥，否则会出现「同时勾了高清和超清」这种既多余、
+ * 又让人以为能筛出「刚好 1080p」的错觉。
+ */
 export const JAV_QUALITY_OPTIONS = [
-  { value: "hd", label: "高清" },
-  { value: "uhd", label: "超清" },
-  { value: "subtitle", label: "字幕" },
-  { value: "uncensored", label: "破解" },
+  { value: "hd", label: "高清", exclusive: true },
+  { value: "uhd", label: "超清", exclusive: true },
+  { value: "subtitle", label: "字幕", exclusive: false },
+  { value: "uncensored", label: "破解", exclusive: false },
 ] as const;
+
+/** 互斥的那几档（分辨率）。判定与渲染都读它，别各写一份。 */
+export const JAV_EXCLUSIVE_QUALITIES: readonly string[] = JAV_QUALITY_OPTIONS.filter(
+  (q) => q.exclusive,
+).map((q) => q.value);
 
 export const JAV_DOWNLOAD_MODES = [
   { value: "strict", label: "严格模式" },

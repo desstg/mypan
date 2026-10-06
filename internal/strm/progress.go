@@ -198,7 +198,8 @@ func (s *Service) FixStaleRunningAsync(taskID int64) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.repo.UpdateScan(ctx, taskID, domain.StrmScanPatch{
-			Status: domain.StrmStatusActive,
+			Status:        domain.StrmStatusActive,
+			PreserveStats: true,
 		}); err != nil {
 			s.log.Warn("strm fix stale running failed", "task_id", taskID, "err", err)
 		}
@@ -218,7 +219,8 @@ func (s *Service) recoverStaleRunningTasks(ctx context.Context) {
 			continue
 		}
 		if err := s.repo.UpdateScan(persistCtx, task.ID, domain.StrmScanPatch{
-			Status: domain.StrmStatusActive,
+			Status:        domain.StrmStatusActive,
+			PreserveStats: true,
 		}); err != nil {
 			s.log.Warn("strm recover stale running task failed", "task_id", task.ID, "err", err)
 		}

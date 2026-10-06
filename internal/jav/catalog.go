@@ -1630,6 +1630,24 @@ func (s *Service) MoviesByActor(ctx context.Context, actorID string) ([]MovieCar
 	return toCards(movies, inLibrary), nil
 }
 
+// CategoryVocabulary 返回「类别过滤」两个下拉的选项：库里出现过的全部标签。
+//
+// 与 MoviesByActor 同一套形态（读本地库、不碰上游）。读失败时**返回空列表而不是
+// 错误**：这个清单只喂给订阅弹窗的选项列表，库里一个标签都没有（新装实例还没同步过
+// 影库）与读库出错，对用户而言是同一件事 —— 「现在没有可选项」。
+// 让整个弹窗因为选项拉不到而报错，比少两个选项糟糕得多。
+func (s *Service) CategoryVocabulary(ctx context.Context) []string {
+	tags, err := s.movies.TagVocabulary(ctx)
+	if err != nil {
+		s.logWarn("jav load category vocabulary failed", "err", err)
+		return []string{}
+	}
+	if tags == nil {
+		return []string{}
+	}
+	return tags
+}
+
 // libraryCodes 取媒体库里出现过的番号集合。
 //
 // 读失败时返回空集合而不是错误：它只影响卡片上那个「已入库」角标，

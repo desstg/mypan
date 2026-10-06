@@ -542,6 +542,11 @@ func NewRouter(d Deps) http.Handler {
 				// 演员
 				r.Get("/actors/{id}/movies", h.javActorMovies)
 
+				// 类别清单：订阅弹窗的「类别过滤」两个下拉的选项源。
+				// 取自本地影库的 tags_json —— 与订阅的判定用的是同一份数据，
+				// 所以不会出现「下拉里选得到、却没有任何影片能匹配」的空选项。
+				r.Get("/categories", h.javCategories)
+
 				// 订阅
 				// ⚠️ completed-movies 必须排在 /subscriptions/{id} 之前，
 				// 否则 "completed-movies" 会被当成一个订阅 id。

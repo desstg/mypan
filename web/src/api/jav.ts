@@ -547,6 +547,17 @@ export function lookupJavLibrary(code: string) {
 export type { JavPushRecord, JavPushResult };
 
 /**
+ * 取「类别过滤」两个下拉的选项：本地影库里出现过的全部标签。
+ *
+ * 取自本地库而不是上游的标签接口 —— 订阅的类别判定读的是库里的 tags_json，
+ * 选项也得来自同一处，否则会出现「下拉里选得到、却没有任何影片能匹配」的空选项。
+ * 列表随影库同步增长，所以面板里给了「刷新」。
+ */
+export function fetchJavCategories() {
+  return http.get<{ items: string[] }>(`${BASE}/categories`);
+}
+
+/**
  * 把上游封面地址转成本地图片代理地址。
  *
  * 必须走代理，不能让浏览器直接 src 上游 —— 两个原因（见 internal/jav/image.go）：

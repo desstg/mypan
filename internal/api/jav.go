@@ -600,3 +600,14 @@ func (h *Handler) javActorMovies(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOK(w, map[string]any{"items": items})
 }
+
+// javCategories 返回库里出现过的全部标签，给订阅弹窗的「类别过滤」当选项。
+//
+// 是 GET 且无副作用，但**没有**放进公开路由：标签来自本地影库，
+// 与「番号」整块一样属于后台数据。见 router 里那一组。
+func (h *Handler) javCategories(w http.ResponseWriter, r *http.Request) {
+	if !h.javReady(w) {
+		return
+	}
+	writeOK(w, map[string]any{"items": h.jav.CategoryVocabulary(r.Context())})
+}

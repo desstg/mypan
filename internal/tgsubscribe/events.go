@@ -45,21 +45,35 @@ func (s *Service) onOfflineDownloadCompleted(ctx context.Context, event eventbus
 	// 进度、还发一条「已入库」通知 —— 用户要等自己翻网盘才发现。
 	//
 	// ⚠️ 判空是**确定性失败**：同一个种子重投一次还会是空的，重试只是白调上游。
-	// 所以不设 NextRetryAt，留给用户在匹配历史里手动处理。
 	if err := s.verifyDeliveredNotEmpty(ctx, event.AccountID, event.TargetParentID, event.TargetDisplayPath); err != nil {
-		// ⚠️ 标 failed 而不是 unretryable：**推送本身是成功的**，失败在这里的是
-		// 「下载完成后目录里没有文件」这一步，用户重推一次是合理操作
-		// （换个种子往往就好了）。
+		// ⚠️⚠️ 必须是 **unretryable，不能是 failed**。这里原来写的是 failed +
+		// NextRetryAt 零值，理由是「推送本身是成功的，用户重推一次是合理的」——
+		// 但结果是一个**无限重推环**（2026-10-06 真机踩到）：
 		//
-		// 但必须清掉 NextRetryAt —— 不设的话 ListRetryable 会立刻把它捞出来，
-		// pushRecord 重推一次又拉出一个新的离线任务，而它同样会下载「成功」
-		// 却不落文件，如此循环。留给用户在匹配历史里自己决定。
+		//   NextRetryAt 的零值经 tsValue 落库是 **NULL**，而 ListRetryable 的判据是
+		//   `next_retry_at IS NULL OR next_retry_at <= now` —— **NULL 恰恰等于
+		//   「立刻重试」**，于是 dispatcher 每 10 秒把它捞出来重推一次；而每次重推
+		//   都会拉出一个新的离线任务，它同样「下载成功但不落文件」，于是：
+		//   推送 → 空目录 → 标 failed → 立刻重推 → …
+		//
+		//   实测《滑索惊魂》(sub 42 / record 63521) 这样转了一整天：**257 次**推送，
+		//   115 那边也真的重复收了两百多次请求 —— 正是官方 FAQ 说的
+		//   「短时间内获取次数太多」那类风控姿势。附带效应是每次投递都发一条
+		//   完成事件，把账号标脏，于是同账号的 STRM 任务（116）被无间隔地连着叫起来
+		//   扫了 261 轮。
+		//
+		// 这个坑 reconcile.go:161 早就写明白了（那边就因为同样的原因用了
+		// unretryable），只是这条路漏了。语义上这里也确实该是 unretryable：
+		// 「网盘报告成功但目录是空的」是**同一个种子的确定性结论**，
+		// 自动重投一百次也是一样的结果 —— 要换种子得由用户在匹配历史里手动来，
+		// 而 ManualPush 对任何状态都可用，所以拦住自动重试并不影响那条路。
 		s.log.Warn("tg subscribe offline download delivered nothing",
 			"record", rec.ID, "sub", rec.SubscriptionID, "task", event.TaskID, "err", err)
-		rec.Status = domain.TGRecordFailed
-		// 说清楚「推送本身是成功的」：不然用户看到 failed 会以为推送就没成，
+		rec.Status = domain.TGRecordUnretryable
+		// 说清楚「推送本身是成功的」：不然用户看到失败会以为推送就没成，
 		// 去重推一次，结果还是空的。
-		rec.Reason = "已推送成功，但下载完成后目标目录里没有文件：" + err.Error()
+		rec.Reason = "已推送成功，但下载完成后目标目录里没有文件（重试同一个种子也会是空的，" +
+			"可在匹配历史里换一条候选手动推送）：" + err.Error()
 		rec.NextRetryAt = time.Time{}
 		if uerr := s.records.Update(ctx, rec); uerr != nil {
 			s.log.Warn("tg subscribe mark empty delivery failed", "record", rec.ID, "err", uerr)

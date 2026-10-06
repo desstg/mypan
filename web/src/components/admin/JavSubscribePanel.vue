@@ -10,6 +10,7 @@ import AppDropdown from "@/components/base/AppDropdown.vue";
 import AppPagination from "@/components/base/AppPagination.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
 import JavMovieCard from "@/components/admin/JavMovieCard.vue";
+import JavCategorySelect from "@/components/admin/JavCategorySelect.vue";
 import JavUserSharesModal from "@/components/admin/JavUserSharesModal.vue";
 import { getApiErrorMessage } from "@/api/client";
 import {
@@ -21,6 +22,7 @@ import {
   deleteJavSubscription,
   fetchJavBlacklist,
   fetchJavBlacklistMovies,
+  fetchJavCategories,
   fetchJavCandidates,
   fetchJavCheckStatus,
   fetchJavCompletedMovies,
@@ -49,6 +51,7 @@ import type {
 } from "@/types/jav";
 import {
   JAV_DOWNLOAD_MODES,
+  JAV_EXCLUSIVE_QUALITIES,
   JAV_QUALITY_OPTIONS,
   javModeToFields,
   javStatusLabel,
@@ -159,6 +162,56 @@ type JavForm = {
 
 const form = reactive<JavForm>(blankForm());
 
+/**
+ * 类别过滤：只在演员 / 清单订阅上出现。
+ *
+ * 影片订阅是**单片订阅** —— 用户拿着具体某一部的链接来订，再按类别把它筛掉
+ * 毫无道理。后端的判据也一样（quality/matcher.go 的 MovieOK 只对 actor/list
+ * 判日期与类别），所以这里藏起来不是为了好看，而是「藏起来 = 后端也不会用」。
+ */
+const categoryFilterVisible = computed(
+  () => form.target_type === "actor" || form.target_type === "list",
+);
+
+const categoryOptions = ref<string[]>([]);
+const categoryLoading = ref(false);
+const categoryError = ref("");
+/** 拉过一次就不再重复拉 —— 弹窗开开关关不必每次都打接口；要更新按面板里的「刷新」。 */
+const categoryLoaded = ref(false);
+
+async function loadCategories() {
+  categoryLoading.value = true;
+  categoryError.value = "";
+  try {
+    const res = await fetchJavCategories();
+    categoryOptions.value = res.items ?? [];
+    categoryLoaded.value = true;
+  } catch (err) {
+    // 「拉不到」要说出来：静默失败的话，用户会以为影库里真的一个标签都没有。
+    categoryError.value = getApiErrorMessage(err, "类别清单加载失败");
+  } finally {
+    categoryLoading.value = false;
+  }
+}
+
+/** 打开弹窗时按需拉一次选项；已经拉过就不打第二次（可用面板里的「刷新」强制更新）。 */
+function ensureCategories() {
+  if (!categoryLoaded.value && !categoryLoading.value) void loadCategories();
+}
+
+/** 切换到影片订阅时把两类都清空 —— 藏起来却仍带着值提交，等于偷偷改了过滤条件。 */
+watch(
+  () => form.target_type,
+  (type) => {
+    if (type === "actor" || type === "list") {
+      ensureCategories();
+      return;
+    }
+    form.categories = [];
+    form.exclude_categories = [];
+  },
+);
+
 function blankForm(): JavForm {
   return {
     target_type: "movie",
@@ -171,7 +224,8 @@ function blankForm(): JavForm {
     // 代价是真的，所以得用户明确勾。
     include_comment_links: false,
     // 默认勾「高清」：它是这套库里最普遍的一档，不勾等于不限、什么分辨率都收，
-    // 反而会把 480p 那类也算进来。要更严就自己加勾「超清」，要放开就取消勾选。
+    // 反而会把 480p 那类也算进来。要更严就改成勾「超清」（两者互斥，不能同选），
+    // 要放开就取消勾选。
     qualities: ["hd"],
     min_size_mb: null,
     max_size_mb: null,
@@ -666,6 +720,7 @@ function openCreate(target?: { id: string; name: string; type: string }) {
   }
   // 从演员卡/清单卡直接点「订阅」进来时，类型已经定好了，watch 也认得出「这是默认值」
   applyReleaseFromDefault(form.target_type);
+  if (categoryFilterVisible.value) ensureCategories();
   formOpen.value = true;
 }
 
@@ -680,7 +735,10 @@ function openEdit(sub: JavSubscription) {
   form.download_mode = sub.download_mode;
   form.pre_download = sub.pre_download;
   form.include_comment_links = sub.include_comment_links;
-  form.qualities = [...sub.qualities];
+  // 旧数据里可能同时存着 hd + uhd（改互斥之前建/编辑过的订阅会这样）。
+  // 这种组合在判定上等价于「至少高清」，显示成两颗都亮会让人以为能筛 1080p，
+  // 所以读进来时就收口成最高那一档。
+  form.qualities = normalizeExclusiveQualities(sub.qualities);
   form.min_size_mb = sub.min_size_mb;
   form.max_size_mb = sub.max_size_mb;
   form.max_file_count = sub.max_file_count;
@@ -695,6 +753,7 @@ function openEdit(sub: JavSubscription) {
   form.target_display_path = sub.target_display_path;
   form.push_provider = sub.push_provider;
   form.subfolder_mode = sub.subfolder_mode;
+  if (categoryFilterVisible.value) ensureCategories();
   formOpen.value = true;
 }
 
@@ -708,10 +767,42 @@ const modeValue = computed({
   },
 });
 
+/**
+ * 点一颗质量胶囊。
+ *
+ * 两套规则，按 `exclusive` 分：
+ *   - **高清 / 超清互斥**（分辨率档）。点哪颗就只留哪颗；再点一次取消 → 回到「不限」。
+ *     源码弹窗里写的就是「无 / 高清 / 超清 只能选一个」，后端判定也一致
+ *     （`Tags.Has` 里超清蕴含高清，两个都勾不会筛出「刚好 1080p」，只会变成
+ *     「至少高清」—— 那和只勾高清完全等价，纯属多余且误导）。
+ *   - **字幕 / 破解**照旧可叠加，与上面两项组合。
+ */
 function toggleQuality(value: string) {
+  const isExclusive = JAV_EXCLUSIVE_QUALITIES.includes(value);
+  const on = form.qualities.includes(value);
+  if (isExclusive) {
+    // 先把同档的其它项摘掉，再决定这一颗的开关。
+    form.qualities = form.qualities.filter((q) => !JAV_EXCLUSIVE_QUALITIES.includes(q));
+    if (!on) form.qualities.push(value);
+    return;
+  }
   const idx = form.qualities.indexOf(value);
   if (idx >= 0) form.qualities.splice(idx, 1);
   else form.qualities.push(value);
+}
+
+/**
+ * 把互斥档收口成一个。
+ *
+ * 需要它是因为**存量数据**：互斥是后加的规则，之前建的订阅里可能同时存着
+ * hd + uhd。判定那边（`Tags.Has`）超清蕴含高清，所以那种组合实际等价于
+ * 「至少高清」—— 编辑弹窗里两颗都亮会让人以为它能筛出「刚好 1080p」。
+ * 收口取**更高**的那一档，因为那才是它本来在筛的东西。
+ */
+function normalizeExclusiveQualities(values: readonly string[]): string[] {
+  const picked = JAV_EXCLUSIVE_QUALITIES.filter((q) => values.includes(q));
+  const exclusive = picked.length > 1 ? [picked[picked.length - 1]] : picked;
+  return [...exclusive, ...values.filter((v) => !JAV_EXCLUSIVE_QUALITIES.includes(v))];
 }
 
 async function save() {
@@ -1588,7 +1679,10 @@ onMounted(() => {
                 </button>
               </div>
             </div>
-            <div class="jav-hint">不勾就是不限。勾多项时要求**同时**满足（与逻辑）。</div>
+            <div class="jav-hint">
+              不勾就是不限。<b>高清 / 超清只能选一个</b>（超清本身就满足高清，
+              两个都勾等于只勾了高清）；字幕、破解可以叠加，勾几项就要求同时满足。
+            </div>
 
             <div class="jav-field">
               <span>文件大小（MB）</span>
@@ -1607,6 +1701,42 @@ onMounted(() => {
                 <AppInput v-model="form.release_date_to" type="date" />
               </div>
             </div>
+
+            <!-- 类别过滤：演员 / 清单订阅才有。
+                 影片订阅是**单片订阅** —— 用户拿着具体某一部的链接来订，
+                 再按类别把它筛掉毫无道理（后端 MovieOK 也只对 actor/list
+                 判日期与类别，见 quality/matcher.go）。所以这一块整个不渲染，
+                 而不是渲染成禁用态：禁用态会让人以为「以后能用」。 -->
+            <template v-if="categoryFilterVisible">
+              <div class="jav-field">
+                <span>包含类别</span>
+                <JavCategorySelect
+                  v-model="form.categories"
+                  :options="categoryOptions"
+                  :error="categoryError"
+                  :refreshing="categoryLoading"
+                  placeholder="选择类别…"
+                  @refresh="loadCategories"
+                />
+              </div>
+              <div class="jav-hint">
+                <b>与逻辑，不是或逻辑</b>：勾了「学生」和「人妻」就要<b>两个都有</b>，
+                不是满足其一即可。要「或」的话就多建几条订阅。不勾就是不限。
+              </div>
+
+              <div class="jav-field">
+                <span>排除类别</span>
+                <JavCategorySelect
+                  v-model="form.exclude_categories"
+                  :options="categoryOptions"
+                  :error="categoryError"
+                  :refreshing="categoryLoading"
+                  placeholder="选择类别…"
+                  @refresh="loadCategories"
+                />
+              </div>
+              <div class="jav-hint">影片带其中任何一个类别就不订它。与上面的包含条件是并列的，两边都生效。</div>
+            </template>
 
             <!-- 放在上面那几个条件之后：这一栏说的是「那些条件对评论链接怎么用」，
                  排在它们前面会让人在还不知道放宽什么的情况下先勾。 -->
