@@ -58,6 +58,47 @@ export function fetchTGDiscover(query: TGDiscoverQuery) {
   return http.get<TGDiscoverPayload>(`${BASE}/tmdb/discover`, params);
 }
 
+/**
+ * 发现列表的短时缓存。
+ *
+ * 为什么要它：TMDB 那条链是**慢**的 —— 后端为了不和目录整理抢配额做了节流
+ * （默认 250ms 一次），海报墙一页又要打两个上游页，切一下 tab 就得等两三秒。
+ * 而「电影 ↔ 剧集」来回切、翻回上一页，是这一页最常做的动作，
+ * 每次都重打一遍既慢又白烧配额。
+ *
+ * 缓存放在**模块级**而不是组件里：TGSubscribePage 用 v-if 切 tab，
+ * 离开「电影」时整面墙会被卸载，组件内的缓存跟着一起没。
+ *
+ * TTL 取 5 分钟：发现列表按热度排序，分钟级的变化本来就不需要实时；
+ * 真正要「立刻看到最新」的场合是搜索，那条没走缓存。
+ */
+const DISCOVER_TTL_MS = 5 * 60 * 1000;
+const discoverCache = new Map<string, { at: number; payload: TGDiscoverPayload }>();
+
+function discoverCacheKey(query: TGDiscoverQuery): string {
+  return [
+    query.type,
+    query.page ?? 1,
+    query.country ?? "",
+    query.genres ?? "",
+    query.year ?? "",
+    query.sort ?? "",
+  ].join("|");
+}
+
+/** 与 fetchTGDiscover 同参同返回值，只是多一层 5 分钟的内存缓存。 */
+export function fetchTGDiscoverCached(query: TGDiscoverQuery): Promise<TGDiscoverPayload> {
+  const key = discoverCacheKey(query);
+  const hit = discoverCache.get(key);
+  if (hit && Date.now() - hit.at < DISCOVER_TTL_MS) {
+    return Promise.resolve(hit.payload);
+  }
+  return fetchTGDiscover(query).then((payload) => {
+    discoverCache.set(key, { at: Date.now(), payload });
+    return payload;
+  });
+}
+
 export function searchTGTMDB(query: { q: string; year?: string; type?: string }) {
   const params: Record<string, string> = { q: query.q };
   if (query.year) params.year = query.year;

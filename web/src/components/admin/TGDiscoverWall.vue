@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import AppInput from "@/components/base/AppInput.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
 import AppPagination from "@/components/base/AppPagination.vue";
@@ -9,13 +9,14 @@ import SettingsCard from "@/components/admin/SettingsCard.vue";
 import SettingsSegment from "@/components/admin/SettingsSegment.vue";
 import { getApiErrorMessage } from "@/api/client";
 import {
-  fetchTGDiscover,
+  fetchTGDiscoverCached,
   fetchTGGenres,
   searchTGTMDB,
   tgPosterURL,
   type TGDiscoverQuery,
 } from "@/api/tgSubscribe";
 import { toast } from "@/composables/useToast";
+import { useGridPageSize } from "@/composables/useGridColumns";
 import type { TGMediaType, TGTMDBSearchResult } from "@/types/tg-subscribe";
 
 const props = defineProps<{
@@ -40,6 +41,14 @@ const posterSize = ref<"w300" | "original">("w300");
 
 const genres = ref<{ value: string; label: string }[]>([]);
 
+/**
+ * 每页几行。列数由 CSS 的 auto-fill 决定（见 tg-subscribe.css），这里只定行数。
+ *
+ * 桌面宽度下是 7 列 × 5 行 = 35 部 —— 也就是「每页 40 部左右」。
+ * 换列数时**不用改这里**：每页条数按实测列数现算，永远是整数行。
+ */
+const PAGE_ROWS = 5;
+
 const COUNTRY_OPTIONS = [
   { value: "", label: "全部国家" },
   { value: "CN", label: "中国大陆" },
@@ -56,6 +65,24 @@ const genreOptions = computed(() => [{ value: "", label: "全部类型" }, ...ge
 
 /** 搜索模式下筛选条件无意义（TMDB 搜索接口不看这些），所以整条筛选栏隐藏。 */
 const searching = computed(() => props.keyword.trim().length > 0);
+
+const gridRef = ref<HTMLElement | null>(null);
+const { pageSize, measure } = useGridPageSize(gridRef, PAGE_ROWS);
+
+/**
+ * 本页实际渲染的条目。
+ *
+ * 发现列表要在客户端切片：TMDB 每页固定 20 条，凑不出「整数行」的 35 部，
+ * 所以从上游拉相邻的两页拼成 40 条，再切出前 35 条。多出来的 5 条丢掉
+ * （下一张页面里没有它们 —— 但翻页本来就是看个大概，不值得为 5 条去补位）。
+ *
+ * **搜索模式不切片**：TMDB 的搜索接口没有分页，结果固定是 10 条，
+ * 切片只会让某些关键词少显示几部。
+ */
+const visibleResults = computed(() => {
+  if (searching.value) return results.value;
+  return results.value.slice(0, pageSize.value);
+});
 
 function titleOf(item: TGTMDBSearchResult) {
   return item.title || item.name || item.original_title || item.original_name || "（无标题）";
@@ -79,6 +106,34 @@ async function loadGenres() {
   }
 }
 
+/**
+ * 本地页码 → 上游页码。
+ *
+ * 本地一页 = 上游两页（见 visibleResults）：本地第 1 页取上游 1、2，
+ * 第 2 页取上游 3、4。上游每页固定 20 条，所以 2 × 20 = 40 条足够切出 35 部。
+ */
+function upstreamPages(local: number): number[] {
+  const base = (local - 1) * 2 + 1;
+  return [base, base + 1];
+}
+
+/**
+ * 本地筛选条件 → 上游查询参数（不含 page）。
+ *
+ * 抽出来是为了让它同时当**缓存键**：`load()` 与「本页要不要重取」两处
+ * 必须用完全一致的条件，各写一份迟早会漂。
+ */
+function filterQuery(): TGDiscoverQuery {
+  const base: TGDiscoverQuery = { type: props.mediaType };
+  if (country.value) base.country = country.value;
+  if (genre.value) base.genres = genre.value;
+  if (year.value) base.year = year.value;
+  return base;
+}
+
+/** 同一页同一筛选条件下已经拉过的上游页数：拉够了就不必再打一次（哪怕是缓存的）。 */
+const loadedPages = ref(0);
+
 async function load(reset = false) {
   if (reset) page.value = 1;
   loading.value = true;
@@ -86,15 +141,24 @@ async function load(reset = false) {
     if (searching.value) {
       results.value = await searchTGTMDB({ q: props.keyword.trim(), type: props.mediaType });
       totalPages.value = 1;
+      loadedPages.value = 0;
       return;
     }
-    const query: TGDiscoverQuery = { type: props.mediaType, page: page.value };
-    if (country.value) query.country = country.value;
-    if (genre.value) query.genres = genre.value;
-    if (year.value) query.year = year.value;
-    const payload = await fetchTGDiscover(query);
-    results.value = payload.results ?? [];
-    totalPages.value = payload.total_pages || 1;
+    const base = filterQuery();
+
+    const pages = upstreamPages(page.value);
+    const payloads = await Promise.all(
+      pages.map((p) => fetchTGDiscoverCached({ ...base, page: p }).catch(() => null)),
+    );
+    // 上游最后一页之后会 500（TMDB 的 page 上限是 500），所以这里按「哪几页回来了」
+    // 拼，而不是断言两页都在。第一页拿不到才算真失败。
+    if (!payloads[0]) throw new Error("empty payload");
+    results.value = payloads.flatMap((p) => p?.results ?? []);
+    // 上游 total_pages 是 20 条一页的，本地一页顶它两页。
+    totalPages.value = Math.max(1, Math.ceil((payloads[0].total_pages || 1) / 2));
+    loadedPages.value = payloads.filter(Boolean).length;
+    await nextTick();
+    measure();
   } catch (error) {
     results.value = [];
     toast.error(getApiErrorMessage(error, "加载影片列表失败"));
@@ -103,7 +167,39 @@ async function load(reset = false) {
   }
 }
 
-const gridRef = ref<HTMLElement | null>(null);
+/**
+ * 列数变了（侧栏收起 / 展开、窗口缩放）时只做一件事：重新切片。
+ *
+ * **不重新请求** —— 数据还是那两页数据，变的只是「一页显示几张」。
+ * 列数一变每页条数就从 35 变 40，不重新切片就会按旧条数渲染，
+ * 40 张卡片排进 7 列 → 最后一排空两格。
+ *
+ * 拉回来的上游页数不够新条数时（窄屏切宽屏，35 → 40）才补一次请求；
+ * 补完也不会回头把已经拉过的两页再打一遍。
+ */
+async function refit() {
+  if (searching.value || !results.value.length) return;
+  const wanted = upstreamPages(page.value);
+  if (loadedPages.value >= wanted.length) return;
+  loading.value = true;
+  try {
+    const base = filterQuery();
+    const payloads = await Promise.all(
+      wanted.map((p) => fetchTGDiscoverCached({ ...base, page: p }).catch(() => null)),
+    );
+    if (!payloads[0]) return;
+    results.value = payloads.flatMap((p) => p?.results ?? []);
+    loadedPages.value = payloads.filter(Boolean).length;
+  } catch {
+    // 补数据失败就维持现状：屏幕上还留着上一次的结果，比清空好。
+  } finally {
+    loading.value = false;
+  }
+}
+
+watch(pageSize, () => {
+  void refit();
+});
 
 // 分页器在列表**下方**，翻页后不把视口带回顶部的话，用户看到的是新一页的末尾，
 // 会以为页码没生效。越界钳制交给 AppPagination，这里只管跳。
@@ -171,9 +267,9 @@ defineExpose({ load });
       </template>
     </SettingsCard>
 
-    <div v-if="results.length" ref="gridRef" class="tg-grid">
+    <div v-if="visibleResults.length" ref="gridRef" class="tg-grid">
       <button
-        v-for="item in results"
+        v-for="item in visibleResults"
         :key="item.id"
         type="button"
         class="tg-card"
@@ -227,3 +323,4 @@ defineExpose({ load });
     <AppPagination :page="page" :total-pages="totalPages" @update:page="goPage" />
   </div>
 </template>
+

@@ -34,32 +34,27 @@
   }
 }
 
-/* ——————————————— 海报墙 ——————————————— */
-
-/* 列数**钉死**成 20 的约数（5 / 4 / 2），刻意不用 auto-fill 自适应。
+/* ——————————————— 海报墙 ———————————————
  *
- * TMDB 的发现列表每页固定 20 条，而自适应列数在常见宽度下会落到 6 列：
- * 20 ÷ 6 = 3 行余 2 张，最后一行右边空着 4 格，看着像页面没加载完。
- * 只要列数能整除 20，最后一行就永远是满的 —— 代价是海报比 6 列时大一圈。
- * 想改列数的话只能从 20 的约数里挑（1/2/4/5/10）——
- * **改列数就得同时改后端的分页**（TMDB 没有 page_size 参数，要 6 列就得把
- * 相邻上游页拼成 24 条一页），别只改这一处。 */
+ * 列数**自适应**（auto-fill + 最小 140px + 14px 间距），与「辅助工具 → 海报墙」
+ * （`.scrape-wall` / `.jav-wall__grid--poster`）逐像素同款 —— 三面墙的卡片看起来
+ * 是同一套东西。
+ *
+ * 尺寸由**每页条数**决定：一页要凑成整数行，最后一排才不会空出来。
+ * 桌面宽度下这里是 7 列，7 × 5 = 35，所以每页 35 条（见 TGDiscoverWall.PAGE_ROWS）。
+ * **改列数 / 改最小宽度就要同时改那个常量**，否则尾行会缺角。
+ * 窄屏自动落到 6 / 4 列时每行仍然填满 —— 最后一行的余数是全局的，不随列数变。
+ *
+ * 每个网格项用 `min-width: 0` 收住：卡片里的长标题会把格子顶宽，
+ * 破坏 auto-fill 算出来的等宽列（默认 `min-width: auto` 就长这样）。 */
 .tg-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 14px;
 }
 
-@media (max-width: 1080px) {
-  .tg-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 720px) {
-  .tg-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.tg-grid > * {
+  min-width: 0;
 }
 
 .tg-card {

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import AppButton from "@/components/base/AppButton.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
 import AppDropdown from "@/components/base/AppDropdown.vue";
+import AppPagination from "@/components/base/AppPagination.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
 import AdminStatusPill from "@/components/admin/AdminStatusPill.vue";
@@ -16,6 +17,7 @@ import {
 } from "@/api/tgSubscribe";
 import { confirm } from "@/composables/useConfirm";
 import { toast } from "@/composables/useToast";
+import { useGridPageSize } from "@/composables/useGridColumns";
 import type { TGSubscription, TGSubscriptionStatus } from "@/types/tg-subscribe";
 import {
   TG_KIND_FILTERS,
@@ -28,8 +30,11 @@ import {
 // 「已订阅」：把订阅过的影片按海报卡片摊开，支持按类型/状态筛选与批量改状态。
 //
 // 与「电影 / 剧集」两张海报墙的区别在于**数据来源**：那两张打的是 TMDB 的
-// 发现/搜索接口，这一张读的是本地订阅表 —— 所以它不分页，也不需要分页
-// （订阅总量是「几十条」量级），筛选全在本地做。
+// 发现/搜索接口，这一张读的是本地订阅表 —— 所以筛选全在本地做，
+// 分页也是本地的（不必再打后端）。
+//
+// 卡片尺寸与「电影 / 剧集」共用一套 `.tg-grid`（见 tg-subscribe.css），
+// 每页行数也一致，来回切 tab 不会觉得换了个页面。
 
 const emit = defineEmits<{ changed: [] }>();
 
@@ -45,6 +50,13 @@ const detailSubscription = ref<TGSubscription | null>(null);
 
 const kind = ref<TGSubscribeKindFilter>("all");
 const status = ref<TGSubscribeStatusFilter>("all");
+
+/** 每页行数，与发现墙（TGDiscoverWall.PAGE_ROWS）保持一致。 */
+const PAGE_ROWS = 5;
+
+const gridRef = ref<HTMLElement | null>(null);
+const { pageSize, measure } = useGridPageSize(gridRef, PAGE_ROWS);
+const page = ref(1);
 
 const KIND_OPTIONS = TG_KIND_FILTERS;
 const STATUS_OPTIONS = TG_STATUS_FILTERS;
@@ -65,18 +77,34 @@ const visible = computed(() =>
   }),
 );
 
+const totalPages = computed(() => Math.max(1, Math.ceil(visible.value.length / pageSize.value)));
+
+/**
+ * 本页渲染的订阅。
+ *
+ * 每页条数 = 实测列数 × PAGE_ROWS —— 只有是列数的整数倍，最后一排才不会空出格子。
+ * 第一帧还没量到列数时 pageSize 会偏小（cols 回落成 1），所以这里必须对越界兜底，
+ * 否则量完之前会渲染出一张空页。
+ */
+const paged = computed(() => {
+  const from = (page.value - 1) * pageSize.value;
+  return visible.value.slice(from, from + pageSize.value);
+});
+
 /**
  * 批量操作的作用范围：**当前筛选结果里的勾选**。
  *
  * 换过筛选之后，看不见的那些不该还留在名单里 —— 「我明明只选了这几张」
  * 是批量操作最常见的翻车方式，所以这里每次都用 visible 过滤一遍。
+ * 翻页不算「换筛选」：勾选是跨页保留的，见 toggleSelectAll 的说明。
  */
 const batchIds = computed(() =>
   visible.value.filter((sub) => selectedIds.value.has(sub.id)).map((sub) => sub.id),
 );
 const batchCount = computed(() => batchIds.value.length);
+/** 全选只作用于**本页** —— 有分页之后，一个按钮勾上 43 条而屏幕里只看得见 35 条会让人心里没底。 */
 const allSelected = computed(
-  () => visible.value.length > 0 && batchCount.value === visible.value.length,
+  () => paged.value.length > 0 && paged.value.every((sub) => selectedIds.value.has(sub.id)),
 );
 
 const BATCH_ACTIONS: { key: TGSubscriptionStatus; label: string }[] = [
@@ -93,6 +121,11 @@ async function load() {
     const alive = new Set(subscriptions.value.map((s) => s.id));
     const next = new Set([...selectedIds.value].filter((id) => alive.has(id)));
     if (next.size !== selectedIds.value.size) selectedIds.value = next;
+    // 列数是渲染后才量得到的，所以「每页几条」在第一帧之后才稳定；
+    // 等 DOM 落定再量一次并收口页码，否则订阅被删光时会停在一个空页上。
+    await nextTick();
+    measure();
+    if (page.value > totalPages.value) page.value = totalPages.value;
   } catch (error) {
     toast.error(getApiErrorMessage(error, "加载订阅列表失败"));
   } finally {
@@ -108,9 +141,25 @@ function toggleSelect(id: number) {
   selectedIds.value = next;
 }
 
+/** 全选 / 取消全选**只作用于本页**：跨页全选在屏幕上没有可核对的反馈。 */
 function toggleSelectAll() {
-  selectedIds.value = allSelected.value ? new Set() : new Set(visible.value.map((s) => s.id));
+  const next = new Set(selectedIds.value);
+  if (allSelected.value) {
+    for (const sub of paged.value) next.delete(sub.id);
+  } else {
+    for (const sub of paged.value) next.add(sub.id);
+  }
+  selectedIds.value = next;
 }
+
+// 换筛选条件时回到第 1 页 —— 停在第 5 页却只剩 2 页结果，用户看到的是空屏。
+watch([kind, status], () => {
+  page.value = 1;
+});
+// 窗口变宽/变窄会改列数，进而改每页条数；页码不重算就会指到不存在的页。
+watch(pageSize, () => {
+  if (page.value > totalPages.value) page.value = totalPages.value;
+});
 
 function titleOf(sub: TGSubscription) {
   return sub.title || sub.original_title || "（无标题）";
@@ -154,6 +203,13 @@ function statusToneOf(sub: TGSubscription) {
 function openDetail(sub: TGSubscription) {
   detailSubscription.value = sub;
   detailOpen.value = true;
+}
+
+// 分页器在列表下方，翻页后不把视口带回顶部的话，看到的是新一页的末尾，
+// 会以为页码没生效。（与「电影 / 剧集」那面墙同一套处理。）
+function goPage(next: number) {
+  page.value = next;
+  gridRef.value?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function onDetailChanged() {
@@ -266,8 +322,8 @@ defineExpose({ load });
       换筛选条件后看不见的订阅不受影响。
     </p>
 
-    <div v-if="visible.length" class="tg-grid">
-      <div v-for="sub in visible" :key="sub.id" class="tg-card">
+    <div v-if="paged.length" ref="gridRef" class="tg-grid">
+      <div v-for="sub in paged" :key="sub.id" class="tg-card">
         <div class="tg-card__poster" :class="{ 'tg-card__poster--selected': selectedIds.has(sub.id) }">
           <button
             type="button"
@@ -366,6 +422,10 @@ defineExpose({ load });
     />
 
     <div v-else class="tg-wall__footer">加载中…</div>
+
+    <!-- 本地分页：每页条数是「实测列数 × 行数」，最后一排永远是满的。
+         只有最后一页剩下的尾数会空 —— 那是列表的末尾，不是断行。 -->
+    <AppPagination :page="page" :total-pages="totalPages" @update:page="goPage" />
 
     <TGTitleDetailModal
       :open="detailOpen"
