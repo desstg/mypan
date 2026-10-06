@@ -24,6 +24,9 @@ const emit = defineEmits<{
     </div>
 
     <div class="preview-header__actions">
+      <!-- 调用方追加的动作（海报墙那套：复制播放地址 / 用本机播放器打开）。
+           插在下载键**之前**，与文件浏览器那侧的两个图标键拉开距离。 -->
+      <slot name="actions" />
       <button
         type="button"
         :aria-label="downloadLabel || '下载当前文件'"

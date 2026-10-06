@@ -42,6 +42,8 @@ import { useAdminPageLoading } from "@/composables/useAdminLoadingBar";
 import { useConditionalPolling } from "@/composables/useConditionalPolling";
 import { confirm } from "@/composables/useConfirm";
 import { useVirtualPosterWall } from "@/composables/useVirtualPosterWall";
+import { useWallPlayback } from "@/composables/useWallPlayback";
+import WallPlayer from "@/components/admin/WallPlayer.vue";
 import { toast } from "@/composables/useToast";
 import {
   hitId,
@@ -870,6 +872,9 @@ onUnmounted(() => {
   progressPolling.stop?.();
 });
 
+// 卡片上的播放键。逻辑在 composable 里（两面墙共用），这里只用它的状态驱动按钮。
+const playback = useWallPlayback();
+
 defineExpose({
   startScrape,
   stopScrape,
@@ -1279,6 +1284,26 @@ defineExpose({
                   </button>
                 </div>
               </div>
+              <!-- 播放键：卡片正中，鼠标指过去才浮出（与详情页那颗 `.jd-cover__play`
+                   同一形态）。**不预判可播性** —— 有的作品目录里压根没有 `.strm`，
+                   但那要读盘才知道；让所有卡片长得一样，点了再说清原因，
+                   比「有的卡莫名没有按钮」好排查。 -->
+              <button
+                type="button"
+                class="scrape-card__play"
+                :title="playback.loadingId.value === item.id ? '正在读取播放地址…' : '播放'"
+                :disabled="playback.loadingId.value === item.id"
+                @click="playback.playTMDB(selectedTaskId ?? 0, item)"
+              >
+                <i
+                  :class="
+                    playback.loadingId.value === item.id
+                      ? 'fas fa-spinner fa-spin'
+                      : 'fas fa-play'
+                  "
+                />
+              </button>
+
               <div class="scrape-card__meta">
                 <div class="scrape-card__title" :title="item.title">{{ item.title }}</div>
                 <div class="scrape-card__sub">
@@ -1402,6 +1427,9 @@ defineExpose({
         />
       </div>
     </Teleport>
+
+    <!-- 播放窗。跟着卡片上的播放键走，数据在 click 那一刻才取（见 useWallPlayback）。 -->
+    <WallPlayer v-if="playback.open.value" :title="playback.title.value" :items="playback.items.value" @close="playback.close" />
   </div>
 </template>
 
@@ -2003,6 +2031,57 @@ defineExpose({
 .scrape-card__actions .scrape-card__act:only-child {
   grid-column: 1 / -1;
 }
+/* 播放键：卡片正中，**鼠标指过去才浮出**，移开就消失（与详情页那颗
+   `.jd-cover__play` 同一形态 —— 64px 圆形、半透明深底、hover 放大）。
+
+   为什么不做常显：海报墙一屏几十张，常显会盖住封面本身；而这一页的主线是刮削，
+   播放是次要动作，压成 hover 更合这一页的轻重。
+
+   触屏没有 hover —— 这条 `@media (hover: none)` 就是给手机的兜底：
+   不补的话，那排按钮（`__actions` 与这颗）在手机上永远点不到。 */
+.scrape-card__play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 52px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fff;
+  font-size: 1.1rem;
+  cursor: pointer;
+  opacity: 0;
+  z-index: 2;
+  transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.scrape-card:hover .scrape-card__play,
+.scrape-card__play:focus-visible {
+  opacity: 1;
+}
+
+.scrape-card__play:hover:not(:disabled) {
+  background: rgba(15, 23, 42, 0.75);
+}
+
+/* 取地址期间按钮留在原地转圈：`.fa-spin` 在转，但 opacity 得保持 1，
+   否则鼠标一移开用户会以为「点了没反应」。 */
+.scrape-card__play:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+@media (hover: none) {
+  .scrape-card__play {
+    opacity: 1;
+  }
+}
+
 .scrape-card__meta {
   padding: 10px 10px 12px;
   background: var(--surface);

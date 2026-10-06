@@ -425,6 +425,9 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/rescrape", h.rescrapeStrmScrapeItem)
 					r.Post("/mark-normal", h.markStrmScrapeNormal)
 					r.Get("/poster", h.getStrmScrapePoster)
+					// 「这一张卡能播什么」：读 `.strm` 正文，回一个可播文件列表。
+					// 点播放键时才调，不进列表 —— 可播性随磁盘变，落进索引就是第三份状态。
+					r.Get("/items/playable", h.getStrmScrapeItemPlayable)
 
 					// 番号影片的海报墙（媒体类型 = 番号影片的任务）。与上面那套共用页面与
 					// 服务，但数据源是本地媒体库目录，不碰 TMDB。
@@ -435,6 +438,8 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/jav-wall/hidden-dirs", h.listJavWallHiddenDirs)
 					r.Put("/jav-wall/hidden-dirs", h.updateJavWallHiddenDirs)
 					r.Get("/jav-wall/item", h.getJavWallItem)
+					// 同上，番号那面墙的「这一张能播什么」。
+					r.Get("/jav-wall/item/playable", h.getJavWallItemPlayable)
 					r.Put("/jav-wall/item/meta", h.saveJavWallMeta)
 					r.Post("/jav-wall/item/poster", h.saveJavWallPoster)
 					r.Post("/jav-wall/item/rebuild", h.rebuildJavWallItem)

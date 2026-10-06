@@ -283,3 +283,28 @@ func (h *Handler) refreshJavWallItem(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOK(w, out)
 }
+
+// getJavWallItemPlayable 读这一部对应的 `.strm` 正文，回可播文件列表。
+//
+// 与 getJavWallItem 的区别：那个读的是**元数据**（侧车/nfo），这个读的是**播放地址**。
+// 返回空列表不是错误 —— 那是「这个作品目录下没有能播的 .strm」这个正常结论。
+func (h *Handler) getJavWallItemPlayable(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	taskID, err := javWallTaskID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	q := r.URL.Query()
+	items, err := h.strmScrape.JavPlayable(r.Context(), taskID, q.Get("rel_dir"), q.Get("stem"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if items == nil {
+		items = []strmscrape.PlayableFile{}
+	}
+	writeOK(w, map[string]any{"items": items})
+}

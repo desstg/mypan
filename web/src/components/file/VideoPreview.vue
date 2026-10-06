@@ -13,11 +13,63 @@ import { decodeTextBytes } from "@/utils/textEncoding";
 import PreviewHeader from "./PreviewHeader.vue";
 import BusySpinner from "@/components/base/BusySpinner.vue";
 
-const props = defineProps<{
-  accountId: number;
-  files: FileItem[];
-  initialFileId: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    /** 网盘文件形态要用它拼 /api/files/download；直连形态（墙上点播放）不需要。 */
+    accountId?: number;
+    files: FileItem[];
+    initialFileId: string;
+    /**
+     * 直连形态：直接给媒体地址，绕开网盘文件表。
+     *
+     * 为什么需要它：海报墙手上只有 `.strm` 正文里那一行播放地址（
+     * `/api/strm/play/...`），没有网盘 file_id —— 那行地址本身就是播放网关的入口，
+     * 后端会按请求方的 UA 现签直链再 302，见 internal/playback。
+     * 两条路产出的 URL 语义不同，所以这里不复用 filesApi.previewURL。
+     */
+    directURL?: string;
+    /**
+     * 直连形态下的「当前文件」。只用来做两件事：给 `<video>` 一个 key、以及
+     * 让字幕候选能按主干匹配。给不出真实 FileItem 时调用方可以造一个。
+     */
+    initialFile?: FileItem | null;
+    /**
+     * 调用方带来的字幕（墙上那套：字幕是本地 `.srt`，由后端读出来按 URL 给）。
+     *
+     * 给了就**不**再去网盘文件列表里找字幕 —— 那正是墙上没有的东西。
+     * 不给则回落到原来的行为（同目录 `.srt/.vtt/.sup`），文件浏览器那侧不受影响。
+     */
+    directSubtitles?: SubtitleCandidate[] | null;
+    /**
+     * 直连形态下这一集的文件名。用来给 `<video>` 一个稳定的 key、以及让
+     * 字幕候选能按主干匹配（`CEMD-851-U.srt` 对 `CEMD-851-U.strm`）。
+     */
+    directFileId?: string;
+  }>(),
+  { accountId: 0, directURL: "", initialFile: null, directSubtitles: null, directFileId: "" },
+);
+
+/** 一条外部喂进来的字幕。accountId 形态用 file；直连形态用 url。 */
+export interface SubtitleCandidate {
+  id: string;
+  label: string;
+  format: "srt" | "vtt" | "sup";
+  file?: FileItem;
+  url?: string;
+}
+
+/**
+ * 直连形态下假装出来的「一条视频文件」。
+ *
+ * 后端只给 `.strm` 文件名与播放地址，没有网盘 file_id，而模板与字幕逻辑都需要
+ * 一个带 `name`（用于 key 与主干匹配）的对象，所以在这里补一个。
+ * `id` 就用文件名 —— 同一个作品重开时 key 稳定，切集时又能区分开。
+ */
+const directEpisode = computed<FileItem | null>(() => {
+  if (!props.directURL) return null;
+  const name = props.initialFile?.name || props.directFileId || "video";
+  return { id: name, name, size: 0, is_dir: false };
+});
 
 setLanguage("zh-CN");
 
@@ -44,20 +96,29 @@ let subtitleController: AbortController | null = null;
 let pgsRenderer: { dispose(): void } | null = null;
 let subtitleSession = 0;
 
-const episodes = computed(() =>
-  props.files
+const episodes = computed(() => {
+  // 直连形态：给的就是**这一集**（多集的选集由墙那边的面板负责，见 WallPlayer），
+  // 不在这里再从 files 里挑 —— 墙上没有网盘文件列表可挑。这也顺带保证了
+  // 「单集直接播、多集才显示选集面板」里前一半：episodes 恒为 1，
+  // 面板的 `episodes.length > 1` 条件自然不成立。
+  if (props.directURL) {
+    const one = directEpisode.value;
+    return one ? [one] : [];
+  }
+  return props.files
     .filter((file) => !file.is_dir && fileKind(file) === "video")
     .sort((left, right) =>
       left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" }),
-    ),
-);
+    );
+});
 
 const initialIndex = episodes.value.findIndex((file) => file.id === props.initialFileId);
 const currentIndex = ref(initialIndex >= 0 ? initialIndex : 0);
 const currentFile = computed(() => episodes.value[currentIndex.value] ?? null);
 const mediaURL = computed(() => {
+  if (props.directURL) return props.directURL;
   const file = currentFile.value;
-  return file ? filesApi.previewURL(props.accountId, file.id, file.name) : "";
+  return file && props.accountId ? filesApi.previewURL(props.accountId, file.id, file.name) : "";
 });
 const selectedSubtitleId = ref("");
 
@@ -79,9 +140,12 @@ function subtitleLabel(name: string, videoName: string) {
   return suffix ? suffix.toUpperCase() : "默认字幕";
 }
 
-const subtitleCandidates = computed(() => {
+const subtitleCandidates = computed<SubtitleCandidate[]>(() => {
   const video = currentFile.value;
   if (!video) return [];
+  // 调用方给的那一份优先（墙那套：字幕在本地磁盘上，由后端读出来给 URL）。
+  // 给了就以它为准，**不再**去 files 里翻同目录文件 —— 墙上没有网盘文件列表。
+  if (props.directSubtitles) return props.directSubtitles;
   const target = normalizedStem(video.name);
   const exact: FileItem[] = [];
   for (const file of props.files) {
@@ -95,6 +159,7 @@ const subtitleCandidates = computed(() => {
       ? props.files.filter((file) => !file.is_dir && ["srt", "vtt", "sup"].includes(fileExtension(file.name))).slice(0, 1)
       : [];
   return candidates.map((file) => ({
+    id: file.id,
     file,
     format: fileExtension(file.name) as "srt" | "vtt" | "sup",
     label: subtitleLabel(file.name, video.name),
@@ -102,7 +167,7 @@ const subtitleCandidates = computed(() => {
 });
 
 const selectedSubtitleLabel = computed(() =>
-  subtitleCandidates.value.find(({ file }) => file.id === selectedSubtitleId.value)?.label || "字幕",
+  subtitleCandidates.value.find((item) => item.id === selectedSubtitleId.value)?.label || "字幕",
 );
 
 function selectSubtitle(fileId: string) {
@@ -135,17 +200,20 @@ async function loadSelectedSubtitle() {
   clearSubtitleTrack();
   const session = subtitleSession;
   const video = videoRef.value;
-  const selected = subtitleCandidates.value.find(({ file }) => file.id === selectedSubtitleId.value);
+  const selected = subtitleCandidates.value.find((item) => item.id === selectedSubtitleId.value);
   if (!video || !selected) return;
   const controller = new AbortController();
   subtitleController = controller;
   try {
+    // 两条取字幕的路：调用方直接给了 URL（墙上那套，字幕在本地磁盘上，
+    // 由后端读出来），或者拿网盘 file_id 走文件接口（文件浏览器那套）。
+    const supSource = selected.url ?? (selected.file ? filesApi.proxyPreviewURL(props.accountId, selected.file.id, selected.file.name) : "");
     if (selected.format === "sup") {
       showNotice("正在加载 SUP 字幕…");
-      const response = await fetch(
-        filesApi.proxyPreviewURL(props.accountId, selected.file.id, selected.file.name),
-        { credentials: "include", signal: controller.signal },
-      );
+      const response = await fetch(supSource, {
+        credentials: "include",
+        signal: controller.signal,
+      });
       if (!response.ok) throw new Error(`字幕读取失败 (${response.status})`);
       const subContent = await response.arrayBuffer();
       const { PgsRenderer } = await import("libbitsub");
@@ -179,14 +247,29 @@ async function loadSelectedSubtitle() {
       pgsRenderer = renderer;
       return;
     }
-    const result = await filesApi.textPreviewBytes(
-      props.accountId,
-      selected.file.id,
-      selected.file.name,
-      selected.file.size,
-      controller.signal,
-    );
-    const { text } = decodeTextBytes(result.bytes, "auto", result.truncated);
+    // 文本字幕（srt/vtt）也从 supSource 取。
+    //
+    // 墙上那条路给的是**已经解好的**本地文件地址，直接 fetch 就好；而
+    // `filesApi.textPreviewBytes` 只认网盘 file_id，走不了。
+    // 两条路都收敛成「拿到文本 → 交给 media-captions 解析」。
+    let text: string;
+    if (selected.url) {
+      // 墙上那套：地址已经解好（字幕是本地文件，后端按 URL 发字节），直接 fetch。
+      const response = await fetch(supSource, { credentials: "include", signal: controller.signal });
+      if (!response.ok) throw new Error(`字幕读取失败 (${response.status})`);
+      text = decodeTextBytes(new Uint8Array(await response.arrayBuffer()), "auto", false).text;
+    } else if (selected.file) {
+      const result = await filesApi.textPreviewBytes(
+        props.accountId,
+        selected.file.id,
+        selected.file.name,
+        selected.file.size,
+        controller.signal,
+      );
+      text = decodeTextBytes(result.bytes, "auto", result.truncated).text;
+    } else {
+      return;
+    }
     const { parseText } = await import("media-captions");
     const parsed = await parseText(text, { type: selected.format });
     if (controller.signal.aborted || session !== subtitleSession || video !== videoRef.value) return;
@@ -206,7 +289,7 @@ async function loadSelectedSubtitle() {
 function resetSubtitleSelection() {
   clearSubtitleTrack();
   subtitleMenuOpen.value = false;
-  selectedSubtitleId.value = subtitleCandidates.value[0]?.file.id || "";
+  selectedSubtitleId.value = subtitleCandidates.value[0]?.id || "";
 }
 
 function destroyMediaAdapters() {
@@ -445,7 +528,9 @@ onUnmounted(() => {
         download-label="下载当前视频"
         @close="emit('close')"
         @download="downloadCurrent"
-      />
+      >
+        <template #actions><slot name="actions" /></template>
+      </PreviewHeader>
 
       <section class="video-preview__stage">
         <media-controller class="video-preview__controller">
@@ -562,17 +647,17 @@ onUnmounted(() => {
                     </button>
                     <button
                       v-for="subtitle in subtitleCandidates"
-                      :key="subtitle.file.id"
+                      :key="subtitle.id"
                       type="button"
                       class="video-preview__subtitle-option"
-                      :class="{ 'is-selected': selectedSubtitleId === subtitle.file.id }"
+                      :class="{ 'is-selected': selectedSubtitleId === subtitle.id }"
                       role="menuitemradio"
-                      :aria-checked="selectedSubtitleId === subtitle.file.id"
-                      @click="selectSubtitle(subtitle.file.id)"
+                      :aria-checked="selectedSubtitleId === subtitle.id"
+                      @click="selectSubtitle(subtitle.id)"
                     >
                       <span>{{ subtitle.label }}</span>
                       <small>{{ subtitle.format.toUpperCase() }}</small>
-                      <i v-if="selectedSubtitleId === subtitle.file.id" class="fa-solid fa-check" aria-hidden="true" />
+                      <i v-if="selectedSubtitleId === subtitle.id" class="fa-solid fa-check" aria-hidden="true" />
                     </button>
                   </div>
                 </Transition>

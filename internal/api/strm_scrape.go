@@ -267,19 +267,51 @@ func (h *Handler) getStrmScrapePoster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 按扩展名给正确的类型：png/webp 也被白名单放行，一律写 jpeg 会让浏览器猜错。
+	// 字幕（srt/vtt/sup）走同一个端点，类型也在这里分。
 	w.Header().Set("Content-Type", imageContentTypeFor(path))
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	_, _ = w.Write(body)
 }
 
-// imageContentTypeFor 按扩展名判图片类型（与 jav 那边同一套口径）。
+// imageContentTypeFor 按扩展名判类型（与 jav 那边同一套口径）。
+//
+// 这个端点现在还兼着发字幕（.srt/.vtt/.sup），所以字幕那三种也要给对类型 ——
+// 一律写 image/* 的话，前端 `response.arrayBuffer()` 那条路虽然不看类型，
+// 但 `fetch` 的 MIME 嗅探与浏览器 DevTools 都会显示成图片，排查时误导人。
 func imageContentTypeFor(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".png":
 		return "image/png"
 	case ".webp":
 		return "image/webp"
+	case ".srt":
+		return "application/x-subrip"
+	case ".vtt":
+		return "text/vtt"
+	case ".sup":
+		return "application/octet-stream"
 	default:
 		return "image/jpeg"
 	}
+}
+
+// getStrmScrapeItemPlayable 读这张卡对应的 `.strm` 正文，回可播文件列表。
+//
+// strm_name 为空表示「多集作品」：item.go 只在平铺布局或目录里只有一个条目时才填它，
+// 所以为空时后端列目录、把该作品的每一集都回出去，由前端让用户选。
+func (h *Handler) getStrmScrapeItemPlayable(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("strm_task_id")), 10, 64)
+	q := r.URL.Query()
+	items, err := h.strmScrape.TMDBPlayable(r.Context(), taskID, q.Get("rel_dir"), q.Get("strm_name"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if items == nil {
+		items = []strmscrape.PlayableFile{}
+	}
+	writeOK(w, map[string]any{"items": items})
 }

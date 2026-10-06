@@ -1,4 +1,7 @@
 import { http } from "@/api/client";
+// 可播文件是**两面墙共用**的形状（同一个后端实现、同一套字幕结构），
+// 所以类型定义留在 strmScrape.ts 那一份，这里只 import —— 两边各写一份迟早会漂。
+import type { PlayableFile } from "@/api/strmScrape";
 
 // 番号影片的海报墙（辅助工具 → 海报墙，选中「媒体类型 = 番号影片」的任务时用）。
 //
@@ -288,3 +291,22 @@ export const JAV_WALL_SORTS = [
   { value: "number_asc", label: "番号升序" },
   { value: "number_desc", label: "番号降序" },
 ];
+
+/**
+ * 番号墙这一张卡能播什么：读 `.strm` 正文，回可播文件列表（含同目录字幕）。
+ *
+ * **点播放键时才调**。与 TMDB 墙那条同一套后端实现，入参换成番号那套
+ * `(rel_dir, stem)` —— stem 会过 `resolveJavItem` 的三层闸门
+ * （拒绝分隔符/`..`、`isInside`、`<absDir>/<stem>.strm` 必须存在）。
+ */
+export function fetchJavWallItemPlayable(input: {
+  strm_task_id: number;
+  rel_dir: string;
+  stem: string;
+}) {
+  return http.get<{ items: PlayableFile[] }>("/admin/strm-scrape/jav-wall/item/playable", {
+    strm_task_id: String(input.strm_task_id),
+    rel_dir: input.rel_dir,
+    stem: input.stem,
+  });
+}

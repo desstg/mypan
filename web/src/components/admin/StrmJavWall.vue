@@ -27,6 +27,9 @@ import "@/styles/jav.css";
 
 // 搜索与排序由**页头**统一控制（用户要求：番号墙自己的那两个框不要了）。
 // 子组件只按这三个 prop 请求 —— 页头那套按钮对两种任务长得一模一样，功能各是各的。
+import { useWallPlayback } from "@/composables/useWallPlayback";
+import WallPlayer from "@/components/admin/WallPlayer.vue";
+
 const props = defineProps<{
   taskId: number | null;
   keyword?: string;
@@ -429,6 +432,9 @@ onUnmounted(() => {
   window.removeEventListener("resize", scheduleBudgetRefresh);
 });
 
+// 卡片上的播放键。逻辑在 composable 里（两面墙共用），这里只用它的状态驱动按钮。
+const playback = useWallPlayback();
+
 defineExpose({ refreshMeta, load });
 </script>
 
@@ -506,6 +512,24 @@ defineExpose({ refreshMeta, load });
           <!-- 还没轮到取图时占住位置，避免取到图之前卡片高度塌下去 -->
           <div v-if="!imageSrc(item, index)" class="jav-card__skeleton" />
 
+          <!-- 播放键：封面正中，鼠标指过去才浮出（与详情页那颗 `.jd-cover__play`
+               同一形态）。挂在这儿而不是 `.jav-card__hover` 那一排里 ——
+               两个视图的封面比例不同（横版 3:2 / 竖版 2:3），居中的圆钮两边都站得住，
+               塞进底部那排则会随比例上下飘。 -->
+          <button
+            type="button"
+            class="jav-card__play"
+            :title="playback.loadingId.value === item.id ? '正在读取播放地址…' : '播放'"
+            :disabled="playback.loadingId.value === item.id"
+            @click.stop="playback.playJav(taskId ?? 0, item)"
+          >
+            <i
+              :class="
+                playback.loadingId.value === item.id ? 'fas fa-spinner fa-spin' : 'fas fa-play'
+              "
+            />
+          </button>
+
           <div class="jav-card__hover">
             <AppButton type="button" size="sm" variant="secondary" @click="openEditor(item)">编辑</AppButton>
             <AppButton
@@ -528,6 +552,14 @@ defineExpose({ refreshMeta, load });
         </div>
       </article>
     </div>
+
+    <!-- 播放窗。跟着卡片上的播放键走，数据在 click 那一刻才取（见 useWallPlayback）。 -->
+    <WallPlayer
+      v-if="playback.open.value"
+      :title="playback.title.value"
+      :items="playback.items.value"
+      @close="playback.close"
+    />
 
     <!-- 拉到底续加载。哨兵**常驻 DOM**（不在上面的 v-if 分支里）—— 它一旦被移除，
          挂在它上面的 IntersectionObserver 就再也收不到回调了。
@@ -583,6 +615,18 @@ defineExpose({ refreshMeta, load });
 .jav-wall__number { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jav-wall__title { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jav-wall__sub { font-size: 11px; color: var(--text-muted); }
+
+/* 播放键：封面正中，**鼠标指过去才浮出**（与详情页 `.jd-cover__play` 同一形态）。
+   挂在这个位置而不是底部 `.jav-card__hover` 那一排，是为了两个视图共用一套定位 ——
+   横版封面 3:2、竖版 2:3，居中的圆钮两边都站得住。 */
+.jav-card__play { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 52px; height: 52px; display: flex; align-items: center; justify-content: center; border: none; border-radius: 50%; background: rgba(15, 23, 42, 0.55); color: #fff; font-size: 1.1rem; cursor: pointer; opacity: 0; z-index: 3; transition: opacity 0.15s ease, background 0.15s ease; }
+.jav-card:hover .jav-card__play,
+.jav-card:focus-within .jav-card__play,
+.jav-card__play:focus-visible { opacity: 1; }
+.jav-card__play:hover:not(:disabled) { background: rgba(15, 23, 42, 0.75); }
+/* 取地址期间留在原地转圈 —— opacity 保持 1，否则鼠标一移开就像「点了没反应」。 */
+.jav-card__play:disabled { opacity: 1; cursor: default; }
+@media (hover: none) { .jav-card__play { opacity: 1; } }
 
 /* 悬停显形（照 CoverExtractToolCard 的 .cand-rm 那一套）：触屏上常显，否则永远点不到 */
 .jav-card__hover { position: absolute; inset: auto 6px 6px 6px; display: flex; gap: 6px; justify-content: center; opacity: 0; transition: opacity 0.12s; z-index: 2; }

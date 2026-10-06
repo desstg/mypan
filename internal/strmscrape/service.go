@@ -500,8 +500,9 @@ func (s *Service) ResolvePosterFile(ctx context.Context, strmTaskID int64, rel s
 		return "", domain.Errorf(domain.CodeValidation, "非法路径")
 	}
 	base := strings.ToLower(filepath.Base(full))
-	if !strings.HasSuffix(base, ".jpg") && !strings.HasSuffix(base, ".png") && !strings.HasSuffix(base, ".webp") {
-		return "", domain.Errorf(domain.CodeValidation, "仅允许图片文件")
+	if !strings.HasSuffix(base, ".jpg") && !strings.HasSuffix(base, ".png") && !strings.HasSuffix(base, ".webp") &&
+		!strings.HasSuffix(base, ".srt") && !strings.HasSuffix(base, ".vtt") && !strings.HasSuffix(base, ".sup") {
+		return "", domain.Errorf(domain.CodeValidation, "仅允许图片与字幕文件")
 	}
 	if !fileExists(full) {
 		return "", domain.Errorf(domain.CodeNotFound, "海报不存在")

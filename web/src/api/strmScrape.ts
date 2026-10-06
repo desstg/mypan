@@ -180,3 +180,41 @@ export function markStrmScrapeNormal(input: {
 export function rescrapeStrmScrapeItem(input: { strm_task_id: number; item_id: string }) {
   return http.post<StrmScrapeRematchResult>("/admin/strm-scrape/rescrape", input);
 }
+
+/**
+ * 这一张卡能播什么：读 `.strm` 正文，回可播文件列表（含同目录字幕）。
+ *
+ * **点播放键时才调**，不进列表请求 —— 可播性随磁盘变（删了文件、刚重刮过），
+ * 而一次墙刷新是几十上百张卡，逐张读盘会把列表拖慢。
+ *
+ * strm_name 为空表示「多集作品」（`Item.strm_name` 只在平铺布局或目录里只有
+ * 一个条目时才被填），那时后端列目录、把每一集都回出来。
+ */
+export interface PlayableFile {
+  name: string;
+  path: string;
+  subtitles?: PlayableSubtitle[];
+}
+
+/** 作品目录里的一份字幕。**在本地磁盘上**，不需要网盘 file_id。 */
+export interface PlayableSubtitle {
+  name: string;
+  /** 语言名，由文件名后缀推出来（「简体中文」等）。 */
+  label: string;
+  format: "srt" | "vtt" | "sup";
+  /** 取内容的站内地址。 */
+  url: string;
+}
+
+export function fetchStrmScrapeItemPlayable(input: {
+  strm_task_id: number;
+  rel_dir: string;
+  strm_name?: string;
+}) {
+  const query: Record<string, string> = {
+    strm_task_id: String(input.strm_task_id),
+    rel_dir: input.rel_dir,
+  };
+  if (input.strm_name) query.strm_name = input.strm_name;
+  return http.get<{ items: PlayableFile[] }>("/admin/strm-scrape/items/playable", query);
+}
