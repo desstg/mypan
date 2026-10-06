@@ -73,6 +73,108 @@ func (s *Service) onOfflineDownloadCompleted(ctx context.Context, event eventbus
 		FileID:     event.FileID,
 		TargetPath: event.TargetDisplayPath,
 	})
+	// 离线通道的事件只带**父目录**，所以要自己定位到「片名 (年份)」那一层再扫。
+	s.reconcilePackEpisodes(ctx, sub, rec, event.AccountID, event.TargetParentID, "")
+}
+
+// reconcilePackEpisodes 从**盘上实际落了什么**反推整季包覆盖了哪些集。
+//
+// 为什么必须看盘、不能信发布名：整季包的发布名写的是「全 40 集」，而里面常常缺
+// 十几集 —— 用户的原话是「很多时候说是整季包，实际里面缺很多」。按发布名标「收齐」
+// 等于对着一个假的数字把订阅收尾，之后真正缺的集再也不搜了。
+//
+// 所以判据只有一条：**目标目录里真的有哪些集**。靠 115 的清单接口一次拉全
+// （`ListAllFiles`，cur=0 递归展开，比逐目录递归省得多），按文件名解析集号。
+//
+// ⚠️ **必须限定在这部片自己的子目录里扫**。扫父目录（用户的库根）会把**别的片**
+// 的文件也算进来 —— 那些文件名同样带 SxxEyy，于是别的剧的集数会被记到这条订阅上，
+// 进度直接变成假的。这不是理论风险：库根下就躺着几十部片。
+//
+// 只对「不带集号的记录」跑（单集记录走 applyDeliveryProgress 那条精确路径）。
+// 列目录失败一律静默返回：盘上那一刻读不到不代表没落东西，把它当失败会让
+// 一次正常的推送被记成错误。
+//
+// folderID 非空时直接用它（分享转存那条路手上就有子目录 ID）；
+// 否则在 parentID 下按名字找「片名 (年份)」子目录，找不到就**放弃**，不退回扫父目录。
+func (s *Service) reconcilePackEpisodes(
+	ctx context.Context,
+	sub *domain.TGSubscription,
+	rec *domain.TGMatchRecord,
+	accountID int64,
+	parentID, folderID string,
+) {
+	if s == nil || sub == nil || rec == nil || s.episodes == nil {
+		return
+	}
+	// 单集记录已经有精确的集号了，不需要这条。
+	if rec.Episode >= 0 {
+		return
+	}
+	if sub.MediaType != domain.TGMediaTypeTV {
+		return
+	}
+	if s.folders == nil || accountID <= 0 {
+		return
+	}
+
+	if strings.TrimSpace(folderID) == "" {
+		parentID = strings.TrimSpace(parentID)
+		if parentID == "" {
+			return
+		}
+		folderID = s.findChildFolder(ctx, accountID, parentID,
+			buildFolderName(buildDeliverFileName(sub, rec)))
+		if folderID == "" {
+			// 定位不到专属子目录（建目录失败退过父目录、或用户搬走了）→ 不扫。
+			// 退回扫父目录会把别的片算进来，宁可不补这一集。
+			s.log.Info("tg subscribe pack scan skipped: 找不到专属子目录",
+				"sub", sub.ID, "record", rec.ID, "parent", parentID)
+			return
+		}
+	}
+
+	entries, err := s.folders.ListAllFiles(ctx, accountID, folderID)
+	if err != nil {
+		s.log.Info("tg subscribe pack scan skipped",
+			"sub", sub.ID, "record", rec.ID, "err", err)
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+
+	added := 0
+	for _, entry := range entries {
+		season, episode, ok := parseEpisodeFromFileName(entry.Name)
+		if !ok {
+			continue
+		}
+		has, err := s.episodes.Has(ctx, sub.ID, season, episode)
+		if err != nil || has {
+			continue
+		}
+		if err := s.episodes.Upsert(ctx, &domain.TGSubscriptionEpisode{
+			SubscriptionID: sub.ID,
+			Season:         season,
+			Episode:        episode,
+			RecordID:       rec.ID,
+			AccountID:      accountID,
+			FileID:         entry.FileID,
+			TargetPath:     strings.TrimSpace(rec.TargetParentID),
+		}); err != nil {
+			s.log.Warn("tg subscribe pack episode upsert failed",
+				"sub", sub.ID, "season", season, "episode", episode, "err", err)
+			continue
+		}
+		added++
+	}
+	if added == 0 {
+		return
+	}
+	s.log.Info("tg subscribe pack episodes reconciled",
+		"sub", sub.ID, "record", rec.ID, "scanned", len(entries), "added", added)
+	// 进度变了 → 完成判定要重跑（收齐了就该收尾）。
+	s.maybeComplete(ctx, sub)
 }
 
 // deliveredInfo 是一次成功投递落地后的信息，用于回写订阅进度。

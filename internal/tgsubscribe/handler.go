@@ -141,6 +141,10 @@ func (s *Service) applyQualityAndDedupe(
 	record.Reason = decision.Reason
 
 	// 内容级去重：该订阅的这一集已经入库了。
+	//
+	// ⚠️ 这个 hasEpisode 还要往下传给洗版判定 —— 它决定了「该不该拿订阅基线来比」。
+	// 别在这里 return 之后就不管了，那是两条判据共用的同一个事实。
+	hasEpisode := false
 	if sub.MediaType == domain.TGMediaTypeTV && record.Season >= 0 && record.Episode >= 0 {
 		has, err := s.episodes.Has(ctx, sub.ID, record.Season, record.Episode)
 		if err != nil {
@@ -151,6 +155,7 @@ func (s *Service) applyQualityAndDedupe(
 			record.Reason = "该集已入库，跳过"
 			return
 		}
+		hasEpisode = has
 	}
 
 	cfg, profileID := s.qualityConfigFor(ctx, sub)
@@ -165,9 +170,9 @@ func (s *Service) applyQualityAndDedupe(
 
 	// 洗版基线：已经推过更高的画质时，这一条只能作为升级候选，
 	// 低于基线直接跳过（省掉一轮无意义的窗口等待）。
-	if !s.isUpgradeCandidate(sub, verdict.Score) {
+	if !s.isUpgradeCandidate(sub, record, hasEpisode, verdict.Score) {
 		record.Status = domain.TGRecordDuplicate
-		record.Reason = describeBelowBaseline(sub, verdict.Score)
+		record.Reason = describeBelowBaseline(sub, record, hasEpisode, verdict.Score)
 		return
 	}
 
@@ -177,23 +182,34 @@ func (s *Service) applyQualityAndDedupe(
 
 // qualityConfigFor 取订阅生效的画质方案：订阅自带 → 全局默认 → 代码默认。
 func (s *Service) qualityConfigFor(ctx context.Context, sub *domain.TGSubscription) (domain.TGQualityConfig, int64) {
+	if s == nil || sub == nil {
+		return DefaultQualityConfig(), 0
+	}
 	id := sub.QualityProfileID
 	if id <= 0 {
 		id = s.defaultQualityProfileID()
 	}
-	if id > 0 {
+	if id > 0 && s.quality != nil {
 		if profile, err := s.quality.Get(ctx, id); err == nil && profile != nil {
 			if cfg, ok := decodeQualityConfig(profile.Config); ok {
 				return NormalizeQualityConfig(cfg), profile.ID
 			}
 		}
 	}
-	if profile, err := s.quality.GetDefault(ctx); err == nil && profile != nil {
-		if cfg, ok := decodeQualityConfig(profile.Config); ok {
-			return NormalizeQualityConfig(cfg), profile.ID
+	if s.quality != nil {
+		if profile, err := s.quality.GetDefault(ctx); err == nil && profile != nil {
+			if cfg, ok := decodeQualityConfig(profile.Config); ok {
+				return NormalizeQualityConfig(cfg), profile.ID
+			}
 		}
 	}
 	return DefaultQualityConfig(), 0
+}
+
+// qualityConfigForSub 是 qualityConfigFor 的「只要方案、不要 ID」形态。
+func (s *Service) qualityConfigForSub(ctx context.Context, sub *domain.TGSubscription) domain.TGQualityConfig {
+	cfg, _ := s.qualityConfigFor(ctx, sub)
+	return cfg
 }
 
 func decodeQualityConfig(raw json.RawMessage) (domain.TGQualityConfig, bool) {
@@ -209,10 +225,34 @@ func decodeQualityConfig(raw json.RawMessage) (domain.TGQualityConfig, bool) {
 
 // isUpgradeCandidate 判断一条候选值不值得推。
 //
-// 首次推送（基线为 0）永远值。之后只有严格高于基线才算「洗版」——
-// best_quality_score 只升不降，所以不会来回抖。
-func (s *Service) isUpgradeCandidate(sub *domain.TGSubscription, qualityScore float64) bool {
+// ⚠️ **剧集的基线只对「这一集已经收到过」的情况生效**，这是这个函数最重要的规则。
+//
+// BestQualityScore 是**订阅级**的 —— 「这部片推出去过的最好版本」。过去它被无差别地
+// 拿来跟每一条候选比，于是只要这部剧推成功过任意一集，基线就立起来了；洗版一关，
+// **之后所有新集全部被拒**，跟集号无关、跟这集收没收到也无关。实测的后果：
+//
+//   - 侠女内莉：**一集都没收到**，基线却是 78.3（当初推的整季包留下的，
+//     而且那次推送还失败了 —— UnmarkPushed 会退回 pushed_count 但**不回退基线**），
+//     从此什么都推不进去；
+//   - 绿灯军团：只收到 E6，基线 65，E5/E7 的 2160p（画质分 78.3，明显更好）
+//     连同 E1/E8 一起被拒，共 31 条堆在 duplicate 里。
+//
+// 正确语义是**按集**算：洗版的意思是「同一集有更好的版本」，而「这一集还缺着」
+// 根本不该被另一集的画质挡住。所以剧集只有 hasEpisode 为真时才拿基线去比；
+// 整季包、解析不出集号的发布名一律放行，交给窗口去选优（那里有 batchPenalty 压制）。
+//
+// 电影没有「集」这个概念，整部片一个基线是对的 —— 沿用原规则。
+func (s *Service) isUpgradeCandidate(
+	sub *domain.TGSubscription,
+	record *domain.TGMatchRecord,
+	hasEpisode bool,
+	qualityScore float64,
+) bool {
 	if sub.BestQualityScore <= 0 {
+		return true
+	}
+	if sub.MediaType == domain.TGMediaTypeTV && !hasEpisode {
+		// 这一集还没收到（或这条根本不是单集发布）→ 订阅级基线不适用。
 		return true
 	}
 	if !sub.UpgradeEnabled {
@@ -225,9 +265,22 @@ func (s *Service) isUpgradeCandidate(sub *domain.TGSubscription, qualityScore fl
 // 太高则洗不动。10 分大致相当于「片源升一档」或「编码升一档」。
 const upgradeThreshold = 10.0
 
-func describeBelowBaseline(sub *domain.TGSubscription, score float64) string {
+func describeBelowBaseline(
+	sub *domain.TGSubscription,
+	record *domain.TGMatchRecord,
+	hasEpisode bool,
+	score float64,
+) string {
 	if !sub.UpgradeEnabled {
 		return "已推送过更优版本，且该订阅未开启洗版"
+	}
+	// 剧集要说清是**哪一集**的基线，否则用户看到「画质分未超过基线」会以为
+	// 是这部片的整体基线，而实际上它比的是这一集已经推出去的那个版本。
+	if sub.MediaType == domain.TGMediaTypeTV && hasEpisode && record != nil {
+		return "这一集已有更优版本（S" + strconv.Itoa(record.Season) +
+			"E" + strconv.Itoa(record.Episode) +
+			"，基线 " + formatScore(sub.BestQualityScore) +
+			"，本条 " + formatScore(score) + "）"
 	}
 	return "画质分未超过已推送版本（基线 " +
 		formatScore(sub.BestQualityScore) + "，本条 " + formatScore(score) + "）"

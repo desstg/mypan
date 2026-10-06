@@ -217,6 +217,8 @@ func (s *Service) pushRecord(ctx context.Context, sub *domain.TGSubscription, re
 			AccountID:  accountID,
 			TargetPath: displayPath,
 		})
+		// 分享转存那条路手上就有专属子目录 ID，直接用它扫（不用再按名字找一遍）。
+		s.reconcilePackEpisodes(ctx, sub, rec, accountID, "", result.DeliveredFolderID)
 	}
 	return nil
 }

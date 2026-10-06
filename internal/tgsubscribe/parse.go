@@ -147,6 +147,101 @@ func trustSeasonEpisode(raw string, season, episode *int) (*int, *int) {
 	return season, episode
 }
 
+// parseEpisodeFromFileName 从一个**已落盘的媒体文件名**里解出季集号。
+//
+// 与 ParseReleaseName 的分工：那个解的是「发布名」，要防的是从 `DTS-HD.MA.5.1`
+// 里猜出假的 S01E05；这里解的是**已经躺在网盘里的文件**，路径里往往带着
+// 「Season 1/」「第一季/」这类目录段，而且没有发布名那种噪声。
+//
+// 判据刻意**窄**：只认「明确写着集号」的形态，认不出就返回 false 跳过。
+// 错记一集比漏记一集糟得多 —— episodes 表是订阅进度的唯一依据，错记会让
+// 详情页把没有的集标成绿的，而且再也纠正不回来。
+//
+// 认这些形态（覆盖实测见过的命名）：
+//
+//	S01E05 / s01e05 / 1x05        ← 最标准
+//	第05集 / 第5话 / 第5話
+//	EP05 / E05 / 05集（文件名里独立成段时）
+//
+// **刻意不认**：裸数字（`电影.2026.1080p.mkv` 里的 2026、`DDP5.1` 里的 5）。
+// 那是最容易错记的一类，宁可漏。
+func parseEpisodeFromFileName(name string) (season, episode int, ok bool) {
+	base := strings.TrimSpace(name)
+	if base == "" {
+		return 0, 0, false
+	}
+	// 只取基名：目录段（Season 1/、第一季/）可以给季号，但集号在文件名里。
+	dirSeason := 0
+	if idx := strings.LastIndexAny(base, "/\\"); idx >= 0 {
+		dir := base[:idx]
+		base = base[idx+1:]
+		if m := seasonFromPathSegment(dir); m > 0 {
+			dirSeason = m
+		}
+	}
+
+	// S01E05
+	if m := fileSeasonEpisodeRe.FindStringSubmatch(base); len(m) >= 3 {
+		s, e := parseSmallInt(m[1]), parseSmallInt(m[2])
+		if s != nil && e != nil && *e > 0 {
+			return *s, *e, true
+		}
+	}
+	// 1x05（英美剧常见写法）
+	if m := fileCrossEpisodeRe.FindStringSubmatch(base); len(m) >= 3 {
+		s, e := parseSmallInt(m[1]), parseSmallInt(m[2])
+		if s != nil && e != nil && *e > 0 {
+			return *s, *e, true
+		}
+	}
+	// 第05集 / 第5话
+	if m := cnEpisodeRe.FindStringSubmatch(base); len(m) >= 2 {
+		if e := parseSmallInt(m[1]); e != nil && *e > 0 {
+			return dirSeason, *e, true
+		}
+	}
+	// EP05 / E05（前面必须不是字母，免得吃到 `MAXX` 这类发布组名）
+	if m := fileBareEpisodeRe.FindStringSubmatch(base); len(m) >= 2 {
+		if e := parseSmallInt(m[1]); e != nil && *e > 0 {
+			return dirSeason, *e, true
+		}
+	}
+	return 0, 0, false
+}
+
+// seasonFromPathSegment 从路径段里认季号（Season 1 / 第一季 / S01）。
+//
+// 三条正则的捕获组语义各不相同，所以逐个处理而不是套一个循环：
+// explicitSeasonRe 抓的是阿拉伯数字，cnSeasonRe 抓的是中文数字（要走 parseCNNumeral），
+// tvSeasonWordRe 抓的是整串（要走 trailingInt）。
+func seasonFromPathSegment(seg string) int {
+	if m := explicitSeasonRe.FindStringSubmatch(seg); len(m) >= 2 {
+		if v := parseSmallInt(m[1]); v != nil && *v >= 0 {
+			return *v
+		}
+	}
+	if m := cnSeasonRe.FindStringSubmatch(seg); len(m) >= 2 {
+		if v := parseCNNumeral(m[1]); v != nil && *v >= 0 {
+			return *v
+		}
+	}
+	if m := tvSeasonWordRe.FindStringSubmatch(seg); len(m) >= 1 {
+		if v := trailingInt(m[0]); v != nil && *v >= 0 {
+			return *v
+		}
+	}
+	return 0
+}
+
+var (
+	// S01E05 / s01.e05
+	fileSeasonEpisodeRe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[ ._-]*e(\d{1,3})(?:[^0-9]|$)`)
+	// 1x05
+	fileCrossEpisodeRe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
+	// 前面必须是行首或非字母数字，后面必须是非数字 —— 免得吃到 `MAXX`、`DDP5`。
+	fileBareEpisodeRe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])e(?:p)?[ ._-]*(\d{1,3})(?:[^0-9]|$)`)
+)
+
 // trailingInt 取出字符串末尾的连续数字（"Season 2" → 2）。
 func trailingInt(s string) *int {
 	end := len(s)
