@@ -1238,6 +1238,33 @@ defineExpose({
                 </div>
 
                 <div class="scrape-card__shade" aria-hidden="true"></div>
+
+                <!-- 播放键：封面正中，鼠标指过去才浮出（与详情页那颗 `.jd-cover__play`
+                     同一形态）。**不预判可播性** —— 有的作品目录里压根没有 `.strm`，
+                     但那要读盘才知道；让所有卡片长得一样，点了再说清原因，
+                     比「有的卡莫名没有按钮」好排查。
+
+                     ⚠️ 必须放在 `.scrape-card__poster` **里面**：它是这张卡上唯一的
+                     定位祖先（`position: relative`）。放到外面的话，`top/left: 50%`
+                     会去找更外层那个 `.scrape-wall-phantom`（也是 relative），
+                     于是每张卡的按钮都落到**整面墙的正中**、几十个叠成一个 ——
+                     看起来就是「页面中间有个播放键」。实测踩过。 -->
+                <button
+                  type="button"
+                  class="scrape-card__play"
+                  :title="playback.loadingId.value === item.id ? '正在读取播放地址…' : '播放'"
+                  :disabled="playback.loadingId.value === item.id"
+                  @click="playback.playTMDB(selectedTaskId ?? 0, item)"
+                >
+                  <i
+                    :class="
+                      playback.loadingId.value === item.id
+                        ? 'fas fa-spinner fa-spin'
+                        : 'fas fa-play'
+                    "
+                  />
+                </button>
+
                 <div class="scrape-card__actions">
                   <button
                     v-if="canConfirmDoubt(item)"
@@ -1284,26 +1311,6 @@ defineExpose({
                   </button>
                 </div>
               </div>
-              <!-- 播放键：卡片正中，鼠标指过去才浮出（与详情页那颗 `.jd-cover__play`
-                   同一形态）。**不预判可播性** —— 有的作品目录里压根没有 `.strm`，
-                   但那要读盘才知道；让所有卡片长得一样，点了再说清原因，
-                   比「有的卡莫名没有按钮」好排查。 -->
-              <button
-                type="button"
-                class="scrape-card__play"
-                :title="playback.loadingId.value === item.id ? '正在读取播放地址…' : '播放'"
-                :disabled="playback.loadingId.value === item.id"
-                @click="playback.playTMDB(selectedTaskId ?? 0, item)"
-              >
-                <i
-                  :class="
-                    playback.loadingId.value === item.id
-                      ? 'fas fa-spinner fa-spin'
-                      : 'fas fa-play'
-                  "
-                />
-              </button>
-
               <div class="scrape-card__meta">
                 <div class="scrape-card__title" :title="item.title">{{ item.title }}</div>
                 <div class="scrape-card__sub">

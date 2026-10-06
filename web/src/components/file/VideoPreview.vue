@@ -301,6 +301,26 @@ function destroyMediaAdapters() {
     mpegtsPlayer.destroy();
     mpegtsPlayer = null;
   }
+  // ⚠️ 必须显式停掉 <video> 并清 src。
+  //
+  // 只销毁上面那两个适配器**不够**：对直连形态（海报墙那条 302 链路）根本没用上它们，
+  // 播放完全是原生 <video> 在跑。而原生播放器在元素被移除后，**不保证**立刻掐断那条
+  // 已经建立的连接 —— 实测（2026-10-06）：手机上播一部 4K 卡住后停播，
+  // 流量还一直在跑（约 10 Mbps，正好是那部片的码率），**关掉整个浏览器窗口才停**。
+  //
+  // 关闭预览窗走的是 v-if 卸载组件，卸载后 <video> 节点被摘掉，但请求还在飞。
+  // 这里先 pause() 再清 src + load()：load() 会中止当前的资源加载，
+  // 是让浏览器真正放弃那条连接的标准做法。
+  const video = videoRef.value;
+  if (video) {
+    try {
+      video.pause();
+    } catch {
+      // 元素可能已经处于不可播放状态，pause 抛错不影响下面清 src。
+    }
+    video.removeAttribute("src");
+    video.load();
+  }
 }
 
 async function setupMediaSource() {
@@ -494,6 +514,9 @@ function handleMediaError() {
   mediaLoading.value = false;
   mediaError.value = true;
   mediaPlaying.value = false;
+  // 出错（含 4K 卡住后解码器放弃）时也要把连接收掉，不然它会一直挂在后台拉数据 ——
+  // 用户看到的是「已经停了/报错了，流量还在跑」。
+  destroyMediaAdapters();
 }
 
 function downloadCurrent() {
