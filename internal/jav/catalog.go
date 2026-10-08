@@ -993,14 +993,39 @@ func patchFromNormalized(after, before *javdb.NormalizedMovie) synopsis.FieldPat
 //
 // 这是「输入一个番号就能进详情」的入口，与源码首页的用法一致。
 func (s *Service) IngestByNumber(ctx context.Context, number string) (*domain.JavMovie, error) {
+	return s.ingestByNumber(ctx, number, false)
+}
+
+// IngestByNumberFresh 与 IngestByNumber 同一条路，但**强制打上游**、不用本地缓存。
+//
+// # 为什么需要它（2026-10-08 用户要求）
+//
+// `IngestByNumber` 开头有一条缓存短路：库里有 `raw_json` 就直接返回、**一个上游
+// 请求都不打**。那对「用户敲了个番号」是对的（快、且上游被墙时还能用）。
+//
+// 但「在线刮削」要的不是这个 —— 用户的原话是「**是直接查上游，为什么要查库里**」。
+// 那一批片在库里可能躺着几周前的快照（演员表、评分、标签都会变），而他要的是
+// **上游现在那份**。走缓存短路的话，表现就是「点了在线刮削，什么都没变」——
+// 而它其实只是把库里那份又抄了一遍。
+//
+// 所以给在线刮削单独一条出口：**跳缓存、真打上游**，抓回来照常入库（入库是顺带的
+// 收益：详情页与影库那边也能看到最新的）。
+func (s *Service) IngestByNumberFresh(ctx context.Context, number string) (*domain.JavMovie, error) {
+	return s.ingestByNumber(ctx, number, true)
+}
+
+func (s *Service) ingestByNumber(ctx context.Context, number string, force bool) (*domain.JavMovie, error) {
 	number = strings.TrimSpace(number)
 	if number == "" {
 		return nil, domain.Errorf(domain.CodeValidation, "番号为空")
 	}
 
 	// 本地先找一遍：抓过的直接返回，省一次上游往返，也让上游被墙时还能用。
-	if m, err := s.movies.GetByNumber(ctx, number); err == nil && strings.TrimSpace(m.RawJSON) != "" {
-		return m, nil
+	// **force 时跳过这一步**（见 IngestByNumberFresh 的说明）。
+	if !force {
+		if m, err := s.movies.GetByNumber(ctx, number); err == nil && strings.TrimSpace(m.RawJSON) != "" {
+			return m, nil
+		}
 	}
 
 	client, err := s.javdbClient()

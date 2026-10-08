@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed } from "vue";
 import VideoPreview from "@/components/file/VideoPreview.vue";
 import type { SubtitleCandidate } from "@/components/file/VideoPreview.vue";
 import { toPlayableCandidates } from "@/components/admin/wallPlayable";
@@ -15,41 +15,45 @@ import type { PlayableFile } from "@/api/strmScrape";
  * 两条腿（`accountId + file_id` 和同目录字幕）在这儿都不成立，所以给它开了
  * `directURL` / `directSubtitles` 两个口子，由这一层做换算。
  *
- * # 多集
+ * # 只播一集，选集在抽屉里
  *
- * 一次把该作品的**全部** `.strm` 都拿回来交给 VideoPreview 当 episodes，
- * 它自带的选集面板就会出现在左侧（条件是 `episodes.length > 1`），
- * 与在文件浏览器里播多集视频完全一样 —— 单集则没有面板，直接播。
+ * 这个窗**只接一集**（`file`）。多集作品选哪一集是**详情抽屉**的事
+ * （它先弹选集面板），所以这里不做选集、也不给 VideoPreview 传多条 episodes ——
+ * 那样会出现两个选集入口，用户不知道该用哪个。
+ *
+ * 早先这里是 `items: PlayableFile[]` + 「多集默认起第一集」那一套，那是
+ * 「卡片直接播」时代的写法；那个入口已经去掉，这段逻辑成了永不生效的死路径。
  */
-const props = defineProps<{
-  /** 这一张卡的标题，只用于窗头。 */
-  title: string;
-  /** 后端给的可播文件清单（含每一条的同目录字幕）。 */
-  items: PlayableFile[];
-}>();
+const props = withDefaults(
+  defineProps<{
+    /** 这一集的标题，只用于窗头。 */
+    title: string;
+    /** 要播的那一集。选集由详情抽屉负责，这里只接一个。 */
+    file: PlayableFile | null;
+    /**
+     * 字幕候选。详情抽屉会直接给（它已按选中那一集算好）；
+     * 不给则回落到从 `file.subtitles` 推。
+     */
+    subtitles?: SubtitleCandidate[] | null;
+  }>(),
+  { subtitles: null },
+);
 
 const emit = defineEmits<{ close: [] }>();
-
-/**
- * 起播的那一条。
- *
- * 多集时默认起第一集，用户再在选集面板里切 —— 与文件浏览器打开一个多集目录的
- * 行为一致（那边也是从列表头开始）。
- */
-const current = ref<PlayableFile | null>(props.items[0] ?? null);
 
 /**
  * 字幕候选。
  *
  * 字幕是**本地磁盘上**的文件（`.strm` 同目录的 `.srt/.vtt/.sup`），后端已经连
- * 内容地址一起给过来了，所以这里不需要任何网盘请求。切集时不重新取：
- * 同一个作品目录下各集共用同一批字幕，后端也是按「目录」列的。
+ * 内容地址一起给过来了，所以这里不需要任何网盘请求。
  */
-const subtitles = ref<SubtitleCandidate[]>(toPlayableCandidates(props.items[0]?.subtitles ?? []));
+const subtitles = computed<SubtitleCandidate[]>(() =>
+  props.subtitles ?? toPlayableCandidates(props.file?.subtitles ?? []),
+);
 
 /** 复制这一集的播放地址（外部播放器那条路的兜底，本版先落地复制这一半）。 */
 async function copyLink() {
-  const url = current.value?.path;
+  const url = props.file?.path;
   if (!url) return;
   await copyTextToClipboard(url, {
     successMessage: "播放地址已复制",
@@ -62,16 +66,16 @@ function openExternal() {
   toast.info("「用本机播放器打开」还在开发中，可以先用「复制链接」粘到播放器里");
 }
 
-defineExpose({ current, subtitles });
+defineExpose({ subtitles });
 </script>
 
 <template>
   <VideoPreview
-    v-if="current"
+    v-if="file"
     :files="[]"
-    :initial-file-id="current.name"
-    :direct-u-r-l="current.path"
-    :direct-file-id="current.name"
+    :initial-file-id="file.name"
+    :direct-u-r-l="file.path"
+    :direct-file-id="file.name"
     :direct-subtitles="subtitles"
     @close="emit('close')"
   >

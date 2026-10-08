@@ -1,18 +1,16 @@
 package strmscrape
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"litepan/internal/domain"
 	"litepan/internal/proxybase"
 )
 
-// 海报墙的「可播放文件」查询。
+// 海报墙的「可播放文件」读取。
 //
 // # 为什么要有它
 //
@@ -20,6 +18,13 @@ import (
 // 里只有 rel_dir / strm_name / stem，**拿不到账号与 file_id**（见 types.go 的 Item
 // 与 javwall.go 的 JavWallItem，索引表里也没有）。要「点一下就能播」，就得有人在
 // 服务端把 .strm 读出来。
+//
+// # 谁在用
+//
+// 只有详情抽屉（wall_detail.go）：它按**服务端自己扫出来的绝对路径**逐条读，
+// 所以这个文件里不再有「按客户端给的 rel_dir 做路径校验」那一层 ——
+// 需要校验的两条公开接口（/items/playable、/jav-wall/item/playable）
+// 已随「卡片直接播」那个入口一起去掉了。
 //
 // # 为什么不让前端读
 //
@@ -66,85 +71,6 @@ type PlayableFile struct {
 	Path string `json:"path"`
 	// Subtitles 是同目录里配得上这个视频的字幕，按文件名排序。
 	Subtitles []SubtitleFile `json:"subtitles,omitempty"`
-}
-
-// TMDBPlayable 取 TMDB 影片墙上某张卡的可播放文件。
-//
-// strmName 非空（单文件作品）时只读那一个；为空（多集作品，见 item.go 的
-// `item.StrmName` 只在「平铺」或「只有一个条目」时才被填）则列整个目录。
-func (s *Service) TMDBPlayable(ctx context.Context, taskID int64, relDir, strmName string) ([]PlayableFile, error) {
-	return s.playableIn(ctx, taskID, relDir, strmName)
-}
-
-// JavPlayable 取番号墙上某张卡的可播放文件。
-//
-// stem 非空时用 jav 那套锚点定位（`<absDir>/<stem>.strm` 必须存在），
-// 拿到的就是那一个；为空则列目录（`flat` 布局的作品会有 `-cd1` / `-cd2` 多个）。
-func (s *Service) JavPlayable(ctx context.Context, taskID int64, relDir, stem string) ([]PlayableFile, error) {
-	name := ""
-	if strings.TrimSpace(stem) != "" {
-		ref, err := s.resolveJavItem(ctx, taskID, relDir, stem)
-		if err != nil {
-			// 番号那套 resolveJavItem 的报错已经分好了类（非法路径 / 目录不存在 /
-			// 没有对应的 .strm），直接透上去比在这里吞掉强。
-			return nil, err
-		}
-		name = ref.StrmName
-		relDir = ref.RelDir
-	}
-	return s.playableIn(ctx, taskID, relDir, name)
-}
-
-// playableIn 是两条路共用的实现。
-//
-// 入参 relDir / name 都来自客户端，所以三道闸门一道不能少（判据抄
-// resolveJavItem，别另写一份）：拒绝 `..` 与分隔符 → 拼出的绝对路径必须
-// `isInside(root, …)` → 只认 `.strm` 扩展名。
-func (s *Service) playableIn(ctx context.Context, taskID int64, relDir, name string) ([]PlayableFile, error) {
-	// resolveTask 返回的 root 已经做过 Abs（见它的实现），直接用它当基准。
-	_, root, err := s.resolveTask(ctx, taskID)
-	if err != nil {
-		return nil, err
-	}
-
-	rel := normalizeJavRelDir(relDir)
-	if rel == "" && strings.TrimSpace(relDir) != "" {
-		return nil, errBadJavPath
-	}
-	absDir := root
-	if rel != "" {
-		absDir = filepath.Join(root, filepath.FromSlash(rel))
-	}
-	if !isInside(root, absDir) {
-		return nil, errBadJavPath
-	}
-
-	// 已知文件名：只读那一个，不列目录（多集作品才需要列）。
-	if name = strings.TrimSpace(name); name != "" {
-		if strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
-			return nil, errBadJavPath
-		}
-		if !strings.EqualFold(filepath.Ext(name), ".strm") {
-			return nil, errBadJavPath
-		}
-		items := s.readPlayableFiles(taskID, absDir, rel, []string{name})
-		return items, nil
-	}
-
-	entries, err := os.ReadDir(absDir)
-	if err != nil {
-		return nil, domain.Errorf(domain.CodeNotFound, "目录不存在：%s", rel)
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".strm") {
-			continue
-		}
-		names = append(names, e.Name())
-	}
-	// 自然序：`-cd2` 要排在 `-cd10` 前面，纯字典序会反过来。
-	sort.Slice(names, func(i, j int) bool { return naturalLess(names[i], names[j]) })
-	return s.readPlayableFiles(taskID, absDir, rel, names), nil
 }
 
 // readPlayableFiles 逐个读取 `.strm` 正文，只留下**本应用的播放地址**。

@@ -69,10 +69,22 @@ type SidecarDoc struct {
 	Quality   SidecarQuality `json:"quality"`
 }
 
-// SidecarDest 是落盘现场。本包只取 added_at（nfo 的 <dateadded>）：
-// files 那份清单是给「按侧车改名 / 移动」那一路用的，与 Emby 无关。
+// SidecarDest 是落盘现场。本包只取 added_at（nfo 的 <dateadded>）。
+//
+// Files 是**投递那一刻记下的网盘源文件清单**（名字 + 体积 + 是否目录）。
+// 读侧原来只认 added_at，于是详情页想显示「源文件大小/类型」时拿不到数据 ——
+// 而那个大小是 `.strm` 自己的体积（一百多字节）给不出的，只有这份清单有。
+// 读回来不参与 nfo，纯展示用。
 type SidecarDest struct {
-	AddedAt string `json:"added_at"`
+	AddedAt string            `json:"added_at"`
+	Files   []SidecarDestFile `json:"files"`
+}
+
+// SidecarDestFile 是 dest.files 里的一条。
+type SidecarDestFile struct {
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	IsDir bool   `json:"is_dir"`
 }
 
 // SidecarCredit 是导演 / 片商 / 发行 / 系列这类「有 id 有名字」的条目。
@@ -88,9 +100,15 @@ type SidecarCredit struct {
 //
 // Avatar 不参与 nfo：上游头像地址同样经 XOR 混淆，写进 <actor><thumb> 会让 Emby
 // 拉回一张花屏图，而样本 nfo 里本来就没有这个元素。
+//
+// 但**读回来是必要的**（2026-10-07）：海报墙的详情抽屉要显示演员头像，
+// 而侧车是本地唯一存着头像地址的地方。写侧一直有它（sidecarActorJSON.Avatar），
+// 读侧漏了 —— 结果是抽屉里只能显示占位图标，明明数据就在同一个文件里。
 type SidecarActor struct {
+	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Gender int    `json:"gender"`
+	Avatar string `json:"avatar"`
 }
 
 // SidecarImages 是封面与剧照的**原始地址**。

@@ -543,6 +543,8 @@ export interface JavConfig {
   effective_proxy: string;
   min_interval_ms: number;
   request_gap_ms: number;
+  /** 图片间隔（毫秒）：封面 / 剧照那条通道。与 request_gap_ms 分开，见设置页说明。 */
+  image_gap_ms: number;
   timeout_sec: number;
   retry: number;
 
@@ -592,6 +594,7 @@ export interface JavConfigInput {
   use_proxy?: boolean;
   min_interval_ms?: number;
   request_gap_ms?: number;
+  image_gap_ms?: number;
   timeout_sec?: number;
   retry?: number;
   sub_check_enabled?: boolean;

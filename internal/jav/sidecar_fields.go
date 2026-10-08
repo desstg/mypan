@@ -140,6 +140,15 @@ func (s *Service) sidecarSyncFields(ctx context.Context, number string) (map[str
 	if err != nil || movie == nil {
 		return nil, false
 	}
+	return s.sidecarFieldsForMovie(ctx, movie)
+}
+
+// sidecarFieldsForMovie 把一部**已经在手**的影片打包成侧车字段。
+//
+// 抽出来是给「在线刮削」那条路用的（strmscrape 的 JavWallOnlineScrape）：
+// 它按番号打上游拿到影片之后，打包这一步与整批回写**必须逐字相同** ——
+// 两处各写一遍的话，补出来的字段迟早会不一样（表现是「手动补的和后台补的不一致」）。
+func (s *Service) sidecarFieldsForMovie(ctx context.Context, movie *domain.JavMovie) (map[string]any, bool) {
 	actors, err := s.movies.ListActors(ctx, movie.ID)
 	if err != nil {
 		// 演员读不到不算失败：其余字段照样推（侧车缺演员只是少一项，
@@ -156,4 +165,44 @@ func (s *Service) sidecarSyncFields(ctx context.Context, number string) (map[str
 	// 而跳过与「查到了但没什么可补」在记账上是两件事（后者要记一笔，
 	// 否则每轮都会重新查同一部）。
 	return fields, true
+}
+
+// FetchSidecarFieldsByNumber 按番号**打上游**取元数据，打包成侧车字段。
+//
+// # 与 sidecarSyncFields 的根本区别
+//
+// 那一条查的是**本地库**（`jav_movies`）—— 库里没有就无能为力。而实测有一批片
+// **根本不在库里**（28 部：`IPZZ-909` / `DVAJ-743` 等），它们的侧车与 nfo 只有
+// 演员和标签，后台回写永远跳过它们。
+//
+// 这一条走 `IngestByNumber`：先搜上游、命中后抓详情**并入库**（入库是有意的 ——
+// 抓回来的东西不落库，下次还得再打一次上游）。入库之后打包字段，与整批回写
+// 共用同一个 `sidecarFieldsForMovie`。
+//
+// # 为什么不是「只读不写」
+//
+// 用户的诉求是「打上游补齐」。抓回来入库是顺带的收益：以后详情页/影库那边也能
+// 看到这些片，而且下一轮后台回写会自己维护它们。
+//
+// ok=false 表示上游没有这一部（或番号无效）—— 调用方跳过，不算失败。
+func (s *Service) FetchSidecarFieldsByNumber(ctx context.Context, number string) (map[string]any, bool) {
+	number = strings.TrimSpace(number)
+	if number == "" || s.movies == nil {
+		return nil, false
+	}
+	// **强制打上游**（`IngestByNumberFresh`，不是带缓存短路的那个）——
+	// 在线刮削的判据是「上游现在有什么」，不是「库里存过什么」。
+	// 抓回来照常入库，所以下次详情页/后台回写用的是同一份最新数据。
+	movie, err := s.IngestByNumberFresh(ctx, number)
+	if err != nil || movie == nil {
+		if err != nil {
+			s.logInfo("jav online scrape upstream miss", "number", number, "err", err)
+		}
+		return nil, false
+	}
+	fields, ok := s.sidecarFieldsForMovie(ctx, movie)
+	if !ok {
+		return nil, false
+	}
+	return fields, len(fields) > 0
 }

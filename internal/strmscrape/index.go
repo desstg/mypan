@@ -129,11 +129,26 @@ func itemPosterRel(root string, g workGroup, mediaType string) string {
 }
 
 func posterURLFromRel(taskID int64, rel string) string {
+	return posterURLFromRelWidth(taskID, rel, 0)
+}
+
+// posterURLFromRelWidth 同上，但带一个**显示宽度**（CSS 像素）。
+//
+// `w` 是纯增量参数：带上它 `/poster` 就走按需缩放 + 磁盘缓存（见 api 层那条注释），
+// 不带就按原图发 —— 所以 0 与以前的行为逐字一致，既有调用方一个都不受影响。
+//
+// 详情抽屉里的图（演员头像 w185、剧照 w780）比卡片海报大得多，不缩的话一次开抽屉
+// 就是几 MB，所以那一侧拼 URL 时带上它。
+func posterURLFromRelWidth(taskID int64, rel string, width int) string {
 	rel = strings.TrimSpace(rel)
 	if rel == "" {
 		return ""
 	}
-	return fmt.Sprintf("/api/admin/strm-scrape/poster?strm_task_id=%d&rel=%s", taskID, pathEscape(rel))
+	base := fmt.Sprintf("/api/admin/strm-scrape/poster?strm_task_id=%d&rel=%s", taskID, pathEscape(rel))
+	if width > 0 {
+		return fmt.Sprintf("%s&w=%d", base, width)
+	}
+	return base
 }
 
 func boolToInt(v bool) int {

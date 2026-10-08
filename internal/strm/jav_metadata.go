@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"litepan/internal/domain"
 	"litepan/internal/jav/emby"
@@ -118,9 +119,15 @@ type javArtifactRequest struct {
 	// 本包不读别人的设置键。
 	watermarkDir string
 	PosterQueue  javPosterScheduler
-	Failures     *FailureCollector
-	OnProgress   ScanProgressReporter
-	Log          *slog.Logger
+	// Pace 在每张上游图片之后调用一次；返回 false 表示「该收手了」（ctx 取消）。
+	//
+	// 做成字段而不是直接读 Service 的设置：`generateJavArtifacts` 是包级函数、
+	// 没有 *Service（扫描那两条路在 deps 里传的是零散配置）。nil 表示不节流 ——
+	// **只有测试会传 nil**，线上三处入口都会传 `s.javImagePace`。
+	Pace       func(context.Context) bool
+	Failures   *FailureCollector
+	OnProgress ScanProgressReporter
+	Log        *slog.Logger
 }
 
 // javArtifactResult 是本轮生成的文件数。
@@ -501,6 +508,111 @@ func subtitleKeywords(doc *emby.SidecarDoc) []string {
 //
 // 先看本地是因为 poster 常常是后来才勾上的（用户先要 thumb，过一阵才想要海报）：
 // 那时 thumb 已经躺在目录里，为一张 poster 再打一次图床毫无必要。
+// pace 在每张图之后歇一下。Pace 为 nil（测试）时**不节流**。
+//
+// 间隔取自「请求间隔」(`jav_request_gap_ms`，用户可在番号设置里调大)。
+func (r javArtifactRequest) pace(ctx context.Context) bool {
+	if r.Pace == nil {
+		return true
+	}
+	return r.Pace(ctx)
+}
+
+// pause 歇**两倍**间隔 —— 用在「一整轮只会发一次」的那些请求上（封面）。
+//
+// 与 pace 分开是因为覆盖面不同：剧照是同一轮里的 N 张（张张都要等），
+// 而封面每轮只在「这一张要下」时发一次。对后者多等一会儿不拖慢整体多少，
+// 但把最密集的那条通道（封面）的速率砍半。Pace 为 nil 时等一个固定的 800ms。
+func (r javArtifactRequest) pause(ctx context.Context) bool {
+	if r.Pace == nil {
+		return waitCtx(ctx, 800*time.Millisecond)
+	}
+	// 连着调两次 pace：第二次走的是同一个 gap 计算，两次加起来就是两倍。
+	// 不另开一个回调是为了让「间隔只有一个来源」（设置项），不引入第二个数。
+	if !r.Pace(ctx) {
+		return false
+	}
+	return r.Pace(ctx)
+}
+
+// waitCtx 是可取消的 sleep（测试用的固定间隔也走它，好让 ctx 取消能立刻收手）。
+func waitCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// javImageGap 是**两次上游图片请求之间**的最小间隔（设置项 `jav_image_gap_ms`）。
+//
+// # 与「请求间隔」分开（2026-10-08 用户要求）
+//
+// 「请求间隔」(`jav_request_gap_ms`) 管的是**文字类**请求：简介补缺链要打
+// missav / jav321 / caribbeancom / javbus —— **四个不同外站**，封了就没简介，
+// 所以那一档必须客气（默认 1000ms）。
+//
+// 而图片只在这里发生（封面 1 张 + 剧照 N 张），全部打**同一个**图床，且只在
+// 「生成番号元数据」那一步。两者合适的节奏差一个数量级，合成一个数就只能取保守
+// 的那个 —— 那等于把图片拖慢十倍（一个 107 部的任务从十几分钟变成一两个小时）。
+//
+// 所以单独一项，默认 **200ms**。填 0 = 不限速（不推荐）。
+//
+// # 为什么必须有它
+//
+// 一条图片三件套 + 剧照是 1 + N 次上游请求（封面 1 次，剧照 N 张），而这里的 N
+// 在总集篇上能到十几。原先这段**一次节流都没有** —— 一部片 10 张、一个 107 部的
+// 任务就是一千多次连发，那是实打实的风控风险（JAVDB 的图床与 API 是两个域，
+// 但封的是账号/出口 IP，不分域）。
+//
+// 取值走番号设置里那个「请求间隔」（`jav_request_gap_ms`，默认 1000ms，
+// 用户可调）—— 它就是「两次上游请求之间的间隔」，图床同样适用。读不到时回落 400ms
+// （比 API 那档小：图床比 API 抗打，但也不能连发）。
+//
+// ⚠️ 加它会让全量扫描/重刮变慢（每张图 +0.4~1 秒）。这是**有意的**：慢一点比封号好，
+// 而且这几条路本来就是后台慢慢跑的活。
+func (s *Service) javImageGap() time.Duration {
+	// 默认 200ms（与设置项的默认值一致）—— 图床比文字类请求能承受更密。
+	gap := 200 * time.Millisecond
+	if s == nil || s.settings == nil {
+		return gap
+	}
+	// **读的是图片专用那个键**（`jav_image_gap_ms`），不是通用的 request_gap ——
+	// 后者管着简介补缺链（4 个不同外站），那个要客气得多，两者差一个数量级。
+	//
+	// ⚠️ 用 `Int` 而不是 `IntAllowEmpty`：用户把它填成 0 就是「不限速」，
+	// 那是个**有意的选择**（虽然不推荐），不能被兜底成默认值。
+	if ms := s.settings.Int(settings.KeyJavImageGapMS); ms >= 0 {
+		if ms == 0 {
+			return 0 // 用户明确要「不限速」
+		}
+		gap = time.Duration(ms) * time.Millisecond
+	}
+	return gap
+}
+
+// javImagePace 在每张图之间歇一下（见 javImageGap 的说明）。
+//
+// ctx 取消时立刻返回 false，调用方据此收手 —— 一个长任务被用户停掉时不该
+// 还在这儿睡满一整段。
+func (s *Service) javImagePace(ctx context.Context) bool {
+	gap := s.javImageGap()
+	if gap <= 0 {
+		return true
+	}
+	timer := time.NewTimer(gap)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func javCoverBytes(
 	ctx context.Context,
 	req javArtifactRequest,
@@ -530,6 +642,14 @@ func javCoverBytes(
 	if err != nil {
 		// 上游图挂了不是用户能修的事 —— 记 warn 不记 failure（否则通知列表会被灌满）。
 		log.Warn("番号元数据：封面下载失败", "url", raw, "err", err)
+		return nil, false
+	}
+	// 封面这一张也要计入节奏。
+	//
+	// 为什么是 `pause`（两倍间隔）而不是 `pace`：图片请求**比 API 请求更密** ——
+	// 一个 107 部的任务光封面就是 107 次，而封面与剧照是**两个不同域名**的 CDN，
+	// 各自有自己的风控计数，但封的是同一个账号/出口 IP。多留一倍余量是廉价的保险。
+	if !req.pause(ctx) {
 		return nil, false
 	}
 	return data, true
@@ -621,6 +741,11 @@ func writeJavPreviews(
 		if err != nil {
 			log.Warn("番号元数据：剧照下载失败", "url", url, "err", err)
 			continue
+		}
+		// 每张剧照之间歇一下 —— 剧照是这条路上**唯一会连发多次**的上游请求
+		// （总集篇能到十几张）。见 javImageGap 的说明。
+		if !req.pace(ctx) {
+			return written
 		}
 		ok, err := writeMetadataFile(absDir, names.ExtraDir+"/"+name, data)
 		if err != nil {
@@ -988,6 +1113,7 @@ func (s *Service) RebuildJavArtifacts(ctx context.Context, task *domain.StrmTask
 		Images:        s.javImages,
 		Subtitles:     s.javSubtitles,
 		PosterQueue:   s.javPosters,
+		Pace:          s.javImagePace,
 		// 重刮走的是**自动**那条判据：受总开关控制，图标按侧车属性算。
 		WatermarkEnabled: s.scanSettings().JavWatermarkEnabled,
 		WatermarkScale:   s.scanSettings().JavWatermarkScale,
@@ -1001,6 +1127,56 @@ func (s *Service) RebuildJavArtifacts(ctx context.Context, task *domain.StrmTask
 		return 0, domain.Errorf(domain.CodeValidation,
 			"本地没有这一部的侧车 json：请先对这个任务跑一次「同步元数据」的扫描，再重刮")
 	}
+	return res.Written, nil
+}
+
+// FillJavArtifacts 是**补缺**那条路：只生成缺的那些，已有的一个都不动。
+//
+// # 与 RebuildJavArtifacts 的区别（两处，都是有意为之）
+//
+//   - `Overwrite: false` + `RefetchImages: false` —— 所以**已有的图不重下**、
+//     已有的 nfo 不重写（判据见 writeJavArtifacts 里那三个 need*）；
+//   - 走的是**「在线刮削」**那条路（strmscrape 先把上游元数据写进 json 与 nfo），
+//     这里只负责把**图**补齐。
+//
+// # 为什么单独一个入口而不是复用重刮
+//
+// 重刮的语义是「把手上这份换掉」（thumb 也重下），而在线刮削要的是「缺什么补什么」——
+// 一个 100 部的任务重刮一遍会把 100 张封面全部重下，那是白打图床。
+//
+// 水印与那六个开关照 `scanSettings()` 走：用户在「STRM 设置」里关掉的项不会被生成，
+// 水印配置也照用（与重刮/全量扫描同一套判据，不另立一套）。
+func (s *Service) FillJavArtifacts(ctx context.Context, task *domain.StrmTask, relStrmPaths []string) (int64, error) {
+	if s == nil || task == nil {
+		return 0, domain.Errorf(domain.CodeValidation, "任务不存在")
+	}
+	if task.MediaKind != domain.StrmMediaKindJav {
+		return 0, domain.Errorf(domain.CodeValidation, "该任务不是番号影片任务")
+	}
+	if s.javImages == nil {
+		return 0, domain.Errorf(domain.CodeInternal, "图片抓取器未就绪")
+	}
+	if len(relStrmPaths) == 0 {
+		return 0, nil
+	}
+	root := TaskOutputDir(s.strmDir, TaskRelDir(task.GroupDir, task.OutputFolder))
+	res := generateJavArtifacts(ctx, javArtifactRequest{
+		Root:          root,
+		StrmFiles:     relStrmPaths,
+		Items:         s.scanSettings().JavMetaItems,
+		Overwrite:     false, // 已有的不重建
+		RefetchImages: false, // 已有的图不重下
+		Images:        s.javImages,
+		Subtitles:     s.javSubtitles,
+		PosterQueue:   s.javPosters,
+		Pace:          s.javImagePace,
+		// 与重刮/全量同一条判据：受总开关控制，图标按侧车属性算。
+		WatermarkEnabled: s.scanSettings().JavWatermarkEnabled,
+		WatermarkScale:   s.scanSettings().JavWatermarkScale,
+		WatermarkMargin:  s.scanSettings().JavWatermarkMargin,
+		watermarkDir:     s.scanSettings().JavWatermarkDir,
+		Log:              s.log,
+	})
 	return res.Written, nil
 }
 
@@ -1485,6 +1661,14 @@ func writeFieldIntoFile(path, field, value string) error {
 // 额外多一条：**只补空值**。侧车里已经有值的一律不动 —— 那份 json 用户可能手改过，
 // 也是别的工具可能读的中间产物。判据见 isEmptyJSONValue。
 func writeFieldsIntoFile(path string, fields map[string]any) (bool, error) {
+	return WriteFieldsIntoFile(path, fields)
+}
+
+// WriteFieldsIntoFile 是 writeFieldsIntoFile 的导出形态（在线刮削那条路要用）。
+//
+// 判据（只补空、值没变不写盘、顺手补 nfo）与内部那条**逐字相同** —— 它就是个壳，
+// 不是另一份实现。
+func WriteFieldsIntoFile(path string, fields map[string]any) (bool, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return false, err
@@ -1507,8 +1691,20 @@ func writeFieldsIntoFile(path string, fields map[string]any) (bool, error) {
 		}
 		changed = true
 	}
+	// 简介单独一条路（**在判 changed 之前**）。
+	//
+	// 为什么不让它走上面那个通用循环：`fillNFOPlotIfMissing` 是「补简介顺手补 nfo」
+	// 那条 sink 的历史包袱，而 `summary` 也在 `sidecarFieldsFor` 的打包清单里 ——
+	// 走通用路的话，只有当侧车里 summary 恰好为空时才会「changed」，而那些
+	// 「侧车早有简介、nfo 却缺 `<plot>`」的 nfo（实测 5 份）永远轮不到修。
+	//
+	// 现在每次回写都对 nfo 试一次：它有「已经有 `<plot>` 就一律不动」的判据兜着，
+	// 重复调用是幂等的、不会覆盖用户的编辑。
+	summaryChanged := applySummaryAndNFO(doc, path, fields)
+
 	if !changed {
-		return false, nil // 侧车里已经是新的了：不写盘，也不碰 nfo
+		// json 一个字都不用改，但 nfo 那边可能补上了（上面那次调用是无条件的）。
+		return summaryChanged, nil
 	}
 
 	out, err := json.MarshalIndent(doc, "", "  ")
@@ -1522,6 +1718,33 @@ func writeFieldsIntoFile(path string, fields map[string]any) (bool, error) {
 	// （nfo 由 json 生成，而生成器是「存在即跳过」，不点重刮就永远空着）。
 	fillNFOFieldsIfMissing(path, doc)
 	return true, nil
+}
+
+// applySummaryAndNFO 处理 `summary` 这一个字段，并把简介补进 nfo。
+//
+// 返回「json 那一侧有没有改动」。nfo 那一侧是 best-effort、不影响返回值 ——
+// 它有自己的幂等判据（见 fillNFOPlotIfMissing）。
+//
+// 两条路都走「侧车里那份优先」：侧车是**推送那一刻的快照**，可能带着库里后来
+// 被别的链改掉的更全版本（比如简介补缺链的产物）。我们只补空，不覆盖它。
+func applySummaryAndNFO(doc map[string]any, path string, fields map[string]any) bool {
+	current, _ := doc["summary"].(string)
+	current = strings.TrimSpace(current)
+	summary, _ := fields["summary"].(string)
+	summary = strings.TrimSpace(summary)
+
+	changed := false
+	if current == "" && summary != "" {
+		changed = setIfEmptyPath(doc, "summary", summary)
+		current = summary
+	}
+	// nfo 那一侧**每次都试**（不只在我们刚写了 json 时）：那 5 份「侧车早有简介、
+	// nfo 却缺 <plot>」的 nfo 正是这么漏下来的。判据在 fillNFOPlotIfMissing 里，
+	// 重复调用幂等。
+	if current != "" {
+		fillNFOPlotIfMissing(path, current)
+	}
+	return changed
 }
 
 // sortedFieldPaths 把字段键排个序。map 的遍历顺序是随机的，而写盘的顺序决定了
@@ -1660,6 +1883,14 @@ var sidecarNFOStringFields = []sidecarNFOField{
 		Missing: func(p emby.NFOPresence) bool { return !p.Trailer }},
 	{Name: "cover", Value: func(d *emby.SidecarDoc) string { return d.CoverURL() },
 		Missing: func(p emby.NFOPresence) bool { return !p.Cover }},
+	// 标题两栏：`<title>` 在生成器里是**恒写**的（它没有 omitempty），所以
+	// `presence.Title` 为 false 只有一种可能 —— 那份 nfo 根本不是生成器写的
+	// （别的工具产的、或者被手工删过）。那种情况下补它**不会覆盖用户的手改**
+	// （手改过的必然留着这个元素），正是这条路的判据。
+	{Name: "title", Value: func(d *emby.SidecarDoc) string { return d.Title },
+		Missing: func(p emby.NFOPresence) bool { return !p.Title }},
+	{Name: "originaltitle", Value: func(d *emby.SidecarDoc) string { return d.OriginTitle },
+		Missing: func(p emby.NFOPresence) bool { return !p.OriginalTitle }},
 }
 
 // fillNFOFieldsIfMissing 把侧车里**已有**的元数据补进同目录那份 nfo 里**缺的元素**。
@@ -1695,7 +1926,29 @@ var sidecarNFOStringFields = []sidecarNFOField{
 func fillNFOFieldsIfMissing(sidecarPath string, doc map[string]any) {
 	dir := filepath.Dir(sidecarPath)
 	stem := strings.TrimSuffix(filepath.Base(sidecarPath), filepath.Ext(sidecarPath))
-	nfoPath := filepath.Join(dir, stem+".nfo")
+	fillNFOFieldsIfMissingAt(filepath.Join(dir, stem+".nfo"), doc)
+}
+
+// FillNFOFieldsIfMissing 是 fillNFOFieldsIfMissing 的导出形态：**按给定的 nfo 路径**
+// 补缺。在线刮削（strmscrape.JavWallOnlineScrape）用它 —— 那条路上没有侧车文件，
+// 只有上游拿回来的字段，路径得由调用方给。
+func (s *Service) FillNFOFieldsIfMissing(nfoPath string, doc map[string]any) error {
+	fillNFOFieldsIfMissingAt(nfoPath, doc)
+	// **简介单独走一趟**：`fillNFOFieldsIfMissingAt` 那张表里刻意不含 `<plot>`
+	// （那条路本来就由 fillNFOPlotIfMissing 管），但调用方（在线刮削的本地兜底）
+	// 手上只有一份 doc，不补 plot 的话「侧车有简介、nfo 缺 <plot>」那批修不好 ——
+	// 而它们正是这条兜底最该修的东西（实测 116 里 5 份）。
+	if summary, _ := doc["summary"].(string); strings.TrimSpace(summary) != "" {
+		fillNFOPlotIfMissing(nfoPath, summary)
+	}
+	return nil
+}
+
+// fillNFOFieldsIfMissingAt 是「补 nfo 缺元素」的实体：读 nfoPath，按 doc 补缺。
+//
+// 与调用方是否真有侧车文件无关 —— 这是把在线刮削那条路接进来的关键（它手上只有
+// 一份从上游拿到的字段，没有 json 文件）。
+func fillNFOFieldsIfMissingAt(nfoPath string, doc map[string]any) {
 	raw, err := os.ReadFile(nfoPath)
 	if err != nil {
 		return // 还没生成过 nfo：等生成那一步自己带进去
@@ -1842,6 +2095,10 @@ func setNFOStringField(meta *emby.MovieMeta, name, value string) bool {
 		meta.TrailerURL = value
 	case "cover":
 		meta.CoverURL = value
+	case "title":
+		meta.Title = value
+	case "originaltitle":
+		meta.OriginTitle = value
 	default:
 		return false
 	}
@@ -1862,6 +2119,7 @@ func marshalJSON(doc map[string]any) []byte {
 }
 
 // fillNFOPlotIfMissing 在 nfo **连 <plot> 元素都没有**时，就地补上简介。
+//
 // 判据是「没有 `<plot>` 元素」，不是「plot 为空」—— 这条区分很关键：
 //
 //   - 生成器写的 nfo：简介为空时**整个元素都不输出**（见 emby.cdata：空串返回 nil）；
@@ -1884,16 +2142,25 @@ func fillNFOPlotIfMissing(sidecarPath, summary string) {
 	if strings.Contains(body, "<plot>") || strings.Contains(body, "<plot/>") {
 		return // 有 plot（哪怕是空的）—— 那是用户编辑过的，不动
 	}
-	// 插在 <outline> 之前（没有就插在 <movie> 之后）—— 与生成器的元素顺序一致，
+	// 插在 <outline> 那行之前（没有就插在 <movie> 之后）—— 与生成器的元素顺序一致，
 	// 免得同一份 nfo 因为"谁先写的"长得不一样。
-	// CDATA 里的 `]]>` 必须切断（标准做法：拆成 `]]]]><![CDATA[>`），否则 XML 直接坏掉。
+	//
+	// ⚠️ 判据是 **`<outline` 不带换行**（2026-10-07 修）。
+	// 原先找的是 `"  <outline>"`（带前导两个空格、**并且要求后面就是行尾**），
+	// 而生成器写出来的是 `  <outline><![CDATA[发行日期: …]]></outline>` ——
+	// 元素名后面紧跟 `<![CDATA[`，那个字符串**永远匹配不上**，于是每次都落到
+	// default 直接 return。实测库里 5 份 nfo 的简介就这么一直补不进去
+	// （侧车里 128 字的简介躺着，nfo 里连 `<plot>` 都没有）。
+	//
+	// 现在按**行首**找（`\n  <outline`），插在那一行前面，格式与生成器一致。
 	safe := strings.ReplaceAll(summary, "]]>", "]]]]><![CDATA[>")
-	line := "  <plot><![CDATA[" + safe + "]]></plot>" + "\n"
+	line := "  <plot><![CDATA[" + safe + "]]></plot>\n"
+	idx := strings.Index(body, "\n  <outline")
 	switch {
-	case strings.Contains(body, "  <outline>"):
-		body = strings.Replace(body, "  <outline>", line+"  <outline>", 1)
-	case strings.Contains(body, "<movie>"+"\n"):
-		body = strings.Replace(body, "<movie>"+"\n", "<movie>"+"\n"+line, 1)
+	case idx >= 0:
+		body = body[:idx+1] + line + body[idx+1:]
+	case strings.Contains(body, "<movie>\n"):
+		body = strings.Replace(body, "<movie>\n", "<movie>\n"+line, 1)
 	default:
 		return // 不是我们认识的结构（比如 tvshow.nfo），别乱动
 	}

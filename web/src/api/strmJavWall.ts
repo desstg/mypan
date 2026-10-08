@@ -1,7 +1,7 @@
 import { http } from "@/api/client";
 // 可播文件是**两面墙共用**的形状（同一个后端实现、同一套字幕结构），
 // 所以类型定义留在 strmScrape.ts 那一份，这里只 import —— 两边各写一份迟早会漂。
-import type { PlayableFile } from "@/api/strmScrape";
+import type { WallDetail } from "@/api/strmScrape";
 
 // 番号影片的海报墙（辅助工具 → 海报墙，选中「媒体类型 = 番号影片」的任务时用）。
 //
@@ -292,21 +292,51 @@ export const JAV_WALL_SORTS = [
   { value: "number_desc", label: "番号降序" },
 ];
 
-/**
- * 番号墙这一张卡能播什么：读 `.strm` 正文，回可播文件列表（含同目录字幕）。
- *
- * **点播放键时才调**。与 TMDB 墙那条同一套后端实现，入参换成番号那套
- * `(rel_dir, stem)` —— stem 会过 `resolveJavItem` 的三层闸门
- * （拒绝分隔符/`..`、`isInside`、`<absDir>/<stem>.strm` 必须存在）。
- */
-export function fetchJavWallItemPlayable(input: {
+/** 番号影片墙的详情（详情抽屉用）。 */
+export function fetchJavWallItemDetail(input: {
   strm_task_id: number;
   rel_dir: string;
   stem: string;
 }) {
-  return http.get<{ items: PlayableFile[] }>("/admin/strm-scrape/jav-wall/item/playable", {
+  return http.get<WallDetail>("/admin/strm-scrape/jav-wall/item/detail", {
     strm_task_id: String(input.strm_task_id),
     rel_dir: input.rel_dir,
     stem: input.stem,
+  });
+}
+
+/** 在线刮削的结果（打上游补齐缺的元数据）。 */
+export interface JavWallOnlineScrapeResult {
+  total: number;
+  scraped: number;
+  skipped: number;
+  failed: number;
+  /** 补出来的图片 / 字幕文件数（封面、海报、剧照、字幕）。 */
+  images: number;
+}
+
+/** 在线刮削的进度（前端按钮上的「刮削中…」）。 */
+export interface JavWallOnlineScrapeProgress {
+  strm_task_id: number;
+  running: boolean;
+  done: number;
+  total: number;
+  message: string;
+}
+
+/**
+ * 在线刮削：打上游把目录下**缺的**元数据补齐，写回 json 与 nfo。
+ *
+ * 与「刷新元数据」的区别：那一条只重读本地磁盘（不联网），这一条会联网。
+ * 番号按 **nfo 的 `<num>` → 侧车 json 的 number → 拆主干**（去掉 `-U`/`-C`/`-4K`
+ * 那些质量后缀）三条取，**不拿文件名当番号**。
+ */
+export function onlineScrapeJavWall(input: { strm_task_id: number; rel_dir?: string; stem?: string }) {
+  return http.post<JavWallOnlineScrapeResult>("/admin/strm-scrape/jav-wall/online-scrape", input);
+}
+
+export function fetchJavWallOnlineScrapeProgress(strmTaskId: number) {
+  return http.get<JavWallOnlineScrapeProgress>("/admin/strm-scrape/jav-wall/online-scrape/progress", {
+    strm_task_id: strmTaskId,
   });
 }

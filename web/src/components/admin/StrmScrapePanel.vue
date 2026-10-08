@@ -10,6 +10,7 @@ import StrmJavWall from "@/components/admin/StrmJavWall.vue";
 import StrmJavWallHiddenDirsModal from "@/components/admin/StrmJavWallHiddenDirsModal.vue";
 import { JAV_WALL_SORTS } from "@/api/strmJavWall";
 import {
+  backfillStrmScrapeImages,
   fetchStrmScrapeItems,
   fetchStrmScrapeScope,
   fetchStrmScrapeProgress,
@@ -42,7 +43,8 @@ import { useAdminPageLoading } from "@/composables/useAdminLoadingBar";
 import { useConditionalPolling } from "@/composables/useConditionalPolling";
 import { confirm } from "@/composables/useConfirm";
 import { useVirtualPosterWall } from "@/composables/useVirtualPosterWall";
-import { useWallPlayback } from "@/composables/useWallPlayback";
+import { useWallDetail } from "@/composables/useWallDetail";
+import TmdbWallDetailDrawer from "@/components/admin/TmdbWallDetailDrawer.vue";
 import WallPlayer from "@/components/admin/WallPlayer.vue";
 import { toast } from "@/composables/useToast";
 import {
@@ -134,7 +136,13 @@ const selectedTask = computed(() =>
 );
 // 任务是不是「番号影片」：决定整面墙长什么样（番号有自己的一套）。
 const isJavTask = computed(() => selectedTask.value?.media_kind === "jav");
-const javWallRef = ref<{ refreshMeta: () => void } | null>(null);
+const javWallRef = ref<{
+  refreshMeta: () => void;
+  // 在线刮削住在番号墙里（它要按目录扫盘），页头那颗按钮转调它。
+  onlineScrape?: () => void;
+  onlineScraping?: boolean;
+  onlineScrapeLabel?: string;
+} | null>(null);
 // 番号墙「整档隐藏的目录」：那份名单是**全局**的（不按任务存），但入口在墙上。
 const javHiddenOpen = ref(false);
 // 已隐藏的目录数（页头那颗按钮的文案要用）。从墙的列表响应里带回来，省一次请求。
@@ -521,6 +529,44 @@ async function stopScrape() {
   }
 }
 
+/**
+ * 补齐剧照与演员。
+ *
+ * 存量作品的入口：`missing_only` 策略下，已经刮过的作品会被跳过（那是对的 ——
+ * 否则每次刮削都要全量重跑），所以加了新抓取范围之后得有个**单独**的入口去补。
+ * 只补缺：不重写已有 nfo 的正文，也不覆盖已有的图。
+ */
+async function backfillArtwork() {
+  if (!selectedTaskId.value) {
+    toast.error("请先选择 STRM 任务");
+    return;
+  }
+  if (running.value) {
+    toast.error("刮削任务进行中，请稍后再试");
+    return;
+  }
+  try {
+    await confirm({
+      title: "补齐剧照与演员",
+      message:
+        "将扫描本任务下**已经刮过**的作品，给缺少剧照、演员、背景图或完整 nfo 的那些补上（只补缺，不改动已有的 nfo 正文与图片）。每部作品要下载若干张图，数量多时请耐心等待。",
+      icon: "info",
+      confirmText: "开始补齐",
+      danger: false,
+    });
+  } catch {
+    return;
+  }
+  try {
+    const p = await backfillStrmScrapeImages(selectedTaskId.value);
+    progress.value = p;
+    progressPolling.sync();
+    toast.success("已开始补齐");
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "启动补齐失败"));
+  }
+}
+
 async function refreshAll() {
   await loadTasks();
   if (!selectedTaskId.value) {
@@ -872,12 +918,19 @@ onUnmounted(() => {
   progressPolling.stop?.();
 });
 
-// 卡片上的播放键。逻辑在 composable 里（两面墙共用），这里只用它的状态驱动按钮。
-const playback = useWallPlayback();
+// 卡片点击 → 详情抽屉 → 从抽屉里播放。逻辑在 composable 里（两面墙共用），
+// 这里只把状态接到模板上。**卡片上不再有播放键**（用户要求：点卡片开详情，播放从详情里发起）。
+const wall = useWallDetail();
 
 defineExpose({
   startScrape,
   stopScrape,
+  backfillArtwork,
+  // 番号任务的「在线刮削」在子组件（StrmJavWall）里，页头那颗按钮要转调它 ——
+  // 与上面几个同一条规矩：动作住在实现那一侧，页头只做入口。
+  onlineScrape: () => javWallRef.value?.onlineScrape?.(),
+  onlineScraping: computed(() => Boolean(javWallRef.value?.onlineScraping)),
+  onlineScrapeLabel: computed(() => javWallRef.value?.onlineScrapeLabel ?? "在线刮削"),
   // 父组件（辅助工具页）要用它决定页头那几个按钮显不显示：番号任务上跑 TMDB 刮削
   // 会往同一批目录写 nfo，而「标记为正常」那一步会把 thumb/poster 删掉。
   isJavTask,
@@ -1014,6 +1067,9 @@ defineExpose({
               <button type="button" class="scrape-menu__item" @click="emit('open-settings')">
                 <span>STRM 刮削设置</span>
               </button>
+              <!-- 「补齐剧照与演员」**不在这里** —— 它挪到页头当按钮了（见
+                   AuxToolsManagement.vue）。藏在设置下拉里用户找不到（实测问「在哪里」），
+                   而它是个动作、不是设置项。 -->
               <button
                 v-if="isJavTask"
                 type="button"
@@ -1204,6 +1260,11 @@ defineExpose({
               :key="item.id"
               class="scrape-card"
               :class="{ 'scrape-card--busy': isItemBusy(item) }"
+              role="button"
+              tabindex="0"
+              :title="`《${item.title}》· 点开详情`"
+              @click="wall.openTMDB(selectedTaskId ?? 0, item)"
+              @keydown.enter.prevent="wall.openTMDB(selectedTaskId ?? 0, item)"
             >
               <div class="scrape-card__poster">
                 <!-- 加载失败也落到统一占位图（以前只有「没有 URL」才有兜底）。 -->
@@ -1239,32 +1300,6 @@ defineExpose({
 
                 <div class="scrape-card__shade" aria-hidden="true"></div>
 
-                <!-- 播放键：封面正中，鼠标指过去才浮出（与详情页那颗 `.jd-cover__play`
-                     同一形态）。**不预判可播性** —— 有的作品目录里压根没有 `.strm`，
-                     但那要读盘才知道；让所有卡片长得一样，点了再说清原因，
-                     比「有的卡莫名没有按钮」好排查。
-
-                     ⚠️ 必须放在 `.scrape-card__poster` **里面**：它是这张卡上唯一的
-                     定位祖先（`position: relative`）。放到外面的话，`top/left: 50%`
-                     会去找更外层那个 `.scrape-wall-phantom`（也是 relative），
-                     于是每张卡的按钮都落到**整面墙的正中**、几十个叠成一个 ——
-                     看起来就是「页面中间有个播放键」。实测踩过。 -->
-                <button
-                  type="button"
-                  class="scrape-card__play"
-                  :title="playback.loadingId.value === item.id ? '正在读取播放地址…' : '播放'"
-                  :disabled="playback.loadingId.value === item.id"
-                  @click="playback.playTMDB(selectedTaskId ?? 0, item)"
-                >
-                  <i
-                    :class="
-                      playback.loadingId.value === item.id
-                        ? 'fas fa-spinner fa-spin'
-                        : 'fas fa-play'
-                    "
-                  />
-                </button>
-
                 <div class="scrape-card__actions">
                   <button
                     v-if="canConfirmDoubt(item)"
@@ -1272,7 +1307,7 @@ defineExpose({
                     class="scrape-card__act scrape-card__act--ghost"
                     :disabled="running || markingNormalId === item.id || Boolean(rescrapingId)"
                     :title="markingNormalId === item.id ? '处理中…' : '确认当前匹配'"
-                    @click="confirmDoubt(item)"
+                    @click.stop="confirmDoubt(item)"
                   >
                     <i class="fas fa-check"></i>
                     <span>{{ markingNormalId === item.id ? "…" : "确认" }}</span>
@@ -1283,7 +1318,7 @@ defineExpose({
                     class="scrape-card__act scrape-card__act--ghost"
                     :disabled="running || markingNormalId === item.id || Boolean(rescrapingId)"
                     :title="markingNormalId === item.id ? '处理中…' : markActionLabel(item) === '完成' ? '标记完成' : '设为完结'"
-                    @click="markEnded(item)"
+                    @click.stop="markEnded(item)"
                   >
                     <i class="fas fa-flag-checkered"></i>
                     <span>{{ markingNormalId === item.id ? "…" : markActionLabel(item) }}</span>
@@ -1294,7 +1329,7 @@ defineExpose({
                     class="scrape-card__act scrape-card__act--ghost"
                     :disabled="running || rescrapingId === item.id || Boolean(markingNormalId)"
                     :title="rescrapingId === item.id ? '处理中…' : '重新刮削'"
-                    @click="rescrapeItem(item)"
+                    @click.stop="rescrapeItem(item)"
                   >
                     <i class="fas fa-rotate"></i>
                     <span>{{ rescrapingId === item.id ? "…" : "重刮" }}</span>
@@ -1304,7 +1339,7 @@ defineExpose({
                     class="scrape-card__act"
                     :disabled="running || Boolean(markingNormalId) || Boolean(rescrapingId)"
                     title="重新匹配"
-                    @click="openRematch(item)"
+                    @click.stop="openRematch(item)"
                   >
                     <i class="fas fa-magnifying-glass"></i>
                     <span>匹配</span>
@@ -1435,8 +1470,23 @@ defineExpose({
       </div>
     </Teleport>
 
-    <!-- 播放窗。跟着卡片上的播放键走，数据在 click 那一刻才取（见 useWallPlayback）。 -->
-    <WallPlayer v-if="playback.open.value" :title="playback.title.value" :items="playback.items.value" @close="playback.close" />
+    <!-- 详情抽屉 + 从它里面发起的播放窗。数据都在 click 那一刻才取（见 useWallDetail）。
+         TMDB 那面用**自己的**抽屉（版式与番号那面不同，见 TmdbWallDetailDrawer 的说明）。 -->
+    <TmdbWallDetailDrawer
+      :open="wall.open.value"
+      :loading="wall.loading.value"
+      :detail="wall.detail.value"
+      :error="wall.error.value"
+      @close="wall.close"
+      @play="wall.play"
+    />
+    <WallPlayer
+      v-if="wall.playerOpen.value"
+      :title="wall.playerTitle.value"
+      :file="wall.playerFile.value"
+      :subtitles="wall.playerSubtitles.value"
+      @close="wall.closePlayer"
+    />
   </div>
 </template>
 
@@ -1880,12 +1930,26 @@ defineExpose({
   box-sizing: border-box;
   will-change: transform;
 }
+/* 整张卡片可点（开详情）。cursor 与 hover 抬起是「这里能点」的信号 ——
+   没有它，用户只会去点那排刮削按钮，永远发现不了详情。 */
 .scrape-card {
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid var(--border);
   background: var(--surface);
 }
+.scrape-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-pop);
+}
+
+.scrape-card:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
 .scrape-card__poster {
   position: relative;
   aspect-ratio: 2 / 3;
@@ -2038,57 +2102,6 @@ defineExpose({
 .scrape-card__actions .scrape-card__act:only-child {
   grid-column: 1 / -1;
 }
-/* 播放键：卡片正中，**鼠标指过去才浮出**，移开就消失（与详情页那颗
-   `.jd-cover__play` 同一形态 —— 64px 圆形、半透明深底、hover 放大）。
-
-   为什么不做常显：海报墙一屏几十张，常显会盖住封面本身；而这一页的主线是刮削，
-   播放是次要动作，压成 hover 更合这一页的轻重。
-
-   触屏没有 hover —— 这条 `@media (hover: none)` 就是给手机的兜底：
-   不补的话，那排按钮（`__actions` 与这颗）在手机上永远点不到。 */
-.scrape-card__play {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 52px;
-  height: 52px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 50%;
-  background: rgba(15, 23, 42, 0.55);
-  color: #fff;
-  font-size: 1.1rem;
-  cursor: pointer;
-  opacity: 0;
-  z-index: 2;
-  transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
-}
-
-.scrape-card:hover .scrape-card__play,
-.scrape-card__play:focus-visible {
-  opacity: 1;
-}
-
-.scrape-card__play:hover:not(:disabled) {
-  background: rgba(15, 23, 42, 0.75);
-}
-
-/* 取地址期间按钮留在原地转圈：`.fa-spin` 在转，但 opacity 得保持 1，
-   否则鼠标一移开用户会以为「点了没反应」。 */
-.scrape-card__play:disabled {
-  opacity: 1;
-  cursor: default;
-}
-
-@media (hover: none) {
-  .scrape-card__play {
-    opacity: 1;
-  }
-}
-
 .scrape-card__meta {
   padding: 10px 10px 12px;
   background: var(--surface);
@@ -2311,5 +2324,8 @@ defineExpose({
 .scrape-menu { display: flex; flex-direction: column; min-width: 220px; padding: 6px; }
 .scrape-menu__item { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; padding: 8px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; }
 .scrape-menu__item:hover { background: var(--surface-sunken); }
+/* 刮削进行中时「补齐」那颗要看起来是禁用的（它与刮削共用同一条后台队列）。 */
+.scrape-menu__item:disabled { opacity: 0.5; cursor: not-allowed; }
+.scrape-menu__item:disabled:hover { background: transparent; }
 .scrape-menu__hint { font-size: 11px; color: var(--text-muted); }
 </style>

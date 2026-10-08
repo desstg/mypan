@@ -97,6 +97,7 @@ type JavDraft = {
   use_proxy: boolean;
   min_interval_ms: number;
   request_gap_ms: number;
+  image_gap_ms: number;
   timeout_sec: number;
   retry: number;
   sub_check_enabled: boolean;
@@ -132,6 +133,7 @@ const draft = reactive<JavDraft>({
   use_proxy: true,
   min_interval_ms: 500,
   request_gap_ms: 1000,
+  image_gap_ms: 200,
   timeout_sec: 20,
   retry: 3,
   sub_check_enabled: false,
@@ -147,7 +149,7 @@ const draft = reactive<JavDraft>({
   sub_timeout_sec: 30,
   sidecar_enabled: true,
   sidecar_sync_enabled: true,
-  detail_backfill_enabled: false,
+  detail_backfill_enabled: true,
   detail_backfill_budget_min: 30,
   default_account_id: 0,
   default_parent_id: "",
@@ -167,6 +169,7 @@ function snapshot() {
     use_proxy: draft.use_proxy,
     min_interval_ms: draft.min_interval_ms,
     request_gap_ms: draft.request_gap_ms,
+    image_gap_ms: draft.image_gap_ms,
     timeout_sec: draft.timeout_sec,
     retry: draft.retry,
     sub_check_enabled: draft.sub_check_enabled,
@@ -209,6 +212,7 @@ function applyConfig(cfg: JavConfig) {
   draft.use_proxy = cfg.use_proxy;
   draft.min_interval_ms = cfg.min_interval_ms;
   draft.request_gap_ms = cfg.request_gap_ms;
+  draft.image_gap_ms = cfg.image_gap_ms ?? 200;
   draft.timeout_sec = cfg.timeout_sec;
   draft.retry = cfg.retry;
   draft.sub_check_enabled = cfg.sub_check_enabled;
@@ -614,10 +618,27 @@ onMounted(async () => {
 
           <SettingsRow>
             <template #info>
-              <SettingsRowLabel label="请求间隔（毫秒）" />
+              <SettingsRowLabel
+                label="请求间隔（毫秒）"
+                help-title="请求间隔"
+                help-text="**文字类**请求之间歇多久：简介补缺链（要打 missav / jav321 / caribbeancom / javbus **四个不同外站**）、榜单、影库同步。这四个站封了就没简介，所以这一档要客气 —— 默认 1000ms。想改图片那个节奏用下面那一项，别动这里。"
+              />
             </template>
             <template #control>
               <AppInput v-model.number="draft.request_gap_ms" type="number" style="width: 100px" />
+            </template>
+            </SettingsRow>
+
+          <SettingsRow>
+            <template #info>
+              <SettingsRowLabel
+                label="图片间隔（毫秒）"
+                help-title="图片间隔"
+                help-text="**图片**请求之间歇多久：生成番号元数据时的封面下载与剧照下载（全部打同一个图床）。它比文字类那档能承受更密 —— 默认 200ms。填 0 = 不限速（**不推荐**：一个 107 部的任务会连发上千次图床请求）。改大则更保守。"
+              />
+            </template>
+            <template #control>
+              <AppInput v-model.number="draft.image_gap_ms" type="number" style="width: 100px" />
             </template>
             </SettingsRow>
 
@@ -797,7 +818,7 @@ onMounted(async () => {
               <SettingsRowLabel
                 label="后台回填影片详情"
                 help-title="后台回填影片详情"
-                help-text="影库里有很多影片是从榜单/影库同步进来的，那时只拿到番号、标题和封面（列表接口不给详情），所以演员、简介、导演、片商、系列、评分、时长、标签、剧照全都是空的。打开这一项后，后台会在空闲时逐部去 JAVDB 抓一次详情补齐（用户一回来就立刻收手，下一轮接着来；**攒够 200 部才开工**，免得为几部新片就占用上游通道）。注意：这一项**会持续占用上游抓取通道**，实测全量跑完约 6.4 小时（每部之间有限流等待，这是防封号必需的）。可以随时关掉，下一轮就停；已补好的不会重跑。"
+                help-text="影库里有很多影片是从榜单/影库同步进来的，那时只拿到番号、标题和封面（列表接口不给详情），所以演员、简介、导演、片商、系列、评分、时长、标签、剧照全都是空的。打开这一项后，后台会在空闲时逐部去 JAVDB 抓一次详情补齐（用户一回来就立刻收手，下一轮接着来；**攒够 200 部才开工**，免得为几部新片就占用上游通道）。这一项默认**开启**：它只影响详情页能显示什么，不影响匹配与推送；而且闸门很保守 —— 攒够 200 部才开工、每轮有时间预算、你一回来就立刻收手，不会跟你的浏览抢通道。实测全量跑完约 6.4 小时（每部之间有限流等待，这是防封号必需的）。想省上游配额可以随时关掉，下一轮就停；已补好的不会重跑。"
               />
             </template>
             <template #control>

@@ -3,6 +3,8 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { getApiErrorMessage } from "@/api/client";
 import {
   fetchJavWallItems,
+  fetchJavWallOnlineScrapeProgress,
+  onlineScrapeJavWall,
   rebuildJavWallItem,
   refreshJavWall,
   type JavWallItem,
@@ -11,6 +13,7 @@ import {
 import AppButton from "@/components/base/AppButton.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
 import StrmJavMetaDrawer from "@/components/admin/StrmJavMetaDrawer.vue";
+import { confirm } from "@/composables/useConfirm";
 import { findScrollBox, useFillViewport } from "@/composables/useFillViewport";
 import { toast } from "@/composables/useToast";
 import "@/styles/jav.css";
@@ -27,7 +30,8 @@ import "@/styles/jav.css";
 
 // 搜索与排序由**页头**统一控制（用户要求：番号墙自己的那两个框不要了）。
 // 子组件只按这三个 prop 请求 —— 页头那套按钮对两种任务长得一模一样，功能各是各的。
-import { useWallPlayback } from "@/composables/useWallPlayback";
+import { useWallDetail } from "@/composables/useWallDetail";
+import WallDetailDrawer from "@/components/admin/WallDetailDrawer.vue";
 import WallPlayer from "@/components/admin/WallPlayer.vue";
 
 const props = defineProps<{
@@ -133,6 +137,87 @@ async function load(options: { append?: boolean } = {}) {
     loadingMore.value = false;
   }
 }
+
+// —— 在线刮削（打上游补齐缺的元数据）——
+
+/**
+ * 是否正在在线刮削。
+ *
+ * 这个状态**只影响这一颗按钮**（禁用 + 文案变「刮削中…」）—— 用户明确要求
+ * 「用户可以正常操作」：墙照常翻页、点卡片照常开详情，后端那条路也不占
+ * 刮削的互斥锁（见 JavWallOnlineScrape 的说明）。
+ */
+const onlineScraping = ref(false);
+let onlinePollTimer: number | undefined;
+
+/**
+ * 在线刮削：打上游把目录下**缺的**元数据补齐，写回 json 与 nfo。
+ *
+ * 与「刷新元数据」的区别：那一条只重读本地磁盘，这一条会联网。
+ */
+async function onlineScrape() {
+  if (!props.taskId || onlineScraping.value) return;
+  try {
+    await confirm({
+      title: "在线刮削",
+      message:
+        "将按番号打上游（JAVDB），把本任务下**缺的**元数据补齐，并写入侧车 JSON 与 NFO。只补空：已有的值（包括你在编辑器里改过的）一律不动。数量多时请耐心等待 —— 期间墙可以正常使用。",
+      icon: "info",
+      confirmText: "开始刮削",
+      danger: false,
+    });
+  } catch {
+    return;
+  }
+  onlineScraping.value = true;
+  startOnlinePoll();
+  try {
+    const out = await onlineScrapeJavWall({ strm_task_id: props.taskId });
+    const parts = [`补到 ${out.scraped} 部`];
+    if (out.images) parts.push(`补图 ${out.images} 张`);
+    if (out.skipped) parts.push(`跳过 ${out.skipped} 部`);
+    if (out.failed) parts.push(`失败 ${out.failed} 部`);
+    toast.success(`在线刮削完成：${parts.join("，")}`);
+    await load();
+  } catch (error) {
+    toast.error(getApiErrorMessage(error, "在线刮削失败"));
+  } finally {
+    stopOnlinePoll();
+    onlineScraping.value = false;
+  }
+}
+
+/** 轮询进度：按钮上显示「刮削中… (n/m)」。 */
+function startOnlinePoll() {
+  stopOnlinePoll();
+  const tick = async () => {
+    if (!props.taskId) return;
+    try {
+      const p = await fetchJavWallOnlineScrapeProgress(props.taskId);
+      onlineProgress.value = p.running ? p : null;
+    } catch {
+      // 进度拿不到不该打扰用户：按钮照样转，主请求的结论才是准的。
+    }
+  };
+  void tick();
+  onlinePollTimer = window.setInterval(tick, 2000);
+}
+
+function stopOnlinePoll() {
+  if (onlinePollTimer !== undefined) window.clearInterval(onlinePollTimer);
+  onlinePollTimer = undefined;
+  onlineProgress.value = null;
+}
+
+const onlineProgress = ref<{ done: number; total: number } | null>(null);
+/** 按钮文案：有进度就带上 `(n/m)`。 */
+const onlineScrapeLabel = computed(() => {
+  if (!onlineScraping.value) return "在线刮削";
+  const p = onlineProgress.value;
+  return p && p.total > 0 ? `刮削中… (${p.done}/${p.total})` : "刮削中…";
+});
+
+onUnmounted(stopOnlinePoll);
 
 /** 「刷新元数据」= 重读本地磁盘并重列（不是重新生成；重新生成是卡片上的「重刮」）。 */
 async function refreshMeta() {
@@ -432,10 +517,10 @@ onUnmounted(() => {
   window.removeEventListener("resize", scheduleBudgetRefresh);
 });
 
-// 卡片上的播放键。逻辑在 composable 里（两面墙共用），这里只用它的状态驱动按钮。
-const playback = useWallPlayback();
+// 卡片点击 → 详情抽屉 → 从抽屉里播放。**卡片上不再有播放键**（用户要求）。
+const wall = useWallDetail();
 
-defineExpose({ refreshMeta, load });
+defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabel });
 </script>
 
 <template>
@@ -500,7 +585,16 @@ defineExpose({ refreshMeta, load });
     </div>
 
     <div v-else ref="gridEl" class="jav-wall__grid" :class="`jav-wall__grid--${view}`">
-      <article v-for="(item, index) in items" :key="item.id" class="jav-card jav-card--wall">
+      <article
+        v-for="(item, index) in items"
+        :key="item.id"
+        class="jav-card jav-card--wall"
+        role="button"
+        tabindex="0"
+        :title="`《${item.number || item.title}》· 点开详情`"
+        @click="wall.openJav(taskId ?? 0, item)"
+        @keydown.enter.prevent="wall.openJav(taskId ?? 0, item)"
+      >
         <div class="jav-card__cover" :class="{ 'jav-card__cover--poster': view === 'poster' }">
           <!-- 两个视图各自的 URL；都没有或加载失败 → 统一占位图。
                这里给 lazy=false 并自己按视口决定「发不发」——见 imgWindow。 -->
@@ -512,33 +606,15 @@ defineExpose({ refreshMeta, load });
           <!-- 还没轮到取图时占住位置，避免取到图之前卡片高度塌下去 -->
           <div v-if="!imageSrc(item, index)" class="jav-card__skeleton" />
 
-          <!-- 播放键：封面正中，鼠标指过去才浮出（与详情页那颗 `.jd-cover__play`
-               同一形态）。挂在这儿而不是 `.jav-card__hover` 那一排里 ——
-               两个视图的封面比例不同（横版 3:2 / 竖版 2:3），居中的圆钮两边都站得住，
-               塞进底部那排则会随比例上下飘。 -->
-          <button
-            type="button"
-            class="jav-card__play"
-            :title="playback.loadingId.value === item.id ? '正在读取播放地址…' : '播放'"
-            :disabled="playback.loadingId.value === item.id"
-            @click.stop="playback.playJav(taskId ?? 0, item)"
-          >
-            <i
-              :class="
-                playback.loadingId.value === item.id ? 'fas fa-spinner fa-spin' : 'fas fa-play'
-              "
-            />
-          </button>
-
           <div class="jav-card__hover">
-            <AppButton type="button" size="sm" variant="secondary" @click="openEditor(item)">编辑</AppButton>
+            <AppButton type="button" size="sm" variant="secondary" @click.stop="openEditor(item)">编辑</AppButton>
             <AppButton
               type="button"
               size="sm"
               variant="primary"
               :disabled="busyStem === item.stem"
               title="用本地 json 重建这一部的 nfo，并重新下载封面与海报（剧照只补缺的）"
-              @click="rebuild(item)"
+              @click.stop="rebuild(item)"
             >
               {{ busyStem === item.stem ? "重刮中…" : "重刮" }}
             </AppButton>
@@ -553,12 +629,21 @@ defineExpose({ refreshMeta, load });
       </article>
     </div>
 
-    <!-- 播放窗。跟着卡片上的播放键走，数据在 click 那一刻才取（见 useWallPlayback）。 -->
+    <!-- 详情抽屉 + 从它里面发起的播放窗。数据都在 click 那一刻才取（见 useWallDetail）。 -->
+    <WallDetailDrawer
+      :open="wall.open.value"
+      :loading="wall.loading.value"
+      :detail="wall.detail.value"
+      :error="wall.error.value"
+      @close="wall.close"
+      @play="wall.play"
+    />
     <WallPlayer
-      v-if="playback.open.value"
-      :title="playback.title.value"
-      :items="playback.items.value"
-      @close="playback.close"
+      v-if="wall.playerOpen.value"
+      :title="wall.playerTitle.value"
+      :file="wall.playerFile.value"
+      :subtitles="wall.playerSubtitles.value"
+      @close="wall.closePlayer"
     />
 
     <!-- 拉到底续加载。哨兵**常驻 DOM**（不在上面的 v-if 分支里）—— 它一旦被移除，
@@ -615,18 +700,6 @@ defineExpose({ refreshMeta, load });
 .jav-wall__number { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jav-wall__title { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jav-wall__sub { font-size: 11px; color: var(--text-muted); }
-
-/* 播放键：封面正中，**鼠标指过去才浮出**（与详情页 `.jd-cover__play` 同一形态）。
-   挂在这个位置而不是底部 `.jav-card__hover` 那一排，是为了两个视图共用一套定位 ——
-   横版封面 3:2、竖版 2:3，居中的圆钮两边都站得住。 */
-.jav-card__play { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 52px; height: 52px; display: flex; align-items: center; justify-content: center; border: none; border-radius: 50%; background: rgba(15, 23, 42, 0.55); color: #fff; font-size: 1.1rem; cursor: pointer; opacity: 0; z-index: 3; transition: opacity 0.15s ease, background 0.15s ease; }
-.jav-card:hover .jav-card__play,
-.jav-card:focus-within .jav-card__play,
-.jav-card__play:focus-visible { opacity: 1; }
-.jav-card__play:hover:not(:disabled) { background: rgba(15, 23, 42, 0.75); }
-/* 取地址期间留在原地转圈 —— opacity 保持 1，否则鼠标一移开就像「点了没反应」。 */
-.jav-card__play:disabled { opacity: 1; cursor: default; }
-@media (hover: none) { .jav-card__play { opacity: 1; } }
 
 /* 悬停显形（照 CoverExtractToolCard 的 .cand-rm 那一套）：触屏上常显，否则永远点不到 */
 .jav-card__hover { position: absolute; inset: auto 6px 6px 6px; display: flex; gap: 6px; justify-content: center; opacity: 0; transition: opacity 0.12s; z-index: 2; }

@@ -79,6 +79,11 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		DataDir:  cfg.DataDir,
 		StrmDir:  cfg.StrmDir,
 		Log:      logs.For(logx.ModuleSystem),
+		// 详情抽屉的「源媒体信息」要显示**网盘源文件**的大小与类型（TMDB 那面没有
+		// 侧车，只能按 .strm 里的 file_id 查一次）。只借它这一个查询。
+		FileInfo: fileSvc,
+		// 番号墙的「在线刮削」要按番号打上游。jav 那边不 import strmscrape，
+		// 这个方向不成环（jav.New 在本文件更下面，所以这里先接 nil 再补上）。
 	})
 	strmSvc.SetOrganizeBusyChecker(mediaOrganizeSvc)
 	strmSvc.SetRetentionBusyChecker(retentionSvc)
@@ -241,6 +246,10 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	})
 	javSvc.SetStartupGate(startupGate)
 	javSvc.Register(core.bus)
+
+	// 番号墙的「在线刮削」：strmscrape 按番号打上游、写侧车、补 nfo。
+	// 接线顺序上 strmscrape 早于 jav.New，所以走构造后的赋值（与下面那些 setter 同）。
+	strmScrapeSvc.SetJavService(javSvc)
 
 	// 番号元数据生成要用 jav.Service 的图片代理：XOR 解码、Content-Type 判定、
 	// 域名白名单都在那边（internal/jav/image.go）。走 setter 是因为接线顺序上

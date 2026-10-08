@@ -262,6 +262,40 @@ func (h *Handler) rebuildJavWallItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // refreshJavWallItem 只重读这一部（保存后刷一张卡）。
+// onlineScrapeJavWall 「在线刮削」：打上游把目录下缺的元数据补齐，写回 json 与 nfo。
+//
+// 与「刷新元数据」的区别：那一条只重读本地磁盘（不联网）。
+func (h *Handler) onlineScrapeJavWall(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	var body javWallRef
+	if err := decodeJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	taskID, _, _, err := body.normalize()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	out, err := h.strmScrape.JavWallOnlineScrape(r.Context(), taskID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, out)
+}
+
+// getJavWallOnlineProgress 轮询在线刮削的进度（前端按钮上那个「刮削中…」）。
+func (h *Handler) getJavWallOnlineProgress(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("strm_task_id")), 10, 64)
+	writeOK(w, h.strmScrape.JavOnlineScrapeProgressOf(taskID))
+}
+
 func (h *Handler) refreshJavWallItem(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
@@ -284,11 +318,11 @@ func (h *Handler) refreshJavWallItem(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, out)
 }
 
-// getJavWallItemPlayable 读这一部对应的 `.strm` 正文，回可播文件列表。
+// getJavWallItemDetail 读一部的详情（番号影片墙的抽屉）。
 //
-// 与 getJavWallItem 的区别：那个读的是**元数据**（侧车/nfo），这个读的是**播放地址**。
-// 返回空列表不是错误 —— 那是「这个作品目录下没有能播的 .strm」这个正常结论。
-func (h *Handler) getJavWallItemPlayable(w http.ResponseWriter, r *http.Request) {
+// 与 getJavWallItem 的区别：那个是**编辑器**的入参（要表单形状），
+// 这个是**抽屉**的（演员带头像、剧照一串地址、标签、可播文件）。
+func (h *Handler) getJavWallItemDetail(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
@@ -298,13 +332,10 @@ func (h *Handler) getJavWallItemPlayable(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	q := r.URL.Query()
-	items, err := h.strmScrape.JavPlayable(r.Context(), taskID, q.Get("rel_dir"), q.Get("stem"))
+	out, err := h.strmScrape.JavWallDetail(r.Context(), taskID, q.Get("rel_dir"), q.Get("stem"))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if items == nil {
-		items = []strmscrape.PlayableFile{}
-	}
-	writeOK(w, map[string]any{"items": items})
+	writeOK(w, out)
 }

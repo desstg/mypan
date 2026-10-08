@@ -76,19 +76,24 @@ func TestDetailBackfillStopsWhenUserActive(t *testing.T) {
 	}
 }
 
-// TestDetailBackfillDisabledByDefault 开关默认关（设置项那一层的凭据）。
+// TestDetailBackfillEnabledByDefault 开关默认开（设置项那一层的凭据）。
 //
-// 默认关是**有意的**：这条会持续几小时占用上游通道，该由用户看过说明再开。
-// 这条用例钉的是「默认值真的是 false」—— 改注册表时最容易顺手改成 true。
-func TestDetailBackfillDisabledByDefault(t *testing.T) {
+// 默认**开**是有意的（2026-10-07 用户要求改的）：回填只影响显示
+// （演员/简介/剧照/评分），不影响匹配与推送；不补的后果就是详情页长期是空的。
+// 而这条循环的闸门很保守 —— 攒够 200 部才开工、每轮有时间预算、
+// 用户一回来立刻收手，不会跟用户的浏览抢上游通道。
+//
+// 这条用例钉的是「默认值真的是 true」—— 与它相对的是侧车回写那条（也默认开，
+// 那条压根不打上游），两者同向是**有意的**，别顺手改回去。
+func TestDetailBackfillEnabledByDefault(t *testing.T) {
 	f := newCatalogFixture(t)
-	if f.set.Bool(settings.KeyJavDetailBackfillEnabled) {
-		t.Error("jav_detail_backfill_enabled 默认必须是 false")
+	if !f.set.Bool(settings.KeyJavDetailBackfillEnabled) {
+		t.Error("jav_detail_backfill_enabled 默认必须是 true")
 	}
 	if got := f.set.Int(settings.KeyJavDetailBackfillBudgetMin); got != 30 {
 		t.Errorf("每轮预算默认应当是 30 分钟，got %d", got)
 	}
-	// 侧车回写那条**不打上游**，默认开 —— 两者相反是有意的，别一起改
+	// 侧车回写那条**不打上游**，默认开 —— 现在两条同向，别顺手改回去
 	if !f.set.Bool(settings.KeyJavSidecarSyncEnabled) {
 		t.Error("jav_sidecar_sync_enabled 默认必须是 true（它不打上游）")
 	}

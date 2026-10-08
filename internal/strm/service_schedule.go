@@ -185,6 +185,7 @@ func (s *Service) runTaskAsync(task *domain.StrmTask) {
 				// 属于「静默变空」那一族（界面上的开关开着、日志里 `subtitles: 0`）。
 				JavSubtitles: s.javSubtitles,
 				JavPosters:   s.javPosters,
+				JavImagePace: s.javImagePace,
 				Log:          s.log,
 				OnProgress:   reportProgress,
 			}, runMode)

@@ -66,9 +66,12 @@ type ScanDeps struct {
 	JavSubtitles JavSubtitleFetcher
 	// JavPosters 是海报裁切的低优先级队列；nil = 就地执行（测试用）。
 	JavPosters javPosterScheduler
-	Log        *slog.Logger
-	OnProgress ScanProgressReporter
-	Failures   *FailureCollector
+	// JavImagePace 在每张上游图片之后调用一次（防连发，见 javImageGap 的说明）。
+	// nil = 不节流（只有测试会不传）。
+	JavImagePace func(context.Context) bool
+	Log          *slog.Logger
+	OnProgress   ScanProgressReporter
+	Failures     *FailureCollector
 	// ManualCleanupConfirm 用户手动执行（全部/分支执行）时置位：视为已确认网盘状态，
 	// 允许"远端识别 0"的范围正常清理；定时自动扫描仍受空保护约束。
 	ManualCleanupConfirm bool
@@ -411,6 +414,7 @@ func finalizeScan(
 				Images:      deps.JavImages,
 				Subtitles:   deps.JavSubtitles,
 				PosterQueue: deps.JavPosters,
+				Pace:        deps.JavImagePace,
 				// 水印：`Enabled` 是总开关（默认关）；真贴哪几个图标由生成器
 				// **按各部的侧车属性**算（见 watermarkIDsForSidecar）——
 				// 这一步没法在这里算，因为它是 per-movie 的。

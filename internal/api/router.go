@@ -423,11 +423,13 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/refresh-index", h.refreshStrmScrapeIndex)
 					r.Post("/rematch", h.rematchStrmScrapeItem)
 					r.Post("/rescrape", h.rescrapeStrmScrapeItem)
+					// 存量补抓：给已经刮过的作品补背景图 / 剧照 / 演员 / 完整 nfo。
+					// 只补缺，不重写已有 nfo 的正文。
+					r.Post("/backfill", h.backfillStrmScrape)
 					r.Post("/mark-normal", h.markStrmScrapeNormal)
 					r.Get("/poster", h.getStrmScrapePoster)
-					// 「这一张卡能播什么」：读 `.strm` 正文，回一个可播文件列表。
-					// 点播放键时才调，不进列表 —— 可播性随磁盘变，落进索引就是第三份状态。
-					r.Get("/items/playable", h.getStrmScrapeItemPlayable)
+					// 详情抽屉：一张卡的元数据（标题/简介/演员/剧照/可播文件）。
+					r.Get("/items/detail", h.getStrmScrapeItemDetail)
 
 					// 番号影片的海报墙（媒体类型 = 番号影片的任务）。与上面那套共用页面与
 					// 服务，但数据源是本地媒体库目录，不碰 TMDB。
@@ -437,9 +439,12 @@ func NewRouter(d Deps) http.Handler {
 					// 按钮），所以读写挂在这里；strm_task_id 只决定候选清单按哪个任务扫盘（0 = 不扫）。
 					r.Get("/jav-wall/hidden-dirs", h.listJavWallHiddenDirs)
 					r.Put("/jav-wall/hidden-dirs", h.updateJavWallHiddenDirs)
+					// 「在线刮削」：打上游补齐缺的元数据（写回 json 与 nfo）。
+					r.Post("/jav-wall/online-scrape", h.onlineScrapeJavWall)
+					r.Get("/jav-wall/online-scrape/progress", h.getJavWallOnlineProgress)
 					r.Get("/jav-wall/item", h.getJavWallItem)
-					// 同上，番号那面墙的「这一张能播什么」。
-					r.Get("/jav-wall/item/playable", h.getJavWallItemPlayable)
+					// 详情抽屉（番号那面）：演员带头像、剧照、标签、可播文件。
+					r.Get("/jav-wall/item/detail", h.getJavWallItemDetail)
 					r.Put("/jav-wall/item/meta", h.saveJavWallMeta)
 					r.Post("/jav-wall/item/poster", h.saveJavWallPoster)
 					r.Post("/jav-wall/item/rebuild", h.rebuildJavWallItem)

@@ -80,6 +80,14 @@ func TestParseAcceptsSample(t *testing.T) {
 	if len(doc.Actors) != 1 || doc.Actors[0].Gender != 1 {
 		t.Errorf("actors[].gender 没读进来：%+v", doc.Actors)
 	}
+	// 头像也要读进来：详情页的演员卡靠它显示图（没有就退化成占位图标）。
+	if doc.Actors[0].Avatar == "" {
+		t.Errorf("actors[].avatar 没读进来：%+v", doc.Actors)
+	}
+	// dest.files 是「源文件大小/类型」的唯一来源 —— `.strm` 自己只有一百多字节。
+	if len(doc.Dest.Files) == 0 || doc.Dest.Files[0].Size <= 0 {
+		t.Errorf("dest.files 没读进来：%+v", doc.Dest.Files)
+	}
 }
 
 // TestParseRejects 三种必须拒绝的输入。

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, type ComponentPublicInstance } from "vue";
 import "media-chrome";
 import "media-chrome/dist/lang/zh-CN.js";
 import { setLanguage } from "media-chrome/dist/utils/i18n.js";
@@ -79,6 +79,27 @@ const emit = defineEmits<{
 }>();
 
 const videoRef = ref<HTMLVideoElement | null>(null);
+/**
+ * `<video>` 元素的一份**普通变量**引用（不是 ref）。
+ *
+ * 存在的唯一理由是 `onUnmounted`：那时 Vue 已经把 DOM 摘掉、`videoRef.value` 变成
+ * `null`，拿不到元素就没法清 src —— 而清 src 正是「关掉播放窗之后流量还在跑」的解法
+ * （见 releaseVideoElement 的说明）。
+ */
+let mediaEl: HTMLVideoElement | null = null;
+
+/**
+ * `<video>` 的 ref 回调：同时喂给 `videoRef`（模板里其他地方要用）与 `mediaEl`
+ * （卸载时还要用它，那时 `videoRef.value` 已经变 null）。
+ *
+ * 用**函数 ref** 而不是 `ref="videoRef"` 是因为一个元素上只能挂一个 ref，
+ * 而这两处都需要它。
+ */
+function setVideoEl(el: Element | ComponentPublicInstance | null) {
+  const video = (el as HTMLVideoElement | null) ?? null;
+  mediaEl = video;
+  videoRef.value = video;
+}
 const episodeListRef = ref<HTMLElement | null>(null);
 const subtitleMenuRef = ref<HTMLElement | null>(null);
 const queueVisible = ref(true);
@@ -311,6 +332,10 @@ function destroyMediaAdapters() {
   // 关闭预览窗走的是 v-if 卸载组件，卸载后 <video> 节点被摘掉，但请求还在飞。
   // 这里先 pause() 再清 src + load()：load() 会中止当前的资源加载，
   // 是让浏览器真正放弃那条连接的标准做法。
+  //
+  // ⚠️ 注意这里拿的是 `videoRef.value` —— **onUnmounted 时它已经是 null**，
+  // 所以卸载那条路走的是 releaseVideoElement（用普通变量存的那份引用）。
+  // 两条路都要留着：这一条在「切集」时跑（DOM 还在），那一条在「关窗」时跑。
   const video = videoRef.value;
   if (video) {
     try {
@@ -357,6 +382,37 @@ async function setupMediaSource() {
 
   video.src = url;
   video.load();
+}
+
+/**
+ * 卸载时收连接。
+ *
+ * 单独抽出来是因为**卸载路径与 `destroyMediaAdapters()` 不一样**：
+ * `onUnmounted` 触发时 Vue 已经把 DOM 摘掉了，`videoRef.value` 已经是 `null`，
+ * 所以那个函数里「拿 video 元素 → pause + 清 src + load()」那一段**整段被跳过**
+ * （它开头就是 `if (video)`）—— 对原生 `<video>` 直连那条路（海报墙的 302 链路）
+ * 等于什么都没做，而适配器那条路本来就不参与。
+ *
+ * 实测（2026-10-07，用户报的正是这一条）：手机上播完退出，流量还挂着 10 Mbps
+ * 左右，很久才掉下来。所以这里**先自己留一份元素引用**，在 `onUnmounted` 里
+ * 拿它把 src 清掉 —— 那才是让浏览器真正放弃连接的做法。
+ */
+function releaseVideoElement() {
+  const video = mediaEl;
+  if (!video) return;
+  try {
+    video.pause();
+  } catch {
+    // 元素可能已经处于不可播放状态，pause 抛错不影响下面清 src。
+  }
+  // ⚠️ 顺序要紧：先 removeAttribute("src") 再 load()。load() 会中止当前的资源加载，
+  // 是让浏览器放弃那条连接的标准做法（只 pause 不掐连接，实测流量会继续跑）。
+  video.removeAttribute("src");
+  try {
+    video.load();
+  } catch {
+    // 元素已脱离文档时某些浏览器会抛，忽略即可 —— src 已经清掉了。
+  }
 }
 
 function episodeMeta(file: FileItem, index: number) {
@@ -537,6 +593,10 @@ onUnmounted(() => {
   window.clearTimeout(noticeTimer);
   clearSubtitleTrack();
   destroyMediaAdapters();
+  // ⚠️ 必须在 destroyMediaAdapters **之后**：那个函数会先自己清一遍（它跑的时候
+  // DOM 还在），这里兜的是它拿不到元素的那种情况（见 releaseVideoElement）。
+  releaseVideoElement();
+  mediaEl = null;
   window.removeEventListener("keydown", handleKeydown);
   document.removeEventListener("pointerdown", handleDocumentPointerDown);
 });
@@ -559,7 +619,7 @@ onUnmounted(() => {
         <media-controller class="video-preview__controller">
           <video
             v-if="currentFile"
-            ref="videoRef"
+            :ref="setVideoEl"
             slot="media"
             :key="currentFile.id"
             autoplay

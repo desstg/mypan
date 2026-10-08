@@ -44,18 +44,25 @@ const (
 	// 代价是通用表单不能直接渲染它（见 SystemSettings.vue 的 PROXY_PASSWORD_KEY 特判）。
 	KeyProxyPassword = "proxy_password"
 
-	KeyEmbyEnabled               = "emby_enabled"
-	KeyEmbyProxyInstances        = "emby_proxy_instances"
-	KeyFnosEnabled               = "fnos_enabled"
-	KeyFnosName                  = "fnos_name"
-	KeyFnosURL                   = "fnos_url"
-	KeyFnosProxyPort             = "fnos_proxy_port"
-	KeyFnosStrmPathMaps          = "fnos_strm_path_maps"
-	KeyFnosDirectSTRMClients     = "fnos_direct_strm_clients"
-	KeyStrmToken                 = "strm_token"
-	KeyStrmBaseURL               = "strm_base_url"
-	KeyStrmSignatureEnabled      = "strm_signature_enabled"
-	KeyStrmDefaultScanInterval   = "strm_default_scan_interval"
+	KeyEmbyEnabled             = "emby_enabled"
+	KeyEmbyProxyInstances      = "emby_proxy_instances"
+	KeyFnosEnabled             = "fnos_enabled"
+	KeyFnosName                = "fnos_name"
+	KeyFnosURL                 = "fnos_url"
+	KeyFnosProxyPort           = "fnos_proxy_port"
+	KeyFnosStrmPathMaps        = "fnos_strm_path_maps"
+	KeyFnosDirectSTRMClients   = "fnos_direct_strm_clients"
+	KeyStrmToken               = "strm_token"
+	KeyStrmBaseURL             = "strm_base_url"
+	KeyStrmSignatureEnabled    = "strm_signature_enabled"
+	KeyStrmDefaultScanInterval = "strm_default_scan_interval"
+	// KeyStrmHostPathMaps 是「容器路径 → 宿主机路径」的映射，详情页的「源媒体信息」
+	// 用它把 /app/strm/... 显示成 NAS 上真实能看到的那条路径。
+	//
+	// 与飞牛的 KeyFnosStrmPathMaps 是**两回事**：那个是给飞牛反代做路径换算用的，
+	// 这个是纯展示。之所以不共用一份：两者的用途、出错后果都不一样，
+	// 共用会让「改这个影响了那个」变得很难解释。
+	KeyStrmHostPathMaps          = "strm_host_path_maps"
 	KeyStrmDefaultExtensions     = "strm_default_extensions"
 	KeyStrmISOFilenameEnabled    = "strm_iso_filename_enabled"
 	KeyStrmMinFileSizeMB         = "strm_min_file_size_mb"
@@ -215,8 +222,22 @@ const (
 	KeyJavUseProxy      = "jav_use_proxy"
 	KeyJavMinIntervalMS = "jav_min_interval_ms"
 	KeyJavRequestGapMS  = "jav_request_gap_ms"
-	KeyJavTimeoutSec    = "jav_timeout_sec"
-	KeyJavRetry         = "jav_retry"
+	// KeyJavImageGapMS 是**图片**那一条通道的间隔，与 request_gap 分开。
+	//
+	// # 为什么不复用 request_gap_ms
+	//
+	// 那个是「两次上游请求之间的间隔」，管的是**文字类**请求：简介补缺链（打 4 个
+	// **不同**外站）、榜单、影库同步。图片完全不同 —— 它只在**生成元数据**那一步
+	// 发生（封面 1 张 + 剧照 N 张），而且全部打**同一个**图床（JAVDB 的 CDN）。
+	//
+	// 两者的合适节奏差一个数量级：文字链要客气（4 个站、封了就没简介），
+	// 而图床能承受更密（实测 200ms 稳定，一个 107 部的任务从一两个小时缩到十几分钟）。
+	// 合成一个数就只能取保守的那个，等于把图片拖慢十倍。
+	//
+	// 0 = 不节流（不推荐：一个 107 部的任务会连发上千次图床请求）。
+	KeyJavImageGapMS = "jav_image_gap_ms"
+	KeyJavTimeoutSec = "jav_timeout_sec"
+	KeyJavRetry      = "jav_retry"
 
 	// 订阅调度。分成**两组互不相干的调度**，与源码设置页的两个区块一一对应：
 	//
@@ -278,9 +299,17 @@ const (
 	// 从没抓过详情（榜单/影库同步入库的只有 number/title/cover），而按现有闸门
 	// （min_interval 500ms + request_gap 1000ms）算，全量跑完约 **6.4 小时**。
 	//
-	// 默认**关**：不是因为它危险（限流闸门都在，且每一轮都有时间预算），
-	// 而是因为它是一条会持续几小时占用上游通道的长活 —— 该由用户看过那条说明
-	// 再决定什么时候开。打开后可以随时关掉，下一轮就停。
+	// 默认**开**（2026-10-07 用户要求改的）。原来默认关，理由是「会持续几小时占用
+	// 上游通道，该由用户看过说明再决定」；但实测下来那个理由站不住：
+	//
+	//   · 回填**只影响显示**（演员/简介/剧照/评分这些），不影响匹配与推送，
+	//     所以「晚点再开」的唯一后果就是详情页长期是空的 —— 而用户装了却不补，
+	//     等于这一项永远不生效；
+	//   · 闸门本来就很保守：**攒够 200 部才开工**、每轮有时间预算、用户一回来
+	//     立刻收手（见 loops.go 的 detailBackfillLoop）。它不会跟用户的浏览抢通道；
+	//   · 已补好的不会重跑，所以「开着」的总成本是有上限的。
+	//
+	// 想省上游配额的人仍然可以随时关掉，下一轮就停。
 	KeyJavDetailBackfillEnabled = "jav_detail_backfill_enabled"
 
 	// KeyJavDetailBackfillBudgetMin 是详情回填**每轮的时间预算**（分钟）。
@@ -426,6 +455,7 @@ func defaultSpecs() []Spec {
 		stringSpec(KeyFnosStrmPathMaps, "fnos", "飞牛 STRM 目录", "填写 Docker 中映射到 /app/strm 的左边路径。例：/vol1/.../MyPanGO:/app/strm → 填 /vol1/.../MyPanGO。两边相同可留空。", ""),
 		{Key: KeyFnosDirectSTRMClients, Type: TypeString, Default: "Infuse", Hidden: true},
 		stringSpec(KeyStrmToken, "strm", "STRM 播放令牌", "STRM 播放路径鉴权令牌，请在系统设置「API 秘钥」中管理。", ""),
+		stringSpec(KeyStrmHostPathMaps, "strm", "宿主机路径映射", "详情页「源媒体信息」里显示文件路径时用。每行一条 `容器内路径:宿主机路径`，例如 /app/strm:/volume1/docker/MyPan/strm。留空则显示容器内路径。", ""),
 		stringSpec(KeyStrmBaseURL, "strm", "STRM 基础地址", "生成本地 .strm 时使用的站点基址（例如 https://example.com）。留空时使用当前服务监听地址。", ""),
 		boolSpec(KeyStrmSignatureEnabled, "strm", "启用 STRM 路径签名", "开启后 /api/strm/play 路径必须携带有效签名。", "false"),
 		intSpec(KeyStrmDefaultScanInterval, "strm", "STRM 默认扫描间隔", "新建任务未指定扫描间隔时使用。", "360", "分钟", 1, 1440),
@@ -691,6 +721,9 @@ func defaultSpecs() []Spec {
 		// request_gap 是 JAVBUS 侧的 —— 另一个域名、另一份预算，不要合并成一个数。
 		{Key: KeyJavMinIntervalMS, Type: TypeInt, Default: "500", Min: intp(0), Max: intp(10000), Hidden: true},
 		{Key: KeyJavRequestGapMS, Type: TypeInt, Default: "1000", Min: intp(0), Max: intp(30000), Hidden: true},
+		// 图片间隔：默认 200ms（见 KeyJavImageGapMS 的说明 —— 它管的是「生成元数据」
+		// 那一步的封面上传与剧照下载，全是同一个图床）。
+		{Key: KeyJavImageGapMS, Type: TypeInt, Default: "200", Min: intp(0), Max: intp(30000), Hidden: true},
 		{Key: KeyJavTimeoutSec, Type: TypeInt, Default: "20", Min: intp(5), Max: intp(120), Hidden: true},
 		{Key: KeyJavRetry, Type: TypeInt, Default: "3", Min: intp(0), Max: intp(10), Hidden: true},
 
@@ -729,7 +762,7 @@ func defaultSpecs() []Spec {
 		// 默认**关**：这条会持续几小时占用上游通道（12813 部 × 1.8 秒 ≈ 6.4 小时）。
 		// 该由用户看过说明再决定什么时候开 —— 与上面那条「不打上游、默认开」相反，
 		// 差别就在这一点上。
-		{Key: KeyJavDetailBackfillEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyJavDetailBackfillEnabled, Type: TypeBool, Default: "true", Hidden: true},
 		// 每轮预算默认 30 分钟：一轮约补 1000 部，13 轮跑完；用户随时能关。
 		{Key: KeyJavDetailBackfillBudgetMin, Type: TypeInt, Default: "30", Min: intp(1), Max: intp(1440), Hidden: true},
 

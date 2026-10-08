@@ -13,6 +13,7 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/eventbus"
+	"litepan/internal/jav"
 	"litepan/internal/settings"
 	"litepan/internal/strm"
 	"litepan/internal/thumbcache"
@@ -30,6 +31,23 @@ type Options struct {
 	DataDir  string
 	StrmDir  string
 	Log      *slog.Logger
+	// FileInfo 按 (account_id, file_id) 查网盘源文件的信息（详情抽屉的「源媒体信息」
+	// 要显示**源文件**的大小与类型，而 `.strm` 自己只有一百多字节）。
+	//
+	// 由 wire 注入（`*file.Service`）而不是直接持有它：strmscrape 不需要认识文件服务
+	// 那一整套（列表 / 删除 / 上传），只要这一个查询。形状与 strm 那边的 ScrapeTrigger
+	// 一样 —— 用一个小接口把依赖面收窄。
+	//
+	// **可以为 nil**（测试、或某个装配路径没接上）：那时源媒体信息退化成只显示文件名
+	// 与路径，不报错。
+	FileInfo FileInfoLookup
+}
+
+// FileInfoLookup 是「按 file_id 查源文件信息」的最小接口。
+//
+// 存在的理由见 Options.FileInfo。`*file.Service` 的 Info 方法天然满足它。
+type FileInfoLookup interface {
+	Info(ctx context.Context, accountID int64, fileID string) (*domain.FileItem, error)
 }
 
 type Service struct {
@@ -39,6 +57,18 @@ type Service struct {
 	dataDir  string
 	strmDir  string
 	log      *slog.Logger
+	files    FileInfoLookup
+
+	// jav 是番号服务（按番号打上游、写侧车、补 nfo）。
+	//
+	// **必须是 strmscrape → jav 这个方向**：jav 那边不 import 本包，本包 import 它
+	// 不成环。而「按任务反查输出目录」那条依赖走的是 strm.Service，与本字段无关。
+	//
+	// 可以为 nil（测试、或某个装配路径没接上）：那时在线刮削报「番号服务未装配」。
+	jav *jav.Service
+	// javOnline 是在线刮削的进度（与 TMDB 那套 Progress 分开，见 javwall_online.go）。
+	javOnlineMu sync.Mutex
+	javOnline   *JavOnlineScrapeProgress
 
 	mu          sync.Mutex
 	operationMu sync.Mutex
@@ -76,6 +106,7 @@ func New(opts Options) *Service {
 		dataDir:       opts.DataDir,
 		strmDir:       strmDir,
 		log:           log,
+		files:         opts.FileInfo,
 		javWallCache:  map[int64]*javWallSnapshot{},
 		javTitleCache: map[string]javTitleEntry{},
 		thumbs: thumbcache.New(opts.DataDir, func(msg string, args ...any) {
@@ -344,7 +375,7 @@ func (s *Service) applyRematch(ctx context.Context, req RematchRequest, root str
 		info.Year = req.Year
 	}
 	info.Doubt = false // 用户手动选定，不再存疑
-	_, err = s.writeMatchedOpts(scrapeCtx, client, g, info, overwrite, true)
+	_, err = s.writeMatchedOpts(scrapeCtx, client, g, info, overwrite, true, false)
 	if err != nil {
 		return nil, err
 	}
@@ -499,13 +530,19 @@ func (s *Service) ResolvePosterFile(ctx context.Context, strmTaskID int64, rel s
 	if !isInside(root, full) {
 		return "", domain.Errorf(domain.CodeValidation, "非法路径")
 	}
+	// 扩展名白名单（图片 + 字幕）。
+	//
+	// 路径**允许子目录**（`extrafanart/fanart3.jpg` 就是剧照）—— 安全性由上面那条
+	// `isInside(root, full)` 兜着：它挡住 `..` 逃逸，而根目录下的任何文件本来就
+	// 是这个任务自己的输出，没有「读到系统文件」的余地。
 	base := strings.ToLower(filepath.Base(full))
-	if !strings.HasSuffix(base, ".jpg") && !strings.HasSuffix(base, ".png") && !strings.HasSuffix(base, ".webp") &&
+	if !strings.HasSuffix(base, ".jpg") && !strings.HasSuffix(base, ".jpeg") && !strings.HasSuffix(base, ".png") &&
+		!strings.HasSuffix(base, ".webp") &&
 		!strings.HasSuffix(base, ".srt") && !strings.HasSuffix(base, ".vtt") && !strings.HasSuffix(base, ".sup") {
 		return "", domain.Errorf(domain.CodeValidation, "仅允许图片与字幕文件")
 	}
 	if !fileExists(full) {
-		return "", domain.Errorf(domain.CodeNotFound, "海报不存在")
+		return "", domain.Errorf(domain.CodeNotFound, "文件不存在")
 	}
 	return full, nil
 }

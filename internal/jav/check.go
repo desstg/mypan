@@ -81,6 +81,7 @@ type CandidateView struct {
 // 现在只有两个调用方，都从**不随请求取消**的 ctx 进来：
 //   - checkLoop（check_queue.go，用户点「检查」与调度器都走它）；
 //   - 单测与外部脚本的同步调用（它们自己控制 ctx）。
+//
 // HTTP 层只调 CheckSubscriptionAsync / CheckStatus。
 func (s *Service) CheckSubscription(ctx context.Context, id int64, trigger string) (*CheckResult, error) {
 	sub, err := s.subs.Get(ctx, id)

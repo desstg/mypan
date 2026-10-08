@@ -73,6 +73,23 @@ func newJavPosterQueue(log *slog.Logger) *javPosterQueue {
 	}
 }
 
+// PendingForTest 报告队列里还没处理完的任务数（长度 + 正在处理的那一个）。
+//
+// 存在的理由是**测试与排查**：海报裁切是异步的，跑完一遍「重刮」之后
+// `poster.jpg` 还没落盘是常态，不等到 0 就去看文件会得出「水印没贴上」的错结论。
+func (q *javPosterQueue) PendingForTest() int {
+	if q == nil {
+		return 0
+	}
+	q.mu.Lock()
+	inflight := 0
+	if q.seen != nil {
+		inflight = len(q.seen)
+	}
+	q.mu.Unlock()
+	return len(q.ch) + inflight
+}
+
 // Start 起工作者，随 appCtx 结束。重复调用是安全的（第二次直接返回）。
 func (q *javPosterQueue) Start(ctx context.Context) {
 	if q == nil || ctx == nil {

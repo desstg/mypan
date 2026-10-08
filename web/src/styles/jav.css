@@ -2137,3 +2137,136 @@
   .jd-rel__nav--prev { left: -6px; }
   .jd-rel__nav--next { right: -6px; }
 }
+
+/* ———————————————— 海报墙详情抽屉 ————————————————
+ *
+ * 上面那批 `jd-*` 是影库详情页与海报墙详情抽屉**共用**的观感。下面这几条是抽屉
+ * 自己那两块的覆盖（演员矩形图、剧照网格），两面墙（番号 / TMDB）都吃这一套 ——
+ * 所以放在这里而不是某一个组件的 scoped 里，两个抽屉组件都能用。
+ *
+ * ⚠️ 覆盖的写法要留意特异性：下面这些大多是 0,2,0（两个类），压过 `jd-*` 的 0,1,0。
+ * 只写一个类名是压不过去的（那种「改了没反应」最难查）。 */
+
+/* 演员：**矩形图，不裁圆**（用户要求 —— 与影库详情页那排圆形胶囊不同）。
+ *
+ * 与 `.jd-actor` 那套是刻意不同的观感，共用 `.jd-actors` 只为了拿到同一个
+ * flex-wrap 容器。这里把胶囊那套覆盖掉：去掉内边距与边框、头像从 26px 圆形改成
+ * 92px 的 3:4 竖版人像（上游给的本来就是人像方图，竖裁比正方更贴脸）、
+ * 名字从胶囊里的一行变成图下居中一行。 */
+.wall-detail__actors {
+  gap: 12px;
+}
+
+.wall-detail__actor {
+  width: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  cursor: default;
+}
+
+/* 把 `.jd-actor:hover` 那条也压掉：演员图**不可点**，hover 变品牌色是骗人的
+   （番号那面的胶囊是可点的——跳演员搜索——这一面不是）。 */
+.wall-detail__actor:hover {
+  border-color: transparent;
+  color: var(--text);
+}
+
+.wall-detail__actor-photo {
+  position: static;
+  width: 92px;
+  height: auto;
+  aspect-ratio: 3 / 4;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  font-size: 26px;
+}
+
+.wall-detail__actor-photo img {
+  /* ⚠️ 必须把 `position` 与 `inset` 也重置掉：`.jd-actor__avatar img` 那条写的是
+     `position: absolute; inset: 0`（圆形胶囊里的叠放），而这里的容器是 static 的
+     92px 方框 —— 不重置的话图会相对**抽屉**定位，跑到完全无关的位置去。 */
+  position: static;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.wall-detail__actor-name {
+  width: 100%;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 剧照：**网格铺开**（影库详情页那边是一排横向滚动，这里按 Emby 的剧照区改成网格，
+ * 一屏能看到更多张）。
+ *
+ * 覆盖掉 `.jd-previews` 的横向滚动：不改的话网格会被压成一行、还要横向拖。
+ * ⚠️ `display: grid` 也一并把那条 `flex` 覆盖掉 —— 两个都是 display，写一个就够了，
+ * 但显式写出来是为了让人一眼看出这是**替换**而不是叠加。 */
+.wall-detail__stills {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 8px;
+  overflow: visible;
+  padding: 0;
+  scroll-snap-type: none;
+}
+
+.wall-detail__still {
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-sunken);
+  cursor: pointer;
+  aspect-ratio: 16 / 9;
+  /* ⚠️ 这几条是把 `.jd-previews img` 那套（`width: 168px` / `aspect-ratio: 3/2` /
+     `scroll-snap-align`）按**图片自身**重置掉。不重置的话网格格子是 16:9、
+     里面那张图却按 168px 宽 3:2 铺，格子里只显示图的一角。 */
+  width: 100%;
+  height: 100%;
+  scroll-snap-align: none;
+}
+
+.wall-detail__still img {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.2s ease;
+}
+
+.wall-detail__still:hover img {
+  transform: scale(1.04);
+}
+
+/* 竖版海报（TMDB 那面）：封面改 2:3，**两栏同时左窄右宽**。
+ *
+ * 番号那面是横版图，左右平分（`.jd-cols` 的默认，两侧一样宽）；
+ * TMDB 这面是竖版图，左栏收窄给封面一个正常的高度、右栏拿到更多宽度放信息。
+ *
+ * 封面 2:3 与栏宽是**同一条决定的两半**，别只改一个：
+ * 左栏一宽，2:3 的封面就高得离谱（400px 宽 → 600px 高），把右边挤成一条。
+ *
+ * 特异性 0,2,0 压过 `.jd-cover` 的 0,1,0（那条写死了 3/2）。 */
+.wall-detail__cols--portrait {
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+}
+
+.wall-detail__cover--portrait {
+  aspect-ratio: 2 / 3;
+}

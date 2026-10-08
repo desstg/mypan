@@ -159,25 +159,102 @@ func (c *Client) Search(ctx context.Context, query string, year *int, mediaType 
 }
 
 func (c *Client) Lookup(ctx context.Context, tmdbID string, mediaType string) (json.RawMessage, error) {
+	raw, _, err := c.lookup(ctx, tmdbID, mediaType, false)
+	return raw, err
+}
+
+// LookupFull 与 Lookup 同一条端点，但一并拉回附加块（演员 / 图片 / 预告 / 关键词 / id）。
+//
+// # 为什么是**另一个方法**，而不是给 Lookup 加参数
+//
+// Lookup 的调用方不止 STRM 刮削：目录整理（`mediaorganize/planner`）、TG 订阅
+// （`tgsubscribe/tmdb.go`）、分类整理（`classifyorganize`）都在用它，而它们只需要
+// 「id / 标题 / 年份」那几项。给 Lookup 挂上附加块会让**那三处的每一次查询**都多传
+// 几十到几百 KB 的 JSON（图片库尤其大：实测一部热门剧带上 images 是 400 KB 上下），
+// 纯属白烧流量与内存。
+//
+// 所以拓宽范围只发生在需要它的这一条路上（`internal/strmscrape`），别的地方一个
+// 字节都不变。返回的第二个值是该端点的**简版**，调用方若要原样保存或转发，用它。
+func (c *Client) LookupFull(ctx context.Context, tmdbID string, mediaType string) (full json.RawMessage, plain json.RawMessage, err error) {
+	return c.lookup(ctx, tmdbID, mediaType, true)
+}
+
+func (c *Client) lookup(ctx context.Context, tmdbID string, mediaType string, withAppends bool) (full json.RawMessage, plain json.RawMessage, err error) {
 	if c == nil || c.apiKey == "" {
-		return nil, fmt.Errorf("tmdb: missing api key")
+		return nil, nil, fmt.Errorf("tmdb: missing api key")
 	}
 	id, err := strconv.Atoi(strings.TrimSpace(tmdbID))
 	if err != nil || id <= 0 {
-		return nil, fmt.Errorf("tmdb: invalid id %q", tmdbID)
+		return nil, nil, fmt.Errorf("tmdb: invalid id %q", tmdbID)
 	}
 	normalized := strings.ToLower(strings.TrimSpace(mediaType))
 	if normalized == "" {
 		normalized = mediaTypeMovie
 	}
+	var kind string
 	switch normalized {
 	case mediaTypeTV:
-		return c.lookupTV(ctx, id)
+		kind = mediaTypeTV
 	case mediaTypeMovie:
-		return c.lookupMovie(ctx, id)
+		kind = mediaTypeMovie
 	default:
-		return nil, fmt.Errorf("tmdb: unsupported media type %q", mediaType)
+		return nil, nil, fmt.Errorf("tmdb: unsupported media type %q", mediaType)
 	}
+	plain, err = c.lookupPlain(ctx, id, kind)
+	if err != nil || !withAppends {
+		return plain, plain, err
+	}
+	full, err = c.lookupDetailed(ctx, id, kind)
+	if err != nil {
+		// 附加块拉不回来不该让整个刮削失败：正文那几项（标题/简介/海报）简版里也有，
+		// 而调用方按「有就写」处理。这里把简版当结果退回去，静默降级为「这次没抓到演员」。
+		return plain, plain, nil
+	}
+	return full, plain, nil
+}
+
+// lookupAppendBlocks 是详情接口一次带回来的附加块。
+//
+// aggregate_credits 只对剧集有意义（带 `roles[].episode_count`），电影的 credits 里
+// 已经有了同一批人，多带一份的代价也只是几 KB —— 不值得为它分岔。
+const lookupAppendBlocks = "credits,aggregate_credits,images,videos,keywords,external_ids,release_dates,content_ratings"
+
+// lookupImageLanguages 限定 images.* 的语言，**必须传**。
+//
+// 实测（《权力的游戏》S8）：不传这个参数时 `images.backdrops` 只有 **3** 条、
+// posters 只有 6 条；传上之后是 236 / 228 条。因为 TMDB 默认只返回「语言为空」的那几条，
+// 而绝大多数剧照本来就没有语言标签（`iso_639_1` 是 null）—— 不传就是**静默地几乎全丢**，
+// 表现只是「剧照怎么这么少」，没人会想到是参数问题。
+//
+// 只要 `zh` 与 `null`，**不要 `en`**：剧照与背景图是语言中立的，带上 en 会让响应体
+// 直接翻倍（实测 48 KB → 90 KB），而我们并不用它。
+const lookupImageLanguages = "zh,null"
+
+// lookupDetailMaxBytes 是带附加块那一次的读取上限。
+//
+// `get` 默认 1 MB，对简版绰绰有余（几 KB）。带 images 之后会大一个数量级：
+// 实测热门剧 400 KB 上下，再加 videos/keywords/release_dates 还有一截，留足余量。
+const lookupDetailMaxBytes = 8 << 20
+
+func (c *Client) lookupPlain(ctx context.Context, id int, kind string) (json.RawMessage, error) {
+	q := c.lookupQuery()
+	return c.get(ctx, fmt.Sprintf("%s/%s/%d", c.apiBaseURL(), kind, id), q)
+}
+
+func (c *Client) lookupDetailed(ctx context.Context, id int, kind string) (json.RawMessage, error) {
+	q := c.lookupQuery()
+	q.Set("append_to_response", lookupAppendBlocks)
+	q.Set("include_image_language", lookupImageLanguages)
+	return c.getWithLimit(ctx, fmt.Sprintf("%s/%s/%d", c.apiBaseURL(), kind, id), q, lookupDetailMaxBytes)
+}
+
+func (c *Client) lookupQuery() url.Values {
+	q := url.Values{}
+	q.Set("api_key", c.apiKey)
+	if c.language != "" {
+		q.Set("language", c.language)
+	}
+	return q
 }
 
 func (c *Client) FetchTVSeasons(ctx context.Context, tmdbID string) ([]json.RawMessage, error) {
@@ -244,21 +321,11 @@ func (c *Client) searchTV(ctx context.Context, query string, year *int) ([]json.
 }
 
 func (c *Client) lookupMovie(ctx context.Context, id int) (json.RawMessage, error) {
-	q := url.Values{}
-	q.Set("api_key", c.apiKey)
-	if c.language != "" {
-		q.Set("language", c.language)
-	}
-	return c.get(ctx, fmt.Sprintf("%s/movie/%d", c.apiBaseURL(), id), q)
+	return c.lookupPlain(ctx, id, mediaTypeMovie)
 }
 
 func (c *Client) lookupTV(ctx context.Context, id int) (json.RawMessage, error) {
-	q := url.Values{}
-	q.Set("api_key", c.apiKey)
-	if c.language != "" {
-		q.Set("language", c.language)
-	}
-	return c.get(ctx, fmt.Sprintf("%s/tv/%d", c.apiBaseURL(), id), q)
+	return c.lookupPlain(ctx, id, mediaTypeTV)
 }
 
 func (c *Client) search(ctx context.Context, endpoint string, query url.Values) ([]json.RawMessage, error) {
@@ -282,9 +349,15 @@ func (c *Client) search(ctx context.Context, endpoint string, query url.Values) 
 }
 
 func (c *Client) get(ctx context.Context, endpoint string, query url.Values) (json.RawMessage, error) {
+	return c.getWithLimit(ctx, endpoint, query, 1<<20)
+}
+
+// getWithLimit 是 get 的带读取上限版本。上限只影响「单次响应能有多大」，
+// 重试与错误处理与 get 完全一致（它就是同一段代码）。
+func (c *Client) getWithLimit(ctx context.Context, endpoint string, query url.Values, maxBytes int64) (json.RawMessage, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
-		resp, body, err := httpx.DoJSON(ctx, c.http, http.MethodGet, endpoint, query, nil, nil, 1<<20)
+		resp, body, err := httpx.DoJSON(ctx, c.http, http.MethodGet, endpoint, query, nil, nil, maxBytes)
 		if err == nil && resp != nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 			return json.RawMessage(body), nil
 		}

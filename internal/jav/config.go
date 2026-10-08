@@ -83,6 +83,8 @@ type ConfigView struct {
 	DetailBackfillEnabled bool `json:"detail_backfill_enabled"`
 	// DetailBackfillBudgetMin 是每轮的时间预算（分钟）。到点收手，剩下的留给下一轮。
 	DetailBackfillBudgetMin int `json:"detail_backfill_budget_min"`
+	// ImageGapMS 是**图片**那条通道的间隔（见 settings.KeyJavImageGapMS 的说明）。
+	ImageGapMS int `json:"image_gap_ms"`
 
 	// —— 番号海报水印（见 internal/jav/emby/watermark.go）——
 	//
@@ -146,6 +148,7 @@ type ConfigInput struct {
 
 	DetailBackfillEnabled   *bool `json:"detail_backfill_enabled"`
 	DetailBackfillBudgetMin *int  `json:"detail_backfill_budget_min"`
+	ImageGapMS              *int  `json:"image_gap_ms"`
 
 	WatermarkEnabled *bool `json:"watermark_enabled"`
 	WatermarkScale   *int  `json:"watermark_scale"`
@@ -224,6 +227,7 @@ func (s *Service) Config(ctx context.Context) (ConfigView, error) {
 
 		DetailBackfillEnabled:   s.settings.Bool(settings.KeyJavDetailBackfillEnabled),
 		DetailBackfillBudgetMin: s.settings.Int(settings.KeyJavDetailBackfillBudgetMin),
+		ImageGapMS:              s.settings.Int(settings.KeyJavImageGapMS),
 
 		WatermarkEnabled: s.WatermarkEnabled(),
 		WatermarkScale:   s.WatermarkScalePercent(),
@@ -395,6 +399,9 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 	}
 	if in.DetailBackfillEnabled != nil {
 		patch[settings.KeyJavDetailBackfillEnabled] = boolString(*in.DetailBackfillEnabled)
+	}
+	if in.ImageGapMS != nil {
+		patch[settings.KeyJavImageGapMS] = strconv.Itoa(*in.ImageGapMS)
 	}
 	if in.DetailBackfillBudgetMin != nil {
 		patch[settings.KeyJavDetailBackfillBudgetMin] = strconv.Itoa(*in.DetailBackfillBudgetMin)

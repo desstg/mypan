@@ -144,7 +144,8 @@ func TestRefreshActorFilmographySkipsOutOfWindow(t *testing.T) {
 	}
 }
 
-func TestSubscriptionModeIsDerivedNotStored(t *testing.T) {	f := newCatalogFixture(t)
+func TestSubscriptionModeIsDerivedNotStored(t *testing.T) {
+	f := newCatalogFixture(t)
 
 	pre := true
 	view := createSub(t, f, SubscriptionInput{

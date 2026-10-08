@@ -248,6 +248,112 @@ func TestFillNFOFieldsIfMissingKeepsEditedGenres(t *testing.T) {
 	}
 }
 
+// TestFillNFOPlotIfMissingInsertsBeforeOutline 钉住简介补进 nfo 的**插入点**。
+//
+// ⚠️ 这条是 2026-10-07 修的那个真 bug 的回归测试。
+//
+// 原先 `fillNFOPlotIfMissing` 找的是 `"  <outline>"`（带前导两个空格、**并且要求
+// 元素名后面就是行尾**），而生成器写出来的是
+//
+//	＜outline><![CDATA[发行日期: …]]></outline>
+//
+// —— 元素名后面紧跟 `<![CDATA[`，那个字符串**永远匹配不上**，于是每次都落到
+// default 直接 return。实测用户库里有 5 份 nfo 的简介就这么一直补不进去
+// （侧车里 128 字的简介躺着，nfo 里连 `<plot>` 都没有）。
+func TestFillNFOPlotIfMissingInsertsBeforeOutline(t *testing.T) {
+	dir := t.TempDir()
+	stem := "SSIS-003-U"
+	// 生成器写的 nfo：侧车当时没有简介，所以没有 <plot>，但 <outline> 在。
+	sidecarFixture(t, dir, stem, &emby.SidecarDoc{
+		Schema: emby.SupportedSchema, Number: "SSIS-003", NumberLetter: "SSIS",
+		Title: "标题", ReleaseDate: "2023-05-25", Type: "0",
+	})
+	nfoPath := filepath.Join(dir, stem+".nfo")
+	before, _ := os.ReadFile(nfoPath)
+	if strings.Contains(string(before), "<plot>") {
+		t.Fatalf("夹具本身就不该有 <plot>：\n%s", before)
+	}
+
+	// 侧车里补上了简介（模拟简介补缺链），走回写那条路。
+	if _, err := writeFieldsIntoFile(filepath.Join(dir, stem+".json"), map[string]any{
+		"summary": "后来补到的简介",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	after, _ := os.ReadFile(nfoPath)
+	text := string(after)
+	if !strings.Contains(text, "<plot><![CDATA[后来补到的简介]]></plot>") {
+		t.Fatalf("简介没补进 nfo（插入点没匹配上？）：\n%s", text)
+	}
+	// 顺序与生成器一致：<plot> 在 <outline> 之前。
+	if strings.Index(text, "<plot>") > strings.Index(text, "<outline") {
+		t.Fatalf("<plot> 该排在 <outline> 前面：\n%s", text)
+	}
+	// 再跑一次幂等：已经有 <plot> 就不动。
+	if _, err := writeFieldsIntoFile(filepath.Join(dir, stem+".json"), map[string]any{
+		"summary": "换一个简介",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := os.ReadFile(nfoPath)
+	if string(again) != text {
+		t.Fatalf("已经有 <plot> 的 nfo 不该被动：\n前\n%s\n后\n%s", text, again)
+	}
+}
+
+// TestWriteFieldsIntoFileRepairsNFOWithoutJSONChange 钉住「json 没变也要补 nfo」。
+//
+// 那 5 份坏 nfo 的侧车里简介**早就有**了，所以通用循环一个字段都不会写、
+// `changed` 是 false —— 原先那时直接 return，nfo 永远轮不到修。
+func TestWriteFieldsIntoFileRepairsNFOWithoutJSONChange(t *testing.T) {
+	dir := t.TempDir()
+	stem := "SSIS-004-U"
+	sidecarFixture(t, dir, stem, &emby.SidecarDoc{
+		Schema: emby.SupportedSchema, Number: "SSIS-004", NumberLetter: "SSIS",
+		Title: "标题", ReleaseDate: "2023-05-25", Type: "0",
+	})
+	jsonPath := filepath.Join(dir, stem+".json")
+	nfoPath := filepath.Join(dir, stem+".nfo")
+
+	// 侧车里**已经有**简介（把它写进 json，但 nfo 那边不动 —— 正是坏掉的那种状态）。
+	raw, _ := os.ReadFile(jsonPath)
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["summary"] = "侧车里早就有的简介"
+	out, _ := json.MarshalIndent(doc, "", "  ")
+	if err := os.WriteFile(jsonPath, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nfoBefore, _ := os.ReadFile(nfoPath)
+	if strings.Contains(string(nfoBefore), "<plot>") {
+		t.Fatalf("夹具不该有 <plot>：\n%s", nfoBefore)
+	}
+
+	// 推一批**跟侧车现有值一样**的字段（现实里就是这样：库里那份没变）。
+	changed, err := writeFieldsIntoFile(jsonPath, map[string]any{
+		"summary": "侧车里早就有的简介",
+		"title":   "标题",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Errorf("json 一个字都不该改（值没变）")
+	}
+	after, _ := os.ReadFile(nfoPath)
+	if !strings.Contains(string(after), "<plot><![CDATA[侧车里早就有的简介]]></plot>") {
+		t.Fatalf("json 没变时也该把 nfo 修好：\n%s", after)
+	}
+	// json 那边一个字节都不该动。
+	raw2, _ := os.ReadFile(jsonPath)
+	if string(raw2) != string(out) {
+		t.Errorf("json 被白改了：\n前\n%s\n后\n%s", out, raw2)
+	}
+}
+
 // TestSyncSidecarsFromRepoWalksAndReports 整批遍历：扫到侧车、按番号回写、报数。
 //
 // 这是**存量补齐的主路** —— 那批「推送时库里还没演员」的片子不会自己再走补缺链，

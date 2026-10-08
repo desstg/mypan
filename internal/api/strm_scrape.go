@@ -173,6 +173,24 @@ func (h *Handler) refreshStrmScrapeIndex(w http.ResponseWriter, r *http.Request)
 	writeOK(w, items)
 }
 
+// backfillStrmScrape 给已经刮过的作品补上后来才有的数据（背景图 / 剧照 / 演员 /
+// 评分 / 时长 / 完整 nfo）。只补缺，不重写已有 nfo 的正文。
+func (h *Handler) backfillStrmScrape(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	var req strmscrape.BackfillRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := h.strmScrape.BackfillImages(r.Context(), req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, h.strmScrape.GetProgress())
+}
+
 func (h *Handler) rematchStrmScrapeItem(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
@@ -295,23 +313,17 @@ func imageContentTypeFor(path string) string {
 	}
 }
 
-// getStrmScrapeItemPlayable 读这张卡对应的 `.strm` 正文，回可播文件列表。
-//
-// strm_name 为空表示「多集作品」：item.go 只在平铺布局或目录里只有一个条目时才填它，
-// 所以为空时后端列目录、把该作品的每一集都回出去，由前端让用户选。
-func (h *Handler) getStrmScrapeItemPlayable(w http.ResponseWriter, r *http.Request) {
+// getStrmScrapeItemDetail 读一张卡的详情（TMDB 影片墙的抽屉）。
+func (h *Handler) getStrmScrapeItemDetail(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
 	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("strm_task_id")), 10, 64)
-	q := r.URL.Query()
-	items, err := h.strmScrape.TMDBPlayable(r.Context(), taskID, q.Get("rel_dir"), q.Get("strm_name"))
+	itemID := strings.TrimSpace(r.URL.Query().Get("item_id"))
+	out, err := h.strmScrape.TMDBWallDetail(r.Context(), taskID, itemID)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if items == nil {
-		items = []strmscrape.PlayableFile{}
-	}
-	writeOK(w, map[string]any{"items": items})
+	writeOK(w, out)
 }

@@ -220,7 +220,21 @@ func TestWriteSeasonAndEpisodeNFO(t *testing.T) {
 		t.Fatalf("season nfo unexpected: %s", text)
 	}
 	epNFO := filepath.Join(root, "Show.S01E01.nfo")
-	if err := writeEpisodeNFO(epNFO, "开端", "三体", "本集简介", "2023-01-15", "123", 1, 1); err != nil {
+	if err := writeEpisodeNFOFull(epNFO, episodeNFOInput{
+		Title:     "开端",
+		ShowTitle: "三体",
+		Plot:      "本集简介",
+		Aired:     "2023-01-15",
+		TMDBID:    "123",
+		Season:    1,
+		Episode:   1,
+		Runtime:   45,
+		Score:     7.5,
+		ScoreMax:  tmdbScoreMax,
+		Votes:     12,
+		Directors: []string{"某导演"},
+		ThumbName: "Show.S01E01-thumb.jpg",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	body, err = os.ReadFile(epNFO)
@@ -233,6 +247,179 @@ func TestWriteSeasonAndEpisodeNFO(t *testing.T) {
 	}
 	if !strings.Contains(text, "<showtitle>三体</showtitle>") {
 		t.Fatalf("missing showtitle: %s", text)
+	}
+	// 完整版多出来的那几项（都在**已有的那次**季详情请求里，不额外花请求）。
+	for _, want := range []string{
+		"<runtime>45</runtime>",
+		`<rating name="tmdb" max="10" default="true">`,
+		"<votes>12</votes>",
+		"<director>某导演</director>",
+		"<thumb>Show.S01E01-thumb.jpg</thumb>",
+		`<uniqueid type="tmdb" default="true">123</uniqueid>`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("episode nfo 缺少 %s：\n%s", want, text)
+		}
+	}
+}
+
+// TestWriteFullMovieNFO 钉住电影那份完整 nfo 的元素。
+//
+// 与番号那面（internal/jav/emby）**刻意是两套**：那边有 `<num>` / `<maker>` /
+// `<label>` / 5 分制换算那些只属于番号的东西。这里只放标准 Emby / Kodi 的 `<movie>`。
+func TestWriteFullMovieNFO(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "movie.nfo")
+	year := 2026
+	if err := writeFullMovieNFO(path, nfoInput{
+		MediaType:   MediaTypeMovie,
+		Title:       "怒之杀",
+		Original:    "Mutiny",
+		Plot:        "简介",
+		Tagline:     "血染水域",
+		Year:        &year,
+		ReleaseDate: "2026-08-19",
+		Runtime:     96,
+		Score:       7.4,
+		ScoreMax:    tmdbScoreMax,
+		Votes:       806,
+		Genres:      []string{"动作"},
+		Keywords:    []string{"复仇"},
+		Countries:   []string{"United Kingdom"},
+		Studios:     []string{"MadRiver Pictures"},
+		MPAA:        "R",
+		Directors:   []string{"让-弗朗索瓦·里歇"},
+		Writers:     []string{"Lindsay Michel"},
+		Actors: []nfoActor{
+			{Name: "杰森·斯坦森", Role: "Cole Reed", Thumb: "../../media/actors/976.jpg"},
+		},
+		TMDBID:     "1288445",
+		IMDBID:     "tt32338669",
+		Collection: "某合集",
+		TrailerURL: "https://www.youtube.com/watch?v=AAA",
+		ThumbName:  "poster.jpg",
+		FanartName: "fanart.jpg",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "<movie>") {
+		t.Fatalf("根元素不是 movie：%s", text)
+	}
+	for _, want := range []string{
+		"<title>怒之杀</title>",
+		"<originaltitle>Mutiny</originaltitle>",
+		"<sorttitle>怒之杀</sorttitle>",
+		"<tagline>血染水域</tagline>",
+		"<runtime>96</runtime>",
+		"<premiered>2026-08-19</premiered>",
+		"<year>2026</year>",
+		"<mpaa>R</mpaa>",
+		"<director>让-弗朗索瓦·里歇</director>",
+		"<credits>Lindsay Michel</credits>",
+		`<role>Cole Reed</role>`,
+		"<thumb>../../media/actors/976.jpg</thumb>",
+		"<thumb>poster.jpg</thumb>",
+		"<fanart>fanart.jpg</fanart>",
+		`<uniqueid type="imdb">tt32338669</uniqueid>`,
+		"<set>",
+		"<name>某合集</name>",
+		"<trailer>https://www.youtube.com/watch?v=AAA</trailer>",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("movie nfo 缺少 %s：\n%s", want, text)
+		}
+	}
+	// 类型与关键词都进 <genre>（关键词在后）。
+	if !strings.Contains(text, "<genre>动作</genre>") || !strings.Contains(text, "<genre>复仇</genre>") {
+		t.Fatalf("genre 应含类型与关键词：\n%s", text)
+	}
+}
+
+// TestWriteFullTVShowNFO 钉住剧集那份多的三个元素（status / network）。
+func TestWriteFullTVShowNFO(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tvshow.nfo")
+	if err := writeFullTVShowNFO(path, nfoInput{
+		MediaType: MediaTypeTV,
+		Title:     "御廷谣",
+		Status:    "Ended",
+		Networks:  []string{"Hunan Television"},
+		TMDBID:    "295599",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "<tvshow>") {
+		t.Fatalf("根元素不是 tvshow：%s", text)
+	}
+	if !strings.Contains(text, "<status>Ended</status>") {
+		t.Fatalf("缺 status：%s", text)
+	}
+	if !strings.Contains(text, "<network>Hunan Television</network>") {
+		t.Fatalf("缺 network：%s", text)
+	}
+}
+
+// TestFullNFOReadableBySimpleParser 钉住「完整 nfo 能被详情抽屉的读侧读回来」。
+//
+// 这是写侧与读侧之间那份契约：改了元素名而没改读侧，表现是详情抽屉里那几块**静默变空**。
+func TestFullNFOReadableBySimpleParser(t *testing.T) {
+	root := t.TempDir()
+	show := filepath.Join(root, "电影", "怒之杀 (2026) {tmdb-1288445}")
+	mustMkdir(t, show)
+	mustWrite(t, filepath.Join(show, "怒之杀.strm"), "x")
+	path := filepath.Join(show, "怒之杀.nfo")
+	year := 2026
+	if err := writeFullMovieNFO(path, nfoInput{
+		MediaType: MediaTypeMovie,
+		Title:     "怒之杀",
+		Original:  "Mutiny",
+		Plot:      "简介",
+		Year:      &year,
+		Runtime:   96,
+		Score:     7.4,
+		ScoreMax:  tmdbScoreMax,
+		Votes:     806,
+		Genres:    []string{"动作"},
+		Directors: []string{"某导演"},
+		Actors:    []nfoActor{{Name: "杰森·斯坦森", Role: "Cole Reed"}},
+		TMDBID:    "1288445",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	works, err := scanWorks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(works) != 1 {
+		t.Fatalf("扫出 %d 个作品", len(works))
+	}
+	got := readTMDBWallNFO(works[0], MediaTypeMovie)
+	if got == nil {
+		t.Fatal("读不到完整 nfo")
+	}
+	if got.Title != "怒之杀" || got.Runtime != 96 || got.Premiered != "" {
+		t.Fatalf("读回来 = %+v", got)
+	}
+	if got.Ratings == nil || got.Ratings.Rating.Value != 7.4 || got.Ratings.Rating.Max != tmdbScoreMax {
+		t.Fatalf("评分读回来 = %+v（TMDB 是 10 分制，别按 5 分制读）", got.Ratings)
+	}
+	if len(got.Actors) != 1 || got.Actors[0].Role != "Cole Reed" {
+		t.Fatalf("演员读回来 = %+v", got.Actors)
+	}
+	// 关键：**完整 nfo 也必须能被简版读侧读出标题与 tmdbid** ——
+	// 索引、状态判定（workHasNFO / readWorkNFOMeta）走的都是那一条。
+	if meta, ok := readWorkNFOMeta(works[0], MediaTypeMovie); !ok || meta.TMDBID != "1288445" {
+		t.Fatalf("简版读侧读不出 tmdbid：%+v ok=%v", meta, ok)
 	}
 }
 
@@ -253,7 +440,7 @@ func TestWriteMatchedPropagatesTVExtrasError(t *testing.T) {
 		Title:        "三体",
 		MediaType:    MediaTypeTV,
 		EpisodeCount: 1,
-	}, true, true)
+	}, true, true, false)
 	if err == nil || !strings.Contains(err.Error(), "补写季/集元数据失败") {
 		t.Fatalf("季集补写失败必须向上返回，实际 err=%v", err)
 	}
@@ -721,5 +908,136 @@ func mustWrite(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestBackfillNeeded 钉住「哪部作品要补」。
+//
+// 判据错的表现很讨厌：要么**每次点补齐都全量重跑**（把「已有 nfo」当成缺），
+// 要么**点了一点反应都没有**（把缺的当成齐了）。
+func TestBackfillNeeded(t *testing.T) {
+	newWork := func(t *testing.T) (string, workGroup) {
+		t.Helper()
+		root := t.TempDir()
+		movie := filepath.Join(root, "电影", "怒之杀 (2026) {tmdb-1288445}")
+		mustMkdir(t, movie)
+		mustWrite(t, filepath.Join(movie, "怒之杀.strm"), "x")
+		works, err := scanWorks(root)
+		if err != nil || len(works) != 1 {
+			t.Fatalf("scanWorks: %v, %d", err, len(works))
+		}
+		return root, works[0]
+	}
+
+	// ① 没有 nfo —— 那是「还没刮过」，走正常刮削，补齐不抢它的活。
+	_, g := newWork(t)
+	if backfillNeeded(g, MediaTypeMovie) {
+		t.Fatal("没有 nfo 的不该被补齐挑中（那是正常刮削的活）")
+	}
+
+	// ② 老版简版 nfo（没有 <actor>）—— 要补。
+	root, g := newWork(t)
+	movie := filepath.Join(root, "电影", "怒之杀 (2026) {tmdb-1288445}")
+	mustWrite(t, filepath.Join(movie, "怒之杀.nfo"),
+		"<movie><title>怒之杀</title><year>2026</year><tmdbid>1288445</tmdbid><plot>x</plot></movie>")
+	if !backfillNeeded(g, MediaTypeMovie) {
+		t.Fatal("简版 nfo（没有 actor）该被挑中")
+	}
+
+	// ③ 完整 nfo + 剧照 + 背景图 —— 齐了，不该再跑。
+	year := 2026
+	if err := writeFullMovieNFO(filepath.Join(movie, "怒之杀.nfo"), nfoInput{
+		MediaType: MediaTypeMovie,
+		Title:     "怒之杀",
+		Year:      &year,
+		Actors:    []nfoActor{{Name: "杰森·斯坦森"}},
+		TMDBID:    "1288445",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(movie, "fanart.jpg"), "img")
+	mustMkdir(t, filepath.Join(movie, "extrafanart"))
+	mustWrite(t, filepath.Join(movie, "extrafanart", "fanart1.jpg"), "img")
+	if backfillNeeded(g, MediaTypeMovie) {
+		t.Fatal("齐了的作品不该再被挑中（否则每次点补齐都全量重跑）")
+	}
+
+	// ④ 完整 nfo 但缺背景图 —— 要补。
+	if err := os.Remove(filepath.Join(movie, "fanart.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	if !backfillNeeded(g, MediaTypeMovie) {
+		t.Fatal("缺背景图该被挑中")
+	}
+}
+
+// TestMergeNFOInputKeepsExisting 钉住补抓的**合并语义**：已有的一律不动，只补缺的。
+//
+// 这是补抓最要紧的一条：用户可能手改过标题/简介/类型，整份重写会把那些改动悄悄抹掉，
+// 而 Emby 那边只表现为「信息变了」。
+func TestMergeNFOInputKeepsExisting(t *testing.T) {
+	old := &tmdbNFO{
+		Title:     "我自己改的标题",
+		Plot:      "我自己改的简介",
+		Runtime:   120,
+		Genres:    []string{"我删剩的类型"},
+		Directors: []string{"我改的导演"},
+		Actors: []struct {
+			Name  string `xml:"name"`
+			Role  string `xml:"role"`
+			Thumb string `xml:"thumb"`
+		}{{Name: "我留的演员", Role: "某角色"}},
+		Ratings: &struct {
+			Rating struct {
+				Max   int     `xml:"max,attr"`
+				Value float64 `xml:"value"`
+				Votes int     `xml:"votes"`
+			} `xml:"rating"`
+		}{},
+	}
+	old.Ratings.Rating.Value = 9.9
+	old.Ratings.Rating.Max = 10
+	old.Ratings.Rating.Votes = 5
+
+	in := nfoInput{
+		Title:     "TMDB 的标题",
+		Original:  "Mutiny",
+		Plot:      "TMDB 的简介",
+		Runtime:   96,
+		Score:     7.4,
+		ScoreMax:  tmdbScoreMax,
+		Votes:     806,
+		Genres:    []string{"动作"},
+		Keywords:  []string{"复仇"},
+		Directors: []string{"TMDB 的导演"},
+		Actors:    []nfoActor{{Name: "TMDB 的演员"}},
+	}
+
+	got := mergeNFOInput(old, in)
+
+	if got.Title != "我自己改的标题" || got.Plot != "我自己改的简介" {
+		t.Fatalf("已有的标题/简介被覆盖了：%q / %q", got.Title, got.Plot)
+	}
+	if got.Runtime != 120 {
+		t.Fatalf("已有片长被覆盖：%d", got.Runtime)
+	}
+	if len(got.Genres) != 1 || got.Genres[0] != "我删剩的类型" {
+		t.Fatalf("已有类型没整列保留：%v", got.Genres)
+	}
+	if len(got.Keywords) != 0 {
+		t.Fatalf("类型整列保留时不该再并进关键词（用户删掉的词会回来）：%v", got.Keywords)
+	}
+	if len(got.Actors) != 1 || got.Actors[0].Name != "我留的演员" {
+		t.Fatalf("已有演员没保留：%v", got.Actors)
+	}
+	if got.Score != 9.9 || got.Votes != 5 {
+		t.Fatalf("已有评分没保留：%v/%d", got.Score, got.Votes)
+	}
+	// 老那份**没有**的字段要补上（否则补抓就白跑了）。
+	if got.Original != "Mutiny" {
+		t.Fatalf("原始标题该从新数据补上：%q", got.Original)
+	}
+	if len(got.Directors) != 1 || got.Directors[0] != "我改的导演" {
+		t.Fatalf("导演该保留老那份：%v", got.Directors)
 	}
 }

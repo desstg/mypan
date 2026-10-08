@@ -61,6 +61,17 @@ type NFOPresence struct {
 	Poster    bool
 	Thumb     bool
 	Fanart    bool
+	// Title / OriginalTitle 是「回写标题」那条路要的判据（2026-10-07 加）。
+	//
+	// 生成器**恒写**这两个元素（它们没有 omitempty），所以为 false 只有一种可能：
+	// 那份 nfo 不是生成器写的 —— 别的工具产的，或者被手工删过元素。此时补它
+	// 不可能覆盖用户的手改（手改过的必然留着元素），正是这条路判据的原意。
+	Title         bool
+	OriginalTitle bool
+	// NumberLetter 是 `<num>`。**也用来给 recoverTags 递番号字母**：
+	// 老那份 nfo 里如果没有 `<genre>`，重建时 buildGenres 会按字母加一个 genre，
+	// 而读回来的 meta 里 NumberLetter 是空的 —— 两处对不上就多出一个词。
+	Num bool
 }
 
 // nfoPresenceRead 是 NFOPresence 的解析载体，字段顺序与上面一一对应。
@@ -82,6 +93,9 @@ type nfoPresenceRead struct {
 	Poster    *struct{}  `xml:"poster"`
 	Thumb     *struct{}  `xml:"thumb"`
 	Fanart    *struct{}  `xml:"fanart"`
+	Title     *struct{}  `xml:"title"`
+	Original  *struct{}  `xml:"originaltitle"`
+	Num       *struct{}  `xml:"num"`
 }
 
 // ParseNFOPresence 解出「哪些元素存在」。解析失败返回零值 ——
@@ -94,22 +108,25 @@ func ParseNFOPresence(data []byte) NFOPresence {
 		return NFOPresence{}
 	}
 	return NFOPresence{
-		Plot:      raw.Plot != nil,
-		Actors:    len(raw.Actors),
-		Director:  raw.Director != nil,
-		Runtime:   raw.Runtime != nil,
-		Trailer:   raw.Trailer != nil,
-		Rating:    raw.Rating != nil,
-		Genres:    len(raw.Genres),
-		Sets:      len(raw.Sets),
-		Series:    raw.Series != nil,
-		Maker:     raw.Maker != nil,
-		Publisher: raw.Publisher != nil,
-		Studio:    raw.Studio != nil,
-		Cover:     raw.Cover != nil,
-		Poster:    raw.Poster != nil,
-		Thumb:     raw.Thumb != nil,
-		Fanart:    raw.Fanart != nil,
+		Plot:          raw.Plot != nil,
+		Actors:        len(raw.Actors),
+		Director:      raw.Director != nil,
+		Runtime:       raw.Runtime != nil,
+		Trailer:       raw.Trailer != nil,
+		Rating:        raw.Rating != nil,
+		Genres:        len(raw.Genres),
+		Sets:          len(raw.Sets),
+		Series:        raw.Series != nil,
+		Maker:         raw.Maker != nil,
+		Publisher:     raw.Publisher != nil,
+		Studio:        raw.Studio != nil,
+		Cover:         raw.Cover != nil,
+		Poster:        raw.Poster != nil,
+		Thumb:         raw.Thumb != nil,
+		Fanart:        raw.Fanart != nil,
+		Title:         raw.Title != nil,
+		OriginalTitle: raw.Original != nil,
+		Num:           raw.Num != nil,
 	}
 }
 

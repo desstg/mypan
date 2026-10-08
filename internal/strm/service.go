@@ -67,12 +67,12 @@ type Service struct {
 	automationManagedChecker func(context.Context, int64) (bool, error)
 	// scrapeTrigger 由 wire 注入（*strmscrape.Service）。strm 不 import strmscrape，
 	// 否则与 strmscrape→strm 形成循环依赖；形状与 organizeBusy 那几个 setter 一样。
-	scrapeTrigger ScrapeTrigger
-	appCtx        context.Context
-	started                  bool
-	startupReadyAt           time.Time
-	startupGate              <-chan struct{}
-	startupPending           bool
+	scrapeTrigger  ScrapeTrigger
+	appCtx         context.Context
+	started        bool
+	startupReadyAt time.Time
+	startupGate    <-chan struct{}
+	startupPending bool
 }
 
 type ServiceOptions struct {
@@ -265,6 +265,40 @@ func (s *Service) IsAutomationManaged(ctx context.Context, taskID int64) (bool, 
 		return false, nil
 	}
 	return checker(ctx, taskID)
+}
+
+// StartPictureQueueForTest 起一次海报裁切队列（线上由 Start 起）。
+//
+// 测试里没有 Start，不起队列的话 `SchedulePoster` 会把每一张都记
+// 「队列未启动，这一张被丢弃」—— 也就验不到水印。
+func (s *Service) StartPictureQueueForTest(ctx context.Context) {
+	if s == nil || s.javPosters == nil || ctx == nil {
+		return
+	}
+	s.javPosters.Start(ctx)
+}
+
+// PendingJavPostersForTest 报告海报裁切队列里还剩几张没处理（见队列那个方法）。
+//
+// 只给测试用（名字里带 ForTest）：它是**异步**的，等它归零再去看 poster.jpg
+// 才有意义。
+func (s *Service) PendingJavPostersForTest() int {
+	if s == nil || s.javPosters == nil {
+		return 0
+	}
+	return s.javPosters.PendingForTest()
+}
+
+// WaitJavPostersForTest 等海报队列排空（最多等 d）。返回是否排空。
+func (s *Service) WaitJavPostersForTest(d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if s.PendingJavPostersForTest() == 0 {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return s.PendingJavPostersForTest() == 0
 }
 
 func (s *Service) StartupRemaining() int {

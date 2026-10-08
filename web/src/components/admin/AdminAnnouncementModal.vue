@@ -10,12 +10,16 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-// 底部三个操作入口。GitHub 指向本项目仓库，后两个暂时还没有对应页面，
-// 先占位不挂链接 —— 对应的 <div> 带 --placeholder 修饰类，用来去掉 hover 高亮，
-// 免得做成能点却没反应的假象。将来有了地址再换回 <a>。
+// 底部三个操作入口，**都是能点的新窗口链接**。
 const GITHUB_URL = "https://github.com/desstg/mypan";
 // 「联系我」指向 Telegram 机器人，新窗口打开。
 const CONTACT_URL = "https://t.me/mypandesstg_bot";
+// 「更新日志」指向 GitHub 的 Releases 列表。
+//
+// 指 Releases 而不是 CHANGELOG.md：这一页本来就是「这一版改了什么」，
+// 用户看完想接着翻上一版，Releases 是**按版本倒序**排的、每版带标题与日期，
+// 比一份线性文档好找。而且每次发版都会自动生成，不会忘。
+const CHANGELOG_URL = "https://github.com/desstg/mypan/releases";
 
 function closeAll() {
   emit("close");
@@ -56,8 +60,7 @@ function closeAll() {
         </section>
       </div>
 
-      <!-- 操作区：三个小卡片。GitHub 仓库 / 联系我 都是新窗口打开的链接，
-           最后一个「更新日志」还没对应页面，暂为占位（无链接）。 -->
+      <!-- 操作区：三个小卡片，都是新窗口打开的链接。 -->
       <div class="announcement-modal__links">
         <a
           class="announcement-modal__link"
@@ -84,13 +87,18 @@ function closeAll() {
             <small>Telegram 私信</small>
           </span>
         </a>
-        <div class="announcement-modal__link announcement-modal__link--placeholder">
+        <a
+          class="announcement-modal__link"
+          :href="CHANGELOG_URL"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
           <i class="fas fa-list-ul announcement-modal__link-icon announcement-modal__link-icon--log" aria-hidden="true" />
           <span class="announcement-modal__link-copy">
             <strong>更新日志</strong>
             <small>查看历史版本</small>
           </span>
-        </div>
+        </a>
       </div>
     </div>
 
@@ -245,14 +253,12 @@ function closeAll() {
     box-shadow 0.15s ease;
 }
 
-/* 占位卡片没有链接，不参与 hover 高亮，也不显示手型光标 */
-.announcement-modal__link:not(.announcement-modal__link--placeholder):hover {
+/* 三张卡片现在都是链接，统一参与 hover 高亮。
+   （`--placeholder` 那套是「更新日志还没页面」时代的补丁，已经用不上了 —— 删掉，
+   别留一个没有任何元素带的类名。） */
+.announcement-modal__link:hover {
   border-color: color-mix(in srgb, var(--brand) 40%, var(--border));
   box-shadow: var(--shadow-card);
-}
-
-.announcement-modal__link--placeholder {
-  cursor: default;
 }
 
 .announcement-modal__link-icon {
