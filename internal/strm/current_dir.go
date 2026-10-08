@@ -198,7 +198,7 @@ func (s *Service) GenerateCurrentDirectory(ctx context.Context, accountID int64,
 			Files:    s.files,
 			Playback: s.playback,
 
-			JavArtifactGuard: work.task.MediaKind == domain.StrmMediaKindJav,
+			JavArtifactGuard: scrapedArtifactsGuarded(work.task),
 		})
 		if syncErr != nil {
 			return out, syncErr

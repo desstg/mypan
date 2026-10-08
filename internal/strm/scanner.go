@@ -341,7 +341,7 @@ func finalizeScan(
 	}
 	if protectReason == "" && cleanupEnabled && !deps.ManualCleanupConfirm {
 		impact, countErr := collectCleanupImpact(root, taskRelDir, cleanupScopes, cleanupSkipped, seen, state.remoteChildren,
-			task.MediaKind == domain.StrmMediaKindJav)
+			scrapedArtifactsGuarded(task))
 		if countErr != nil {
 			return result, countErr
 		}
@@ -369,10 +369,11 @@ func finalizeScan(
 				Playback:     deps.Playback,
 				Failures:     failures,
 				OnProgress:   deps.OnProgress,
-				// 只在番号任务上开守卫（见 metadataSyncRequest.JavArtifactGuard）：
-				// 刮削那套往同一个树里写海报/nfo，有同样的问题，但那是独立的既有行为，
-				// 单独做、各自可回滚。
-				JavArtifactGuard: task.MediaKind == domain.StrmMediaKindJav,
+				// 开了「刮削元数据」的任务都开守卫（见 scrapedArtifactsGuarded）：
+				// 番号的生成器与 TMDB 的刮削都往同一个树里写本地独有的
+				// 海报/背景图/剧照/nfo —— 那是**本地生成**的，远端清单里永远没有，
+				// 不保护的话每同步一次就被清一遍（用户报的「演员和剧照又没了」）。
+				JavArtifactGuard: scrapedArtifactsGuarded(task),
 			})
 			if err != nil {
 				return result, err
@@ -387,7 +388,7 @@ func finalizeScan(
 				return result, err
 			}
 			n, err := cleanupMissingRemoteChildDirs(root, taskRelDir, state.remoteChildren, failures, log,
-				task.MediaKind == domain.StrmMediaKindJav)
+				scrapedArtifactsGuarded(task))
 			if err != nil {
 				return result, err
 			}
@@ -1067,6 +1068,39 @@ func removeStaleStrmAndSameStemSidecars(strmPath string) error {
 	return nil
 }
 
+// scrapedArtifactsGuarded 报告「这个任务要不要保护本程序生成的刮削产物」。
+//
+// # 为什么需要它（2026-10-08，用户报「同步一下演员和剧照又没了」）
+//
+// 刮削生成的那些文件（海报 / 背景图 / 剧照 / nfo / 字幕…）**永远不在网盘上** ——
+// 它们是本地生成的，远端元数据清单里不可能有。而清理那几条路的判据都是
+// 「远端没有 → 删本地」，于是每跑一次同步就把它们清一遍、刮削再写一遍。
+//
+// 番号那面早就碰到了这个问题，加了一个 `JavArtifactGuard`；TMDB 那面**没有**
+// （那个开关当时只对番号开）。所以 TMDB 任务刮好演员与剧照之后，一同步就没了。
+//
+// 判据与「生成端」对齐：会产出这些东西的任务有两种 ——
+//   - 番号影片：生成器写 nfo / 封面 / 海报 / 剧照 / 字幕；
+//   - TMDB 影片**且开着「刮削元数据」**：TMDB 刮削往同一个树里写 nfo / 海报 /
+//     背景图 / 剧照 / 分集缩略图。
+//
+// 第二种带 `task.SyncMetadata` 这个条件是有意的：没开刮削的 TMDB 任务不产出
+// 这些东西，它的目录里就不该有需要保护的文件；开着才保护，让守卫的范围与
+// 「谁写的」严格一致。
+func scrapedArtifactsGuarded(task *domain.StrmTask) bool {
+	if task == nil {
+		return false
+	}
+	switch task.MediaKind {
+	case domain.StrmMediaKindJav:
+		return true
+	case domain.StrmMediaKindTmdb:
+		return task.SyncMetadata
+	default:
+		return false
+	}
+}
+
 // isSharedMediaSidecarDir 报告一个子目录是不是「共用元数据目录」。
 //
 // 目前只有 `extrafanart`（Emby / Kodi 的剧照目录，番号元数据往这里放 fanartN.jpg）。
@@ -1075,6 +1109,21 @@ func isSharedMediaSidecarDir(name string) bool {
 	return strings.EqualFold(name, "extrafanart")
 }
 
+// isSharedMediaSidecar 报告一个文件是不是「共用媒体旁路元数据」。
+//
+// ⚠️ 两种形态都要认（2026-10-08 补第二种）：
+//
+//	裸名      `poster.jpg` / `fanart.jpg` / `movie.nfo`  ← 目录级约定
+//	带主干    `<主干>-poster.jpg` / `<主干>-thumb.jpg`   ← 平铺布局与**分集缩略图**
+//
+// 只认裸名时漏掉的正是分集缩略图：TMDB 刮削写的是
+// `某剧 (2026) S01E01 [1080p]-thumb.jpg`，番号那面写的是 `<主干>-thumb.jpg` ——
+// 两边都带主干，于是两边都不受保护（这是**两边共有**的洞，不是 TMDB 独有）。
+//
+// 判据是「主名以某个已知后缀结尾」：`-poster` / `-thumb` / `-fanart` …。
+// 后缀表与 javArtifactNames 和 removeStaleStrmAndSameStemSidecars 那份**同源**
+// （都是 Emby / Kodi 的旁路命名）——三处各写一份的话，哪边加一个新后缀就会出现
+// 「生成 A、守卫认 B」。
 func isSharedMediaSidecar(name string) bool {
 	name = strings.ToLower(name)
 	if name == "movie.nfo" || name == "tvshow.nfo" || name == "season.nfo" {
@@ -1083,12 +1132,32 @@ func isSharedMediaSidecar(name string) bool {
 	ext := filepath.Ext(name)
 	switch ext {
 	case ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif":
-		switch strings.TrimSuffix(name, ext) {
-		case "poster", "fanart", "folder", "thumb", "backdrop", "banner", "landscape", "clearlogo", "clearart", "logo", "discart", "keyart":
+		base := strings.TrimSuffix(name, ext)
+		if _, ok := sidecarImageBareNames[base]; ok {
 			return true
+		}
+		for _, suffix := range sidecarImageSuffixes {
+			if strings.HasSuffix(base, suffix) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// sidecarImageBareNames 是**不带主干**的旁路图名（目录级约定）。
+var sidecarImageBareNames = map[string]struct{}{
+	"poster": {}, "fanart": {}, "folder": {}, "thumb": {}, "backdrop": {},
+	"banner": {}, "landscape": {}, "clearlogo": {}, "clearart": {}, "logo": {},
+	"discart": {}, "keyart": {},
+}
+
+// sidecarImageSuffixes 是**带主干**的旁路图后缀（`<主干>-poster.jpg` 里的 `-poster`）。
+//
+// 与 removeStaleStrmAndSameStemSidecars 那份逐字一致。
+var sidecarImageSuffixes = []string{
+	"-poster", "-thumb", "-fanart", "-backdrop", "-banner", "-landscape",
+	"-clearlogo", "-clearart", "-logo", "-discart", "-keyart",
 }
 
 // cleanupScopedStaleFiles 清理过期 .strm，并顺带删除同主干旁路元数据。
@@ -1310,12 +1379,16 @@ func cleanupProtectReason(imp cleanupImpact) string {
 	return ""
 }
 
-// guardJavArtifactsDir 报告「这个本地子目录是本程序生成的番号元数据目录」。
+// guardJavArtifactsDir 报告「这个本地子目录是本程序生成的刮削产物目录」。
 //
 // 这些目录（目前只有 `extrafanart/`）**本地独有**，网盘上永远不会有对应项，
 // 于是「本地有、远端没有 → 删掉」那条规则每一轮都会把它们清一遍 ——
 // 实测第二轮就删了 7 个，用户看到的是「剧照刚生成就没了」。
 // 与文件级的守卫（metadataSyncRequest.JavArtifactGuard）是同一个道理。
+//
+// ⚠️ guard 由 scrapedArtifactsGuarded 统一给（番号任务 + 开了刮削的 TMDB 任务）——
+// 原来这里是 `task.MediaKind == jav`，于是 TMDB 那面刮出来的 `extrafanart/`
+// 每同步一次就被整目录删掉（用户报的「同步一下剧照又没了」）。
 func guardJavArtifactsDir(guard bool, name string) bool {
 	return guard && isSharedMediaSidecarDir(name)
 }

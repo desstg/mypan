@@ -574,3 +574,59 @@ func TestCleanupMissingRemoteChildDirsKeepsJavArtifacts(t *testing.T) {
 		t.Error("非番号任务下该目录仍应被清理")
 	}
 }
+
+// TestScrapedArtifactsGuarded 钉住「谁受保护」。
+//
+// 2026-10-08 用户报「TMDB 任务刮好演员和剧照，同步一下又没了」：原来守卫只对
+// **番号任务**开（`task.MediaKind == jav`），TMDB 那面刮削写出来的
+// 海报/背景图/剧照/nfo 全是本地独有的，远端清单里永远没有，于是每同步一次就被
+// 「远端没有 → 删本地」清一遍。
+func TestScrapedArtifactsGuarded(t *testing.T) {
+	cases := []struct {
+		name string
+		task *domain.StrmTask
+		want bool
+	}{
+		{"番号任务（一直开着）", &domain.StrmTask{MediaKind: domain.StrmMediaKindJav}, true},
+		{"番号任务 + 没开刮削也保护", &domain.StrmTask{MediaKind: domain.StrmMediaKindJav, SyncMetadata: false}, true},
+		{"TMDB + 开了刮削元数据", &domain.StrmTask{MediaKind: domain.StrmMediaKindTmdb, SyncMetadata: true}, true},
+		{"TMDB + 没开刮削（不产出，不保护）", &domain.StrmTask{MediaKind: domain.StrmMediaKindTmdb, SyncMetadata: false}, false},
+		{"nil 任务", nil, false},
+	}
+	for _, c := range cases {
+		if got := scrapedArtifactsGuarded(c.task); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestIsSharedMediaSidecarCoversStemPrefixedImages 钉住「带主干的旁路图」也认。
+//
+// 原来只认**裸名**（`poster.jpg` / `fanart.jpg` / `thumb.jpg`），而
+// 分集缩略图是 `<主干>-thumb.jpg`、平铺布局的海报是 `<主干>-poster.jpg` ——
+// 两种形态都带主干，于是两边（番号与 TMDB）都不受保护。
+func TestIsSharedMediaSidecarCoversStemPrefixedImages(t *testing.T) {
+	yes := []string{
+		"poster.jpg", "fanart.jpg", "thumb.jpg", "movie.nfo", "tvshow.nfo", "season.nfo",
+		// 带主干的那批（新增）
+		"某剧 (2026) S01E01 [1080p]-thumb.jpg",
+		"怒之杀 - Mutiny (2026) [2160p]-poster.jpg",
+		"某剧 (2026)-fanart.jpg",
+		"SSIS-444-U-thumb.jpg",
+	}
+	for _, n := range yes {
+		if !isSharedMediaSidecar(n) {
+			t.Errorf("%q 该被认成共用旁路元数据", n)
+		}
+	}
+	no := []string{
+		"某剧 (2026) S01E01 [1080p].strm",
+		"某剧 (2026) S01E01 [1080p].nfo", // 带主干的 nfo 走另一条判据（同主干旁路）
+		"readme.txt", "config.json",
+	}
+	for _, n := range no {
+		if isSharedMediaSidecar(n) {
+			t.Errorf("%q 不该被认成共用旁路元数据", n)
+		}
+	}
+}
