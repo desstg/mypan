@@ -73,6 +73,12 @@ type JavOnlineScrapeProgress struct {
 	Done    int    `json:"done"`
 	Total   int    `json:"total"`
 	Message string `json:"message"`
+	// Result 是**跑完之后**的汇总（前端在 running 从 true 变 false 时读它弹提示）。
+	//
+	// 为什么要它：这条路从「同步长请求」改成后台任务之后，结果没法再从 HTTP 响应里
+	// 拿 —— 响应在任务**开始**时就返回了。所以把结果挂在进度上，前端轮询到
+	// running=false 就读它。
+	Result *JavWallOnlineScrapeResult `json:"result,omitempty"`
 }
 
 // JavWallOnlineScrape 打上游补齐这个任务下所有作品的元数据。
@@ -87,6 +93,12 @@ type JavOnlineScrapeProgress struct {
 //
 // 全程不碰墙的快照缓存，所以墙照常翻页、点卡片照常开详情；只有被补到的那几部
 // 的文件变了，用户下次刷新自然看到。
+// JavWallOnlineScrape 是**同步**那条路（跑完才返回）。
+//
+// ⚠️ **不要把它挂到 HTTP 上**：108 部要跑十几分钟，中间那层反代等不了就回 502
+// （群晖上实测：跑到 20 部左右就 502，把图片间隔调大只会更早 —— 因为更慢）。
+// HTTP 走 StartJavWallOnlineScrape（后台任务 + 轮询进度），这个方法留给
+// 测试与将来可能的后台联动。
 func (s *Service) JavWallOnlineScrape(ctx context.Context, taskID int64) (JavWallOnlineScrapeResult, error) {
 	var out JavWallOnlineScrapeResult
 	if taskID <= 0 {
@@ -108,8 +120,10 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, taskID int64) (JavWal
 	if len(targets) == 0 {
 		return out, nil
 	}
+	// 进度先立起来（前端下一次轮询就能看到 running=true 与总数）。
 	s.setJavOnlineProgress(taskID, 0, len(targets), "在线刮削中…")
-	defer s.setJavOnlineProgress(taskID, 0, 0, "")
+	// ⚠️ 收尾（Running=false 与写 Result）统一由 StartJavWallOnlineScrape 那个
+	// goroutine 做 —— 这里**不要**再动，否则前端会读到「完成了但还没有结果」。
 
 	// 限流：上游那边自己也有间隔（`jav_min_interval_ms`），这里再加一道是给
 	// 网盘/代理这类中间层留余量，也让「用户关掉页面」能更快收手。
@@ -150,6 +164,75 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, taskID int64) (JavWal
 		s.log.Warn("jav online scrape artwork failed", "task_id", taskID, "err", err)
 	}
 	return out, nil
+}
+
+// StartJavWallOnlineScrape 起一个**后台**在线刮削任务，立刻返回当前进度。
+//
+// # 为什么要异步（2026-10-08 群晖实测）
+//
+// 原来那条接口是同步的：前端 await，服务端在**同一个 HTTP 请求**里把整个任务跑完。
+// 108 部要十几分钟，群晖那层反代等不了就回 **502**（用户看到「跑到 20 部就 502」）。
+// 把图片间隔调大只是让它更慢，502 来得更早 —— 那是症状不是原因。
+//
+// 现在：接口立刻返回进度（running=true），活在后头跑，前端轮询
+// `/jav-wall/online-scrape/progress` 直到 running=false，结果从 `result` 里读。
+// 与 TMDB 那套 `RunAsync` + `Progress` 是同一个形状。
+//
+// # 并发
+//
+// **同一个任务**已在跑时直接返回当前进度（不报错、不排队）—— 用户连点两次不该
+// 起两个任务去抢上游通道。不同任务之间互不影响（进度是 per-task 的）。
+func (s *Service) StartJavWallOnlineScrape(ctx context.Context, taskID int64) (JavOnlineScrapeProgress, error) {
+	if taskID <= 0 {
+		return JavOnlineScrapeProgress{}, domain.Errorf(domain.CodeValidation, "strm_task_id 无效")
+	}
+	// 守卫放**起任务之前**：进去之后错误只能落在进度里，调用方拿不到。
+	if s.jav == nil {
+		return JavOnlineScrapeProgress{}, domain.Errorf(domain.CodeInternal, "番号服务未装配")
+	}
+	task, _, err := s.resolveTask(ctx, taskID)
+	if err != nil {
+		return JavOnlineScrapeProgress{}, err
+	}
+	if task.MediaKind != javMediaKind {
+		return JavOnlineScrapeProgress{}, errNotJavTask
+	}
+	if s.javOnlineRunning(taskID) {
+		return s.JavOnlineScrapeProgressOf(taskID), nil // 已在跑：返回当前进度
+	}
+
+	// 进度先立起来（前端下一次轮询就能看到 running=true 与总数）。
+	s.javOnlineMu.Lock()
+	s.javOnline = &JavOnlineScrapeProgress{TaskID: taskID, Running: true, Message: "准备中…"}
+	s.javOnlineMu.Unlock()
+
+	// **不随请求结束**：这条 HTTP 请求马上就返回了，任务得自己活着。
+	runCtx := context.Background()
+	go func() {
+		res, runErr := s.JavWallOnlineScrape(runCtx, taskID)
+		s.javOnlineMu.Lock()
+		defer s.javOnlineMu.Unlock()
+		if s.javOnline == nil || s.javOnline.TaskID != taskID {
+			return // 被别的任务顶掉了：不留残影
+		}
+		if runErr != nil {
+			s.javOnline.Running = false
+			s.javOnline.Message = runErr.Error()
+			return
+		}
+		out := res
+		s.javOnline.Running = false
+		s.javOnline.Message = "在线刮削完成"
+		s.javOnline.Result = &out
+	}()
+	return s.JavOnlineScrapeProgressOf(taskID), nil
+}
+
+// javOnlineRunning 报告这个任务是否已有在线刮削在跑。
+func (s *Service) javOnlineRunning(taskID int64) bool {
+	s.javOnlineMu.Lock()
+	defer s.javOnlineMu.Unlock()
+	return s.javOnline != nil && s.javOnline.TaskID == taskID && s.javOnline.Running
 }
 
 // javScrapeRelPaths 把扫到的目标换算成「相对任务根」的 .strm 路径
@@ -602,11 +685,17 @@ func writeJSONFile(path string, doc map[string]any) error {
 func (s *Service) setJavOnlineProgress(taskID int64, done, total int, message string) {
 	s.javOnlineMu.Lock()
 	defer s.javOnlineMu.Unlock()
-	if total <= 0 {
-		s.javOnline = nil
+	prev := s.javOnline
+	if prev != nil && prev.TaskID == taskID {
+		// **只推进**，不动 Running —— 收尾（Running=false + 写 Result）由
+		// StartJavWallOnlineScrape 那个 goroutine 统一做，两者分开才不会出现
+		// 「完成了但还没有结果」那一瞬（前端正好那时轮询就会误判成失败）。
+		prev.Done, prev.Total, prev.Message = done, total, message
 		return
 	}
-	s.javOnline = &JavOnlineScrapeProgress{TaskID: taskID, Done: done, Total: total, Message: message}
+	s.javOnline = &JavOnlineScrapeProgress{
+		TaskID: taskID, Running: true, Done: done, Total: total, Message: message,
+	}
 }
 
 // JavOnlineScrapeProgressOf 取当前进度（没在跑时 running=false）。

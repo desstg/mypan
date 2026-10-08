@@ -322,17 +322,22 @@ export interface JavWallOnlineScrapeProgress {
   done: number;
   total: number;
   message: string;
+  /** 跑完之后的汇总（running 变 false 时才有）。 */
+  result?: JavWallOnlineScrapeResult;
 }
 
 /**
  * 在线刮削：打上游把目录下**缺的**元数据补齐，写回 json 与 nfo。
+ *
+ * **后台任务**：接口立刻返回进度，跑完的汇总从进度接口的 `result` 里读
+ * （同步跑十几分钟会被反代 502）。
  *
  * 与「刷新元数据」的区别：那一条只重读本地磁盘（不联网），这一条会联网。
  * 番号按 **nfo 的 `<num>` → 侧车 json 的 number → 拆主干**（去掉 `-U`/`-C`/`-4K`
  * 那些质量后缀）三条取，**不拿文件名当番号**。
  */
 export function onlineScrapeJavWall(input: { strm_task_id: number; rel_dir?: string; stem?: string }) {
-  return http.post<JavWallOnlineScrapeResult>("/admin/strm-scrape/jav-wall/online-scrape", input);
+  return http.post<JavWallOnlineScrapeProgress>("/admin/strm-scrape/jav-wall/online-scrape", input);
 }
 
 export function fetchJavWallOnlineScrapeProgress(strmTaskId: number) {

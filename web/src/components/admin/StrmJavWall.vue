@@ -172,22 +172,25 @@ async function onlineScrape() {
   onlineScraping.value = true;
   startOnlinePoll();
   try {
-    const out = await onlineScrapeJavWall({ strm_task_id: props.taskId });
-    const parts = [`补到 ${out.scraped} 部`];
-    if (out.images) parts.push(`补图 ${out.images} 张`);
-    if (out.skipped) parts.push(`跳过 ${out.skipped} 部`);
-    if (out.failed) parts.push(`失败 ${out.failed} 部`);
-    toast.success(`在线刮削完成：${parts.join("，")}`);
-    await load();
+    // **起任务**（接口立刻返回，活在后头跑）。结果从进度里读 —— 见 startOnlinePoll。
+    await onlineScrapeJavWall({ strm_task_id: props.taskId });
+    // 不在这里等：轮询那条路会在 running 变 false 时弹结果并收尾。
   } catch (error) {
     toast.error(getApiErrorMessage(error, "在线刮削失败"));
-  } finally {
     stopOnlinePoll();
     onlineScraping.value = false;
   }
 }
 
-/** 轮询进度：按钮上显示「刮削中… (n/m)」。 */
+/**
+ * 轮询进度：按钮上显示「刮削中… (n/m)」，跑完弹结果。
+ *
+ * # 为什么轮询而不是 await 那次请求
+ *
+ * 在线刮削要打上游一百多次、还要下上千张图，整个任务十几分钟。**同步等它**
+ * 会被中间那层反代 502（群晖上实测跑到 20 部就断，把图片间隔调大只会更早）。
+ * 所以后端改成后台任务，这里轮询到结束为止 —— 期间用户可以照常用墙。
+ */
 function startOnlinePoll() {
   stopOnlinePoll();
   const tick = async () => {
@@ -195,12 +198,27 @@ function startOnlinePoll() {
     try {
       const p = await fetchJavWallOnlineScrapeProgress(props.taskId);
       onlineProgress.value = p.running ? p : null;
+      if (p.running) return;
+      // 跑完了（或失败）：弹结果并收尾。
+      stopOnlinePoll();
+      onlineScraping.value = false;
+      if (p.result) {
+        const parts = [`补到 ${p.result.scraped} 部`];
+        if (p.result.images) parts.push(`补图 ${p.result.images} 张`);
+        if (p.result.skipped) parts.push(`跳过 ${p.result.skipped} 部`);
+        if (p.result.failed) parts.push(`失败 ${p.result.failed} 部`);
+        toast.success(`在线刮削完成：${parts.join("，")}`);
+      } else {
+        // 没有 result = 跑挂了（后端的错误落在 message 里）。
+        toast.error(p.message || "在线刮削失败");
+      }
+      await load();
     } catch {
-      // 进度拿不到不该打扰用户：按钮照样转，主请求的结论才是准的。
+      // 进度拿不到（网络抖一下）不该收尾：下一轮继续问。
     }
   };
   void tick();
-  onlinePollTimer = window.setInterval(tick, 2000);
+  onlinePollTimer = window.setInterval(tick, 3000);
 }
 
 function stopOnlinePoll() {

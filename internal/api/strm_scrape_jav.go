@@ -279,7 +279,11 @@ func (h *Handler) onlineScrapeJavWall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	out, err := h.strmScrape.JavWallOnlineScrape(r.Context(), taskID)
+	// **后台任务**：立刻返回进度，活在后头跑（前端轮询进度那条接口）。
+	//
+	// 原来是同步跑完再返回 —— 108 部要十几分钟，群晖那层反代等不了就回 502
+	// （实测跑到 20 部左右）。见 StartJavWallOnlineScrape 的说明。
+	out, err := h.strmScrape.StartJavWallOnlineScrape(r.Context(), taskID)
 	if err != nil {
 		writeErr(w, err)
 		return

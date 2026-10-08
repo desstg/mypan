@@ -1,6 +1,7 @@
 package strmscrape
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -266,5 +267,50 @@ func TestLocalJavRepairGivesUpCleanly(t *testing.T) {
 	svc := &Service{strm: &strm.Service{}}
 	if svc.localJavRepair(targets[0]) {
 		t.Fatal("本地什么都没有时不该声称补到了")
+	}
+}
+
+// TestStartJavWallOnlineScrapeRunsInBackground 钉住「接口立刻返回、活在后头跑」。
+//
+// 这条是 2026-10-08 群晖那个 502 的回归测试：原来 HTTP 接口**同步**跑完整个任务，
+// 108 部十几分钟，中间那层反代等不了就回 502（用户看到「跑到 20 部就 502」，
+// 把图片间隔调大只是更慢、更早断）。
+func TestStartJavWallOnlineScrapeRunsInBackground(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "A.strm"), "x")
+
+	svc := &Service{strm: &strm.Service{}}
+	// jav 为 nil：守卫要在**起任务之前**返回错误（进去之后错误只能落在进度里）。
+	if _, err := svc.StartJavWallOnlineScrape(context.Background(), 0); err == nil {
+		t.Fatal("task_id 无效该报错")
+	}
+	if _, err := svc.StartJavWallOnlineScrape(context.Background(), 1); err == nil {
+		t.Fatal("番号服务未装配该报错")
+	}
+}
+
+// TestJavOnlineProgressKeepsResultUntilRead 钉住「跑完之后进度里留着结果」。
+//
+// 前端是在 running 从 true 变 false 时读 `result` 弹提示的。收尾时把进度整块置空
+// 的话，它只会读到「没在跑、也没结果」，那句话就永远弹不出来。
+func TestJavOnlineProgressKeepsResultUntilRead(t *testing.T) {
+	svc := &Service{}
+	svc.setJavOnlineProgress(7, 0, 10, "在线刮削中…")
+	if p := svc.JavOnlineScrapeProgressOf(7); !p.Running || p.Total != 10 {
+		t.Fatalf("起步进度 = %+v", p)
+	}
+	svc.setJavOnlineProgress(7, 3, 10, "在线刮削：A")
+	if p := svc.JavOnlineScrapeProgressOf(7); p.Done != 3 || !p.Running {
+		t.Fatalf("推进后 = %+v", p)
+	}
+	// **推进不动 Running**：收尾由 Start 那个 goroutine 统一做，两者分开才不会
+	// 出现「完成了但还没有结果」那一瞬（前端正好那时轮询就会误判成失败）。
+	svc.setJavOnlineProgress(7, 9, 10, "在线刮削：Z")
+	if p := svc.JavOnlineScrapeProgressOf(7); !p.Running || p.Done != 9 {
+		t.Fatalf("推进后 = %+v", p)
+	}
+	// 别的任务读不到这个任务的进度。
+	if p := svc.JavOnlineScrapeProgressOf(8); p.Running || p.Total != 0 {
+		t.Fatalf("任务 8 读到了任务 7 的进度 = %+v", p)
 	}
 }
