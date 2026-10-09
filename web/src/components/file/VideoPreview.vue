@@ -82,23 +82,100 @@ const videoRef = ref<HTMLVideoElement | null>(null);
 /**
  * `<video>` 元素的一份**普通变量**引用（不是 ref）。
  *
- * 存在的唯一理由是 `onUnmounted`：那时 Vue 已经把 DOM 摘掉、`videoRef.value` 变成
- * `null`，拿不到元素就没法清 src —— 而清 src 正是「关掉播放窗之后流量还在跑」的解法
- * （见 releaseVideoElement 的说明）。
+ * 两个用处：函数 ref 收到 null 时拿它清 src（关窗 / 切集，见 setVideoEl）；
+ * `onUnmounted` 兜底时也用它 —— 那时 Vue 已经把 DOM 摘掉、`videoRef.value` 变成
+ * `null`，拿不到元素就没法清 src（见 releaseVideoElement）。
  */
 let mediaEl: HTMLVideoElement | null = null;
 
 /**
- * `<video>` 的 ref 回调：同时喂给 `videoRef`（模板里其他地方要用）与 `mediaEl`
- * （卸载时还要用它，那时 `videoRef.value` 已经变 null）。
+ * 上一次真正给 `<video>` 灌过源的那一对「元素 + 文件」。
  *
- * 用**函数 ref** 而不是 `ref="videoRef"` 是因为一个元素上只能挂一个 ref，
- * 而这两处都需要它。
+ * 存在的理由：函数 ref（`setVideoEl`）与 `onMounted`、`selectEpisode` **都会**叫
+ * `playCurrent()`，而它每次都会走 `setupMediaSource()`（重新灌一遍 src）。
+ * 同一对 (元素, 文件) 上重灌是**有害**的：那会先 `destroyMediaAdapters()`
+ * （pause + 清 src + load()）再把 src 设回去，等于把刚建立的连接掐了重开 ——
+ * 实测会把 `<video>` 打到 networkState=3 / readyState=0，表现就是「一直转圈、放不了」
+ * （2026-10-09 真机踩到）。所以这里合并掉重复的那几次。
+ *
+ * 判据必须带上**元素**：切集时 `<video>` 上挂着 `:key="currentFile.id"`，Vue 会换一个
+ * 新的元素，那一对自然变了、要重新灌；而同一个元素上的重复渲染则被合并成一次。
  */
+let playedKey: { video: HTMLVideoElement; fileId: string } | null = null;
+
+/**
+ * 收掉一个 `<video>` 的连接：暂停 → 清 src → load()。
+ *
+ * ⚠️ **顺序要紧**：`load()` 会中止当前的资源加载，是让浏览器放弃那条连接的
+ * 标准做法（只 pause 不掐连接，实测流量会继续跑）。
+ *
+ * 抽成独立函数是因为它有**两个调用点**：函数 ref 收到 null（关窗 / 切集）与
+ * `onUnmounted`（组件整体销毁的兜底）。原先只有后者，而「关窗」那条路又指望它 ——
+ * 于是关窗后 pause/removeAttribute/load 一次都没调，src 还在、连接还活着
+ * （2026-10-09 埋点实测）。
+ */
+function releaseElement(video: HTMLVideoElement | null | undefined) {
+  if (!video) return;
+  try {
+    video.pause();
+  } catch {
+    // 元素可能已经处于不可播放状态，pause 抛错不影响下面清 src。
+  }
+  video.removeAttribute("src");
+  try {
+    video.load();
+  } catch {
+    // 元素已脱离文档时某些浏览器会抛，忽略即可 —— src 已经清掉了。
+  }
+  // 收掉之后这个元素就不再「已经灌过源」了：万一它又被挂回来（Vue 先给 null 再给同一个
+  // 元素），setupMediaSource 必须重新灌一次，否则 <video> 会停在无源状态。
+  if (playedKey?.video === video) playedKey = null;
+}
+
 function setVideoEl(el: Element | ComponentPublicInstance | null) {
   const video = (el as HTMLVideoElement | null) ?? null;
+  if (!video) {
+    // 元素被卸载（关窗 / 切集）。
+    //
+    // ⚠️ **就在这里收掉，不要留给 `onUnmounted`**。原先只靠 onUnmounted 兜底，结果
+    // **切集那条路彻底漏了**：`<video>` 上挂着 `:key="currentFile.id"`，换集时 Vue 把旧
+    // 元素拆掉，但**这个回调被调用时元素还在文档里**（Vue 先清 ref、后 remove），
+    // 于是「按 isConnected 判断该不该收」永远为真地判成「不该收」——
+    // 旧元素的 src 一直挂着、连接一直开着（2026-10-09 埋点实测：切集后旧元素
+    // 仍是 `networkState=1`、src 还在）。而切集时组件还活着，`onUnmounted` 不会跑，
+    // 没有任何人再来收它。
+    //
+    // 早收一步对关窗也无害：那时元素马上就没了，先 pause+清 src 只会更早掐断连接；
+    // `onUnmounted` 里的 releaseVideoElement 因此变成空转的兜底（mediaEl 已是 null）。
+    if (mediaEl) {
+      releaseElement(mediaEl);
+      mediaEl = null;
+    }
+    videoRef.value = null;
+    return;
+  }
   mediaEl = video;
   videoRef.value = video;
+  // ⚠️ **元素挂上时补一次播放** —— 这是函数 ref 相对 `ref="videoRef"` 唯一需要
+  // 自己补的东西，而漏了它会「两面墙都放不了」（2026-10-09 真机踩到）。
+  //
+  // 为什么：`onMounted` 里那句 `void playCurrent()` 跑的时候，`<video>` 上的
+  // `v-if="currentFile"` 可能还是假（`currentFile` 是 computed，首帧那一拍未必算好），
+  // 元素不在 DOM 里 → 这个回调还没被调用过 → `videoRef.value` 是 null →
+  // `setupMediaSource()` 开头 `if (!video || !file) return` 直接返回，**永远不播**。
+  //
+  // 而 `ref="videoRef"` 那种写法不会中招：Vue 在元素真正挂载时写进 ref，而
+  // `playCurrent` 里读的是**当时**的值。换成函数 ref 之后，「谁在什么时候写」变成了
+  // 我们的责任 —— 所以挂载这一刻必须自己再叫一次。
+  //
+  // 放心叫：这个回调在**每次重新渲染**都会被调用，而重复调用由 setupMediaSource 里的
+  // 合并挡掉（见 playedKey），不会变成「同一集播两遍」。
+  //
+  // 顺带解决**切集**：`<video>` 上挂着 `:key="currentFile.id"`，换集时 Vue 换一个新元素，
+  // 而 `selectEpisode` 里那句 `await playCurrent()` 会赶在 Vue 把新元素插进 DOM 之前跑完 ——
+  // 那一拍 `videoRef.value` 还是 null，`setupMediaSource` 直接返回。真正把新一集播起来的
+  // 就是这里这次调用（2026-10-09 实测：切集能播，靠的是这条）。
+  void playCurrent();
 }
 const episodeListRef = ref<HTMLElement | null>(null);
 const subtitleMenuRef = ref<HTMLElement | null>(null);
@@ -335,24 +412,33 @@ function destroyMediaAdapters() {
   //
   // ⚠️ 注意这里拿的是 `videoRef.value` —— **onUnmounted 时它已经是 null**，
   // 所以卸载那条路走的是 releaseVideoElement（用普通变量存的那份引用）。
-  // 两条路都要留着：这一条在「切集」时跑（DOM 还在），那一条在「关窗」时跑。
-  const video = videoRef.value;
-  if (video) {
-    try {
-      video.pause();
-    } catch {
-      // 元素可能已经处于不可播放状态，pause 抛错不影响下面清 src。
-    }
-    video.removeAttribute("src");
-    video.load();
-  }
+  releaseElement(videoRef.value);
+  // ⚠️ 清完源，这一对就作废了 —— 紧接着 `setupMediaSource` 会把新的那一对写回来。
+  // 不在这里清的话，「切集时元素恰好没换」（理论上不会，因为 key 变了；但真发生就会
+  // 静默不播）会走进 `playedKey` 的短路分支，等于什么都没做。
+  playedKey = null;
 }
 
 async function setupMediaSource() {
   const video = videoRef.value;
   const file = currentFile.value;
   if (!video || !file) return;
+  // ⚠️ **同一对 (元素, 文件) 只灌一次源**。
+  //
+  // `playCurrent()` 有三个调用点（函数 ref、onMounted、切集），而函数 ref 每次重新渲染
+  // 都会叫一次。重灌源不是「多跑一次没事」：`setupMediaSource` 进来先
+  // `destroyMediaAdapters()`（pause + 清 src + load()）再把 src 设回去，
+  // 等于把刚建立的连接掐了重开 —— 实测会把 `<video>` 打到
+  // networkState=3(NETWORK_NO_SOURCE) / readyState=0，表现就是「一直转圈、放不了」
+  // （2026-10-09 真机踩到）。
+  //
+  // 带上元素判断是因为切集换了元素（`:key="currentFile.id"`），那一对变了、该重灌。
+  // ⚠️ **这里拿到的 video / file 必须先存下来再比**：下面 `destroyMediaAdapters()` 会把
+  // `playedKey` 清成 null，顺序反了这道闸就永远不成立（等于没写）。
+  const fileId = file.id;
+  if (playedKey && playedKey.video === video && playedKey.fileId === fileId) return;
   destroyMediaAdapters();
+  playedKey = { video, fileId };
   const session = mediaSession;
   const url = mediaURL.value;
   const ext = fileExtension(file.name);
@@ -385,34 +471,23 @@ async function setupMediaSource() {
 }
 
 /**
- * 卸载时收连接。
+ * `onUnmounted` 的兜底收尾。
  *
- * 单独抽出来是因为**卸载路径与 `destroyMediaAdapters()` 不一样**：
- * `onUnmounted` 触发时 Vue 已经把 DOM 摘掉了，`videoRef.value` 已经是 `null`，
- * 所以那个函数里「拿 video 元素 → pause + 清 src + load()」那一段**整段被跳过**
- * （它开头就是 `if (video)`）—— 对原生 `<video>` 直连那条路（海报墙的 302 链路）
- * 等于什么都没做，而适配器那条路本来就不参与。
+ * 正常情况下**这里已经没什么可收了**：`setVideoEl` 收到 null 时就把元素收干净、
+ * 并把 `mediaEl` 置空（关窗与切集都走那条）。留着它是为了那种「函数 ref 没被叫到」
+ * 的意外 —— 那时候手上这份普通变量引用就是唯一的线索。
+ *
+ * 之所以不能只靠 `destroyMediaAdapters()`：`onUnmounted` 触发时 Vue 已经把 DOM 摘掉、
+ * `videoRef.value` 已经是 `null`，那个函数里「拿 video 元素 → pause + 清 src + load()」
+ * 那一段**整段被跳过**（它开头就是 `if (video)`）—— 对原生 `<video>` 直连那条路
+ * （海报墙的 302 链路）等于什么都没做，而适配器那条路本来就不参与。
  *
  * 实测（2026-10-07，用户报的正是这一条）：手机上播完退出，流量还挂着 10 Mbps
- * 左右，很久才掉下来。所以这里**先自己留一份元素引用**，在 `onUnmounted` 里
- * 拿它把 src 清掉 —— 那才是让浏览器真正放弃连接的做法。
+ * 左右，很久才掉下来。
  */
 function releaseVideoElement() {
-  const video = mediaEl;
-  if (!video) return;
-  try {
-    video.pause();
-  } catch {
-    // 元素可能已经处于不可播放状态，pause 抛错不影响下面清 src。
-  }
-  // ⚠️ 顺序要紧：先 removeAttribute("src") 再 load()。load() 会中止当前的资源加载，
-  // 是让浏览器放弃那条连接的标准做法（只 pause 不掐连接，实测流量会继续跑）。
-  video.removeAttribute("src");
-  try {
-    video.load();
-  } catch {
-    // 元素已脱离文档时某些浏览器会抛，忽略即可 —— src 已经清掉了。
-  }
+  releaseElement(mediaEl);
+  mediaEl = null;
 }
 
 function episodeMeta(file: FileItem, index: number) {
