@@ -76,6 +76,7 @@ func TestCleanupFunctionsIgnoreOversizedDirectory(t *testing.T) {
 		[]cleanupScope{{relDirs: []string{longDir}, recursive: true}},
 		nil,
 		failures,
+		false,
 	)
 	if err != nil {
 		t.Fatalf("全量清理不应因超长目录失败：%v", err)
@@ -87,7 +88,7 @@ func TestCleanupFunctionsIgnoreOversizedDirectory(t *testing.T) {
 		t.Fatalf("超长清理目录应记录一次，实际=%d", failures.Len())
 	}
 
-	if _, err := cleanupCurrentDirectoryStrm(root, "任务", []string{longDir}, nil, nil); err != nil {
+	if _, err := cleanupCurrentDirectoryStrm(root, "任务", []string{longDir}, nil, nil, false); err != nil {
 		t.Fatalf("当前目录清理不应因超长目录失败：%v", err)
 	}
 }

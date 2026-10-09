@@ -175,7 +175,8 @@ func (s *Service) GenerateCurrentDirectory(ctx context.Context, accountID int64,
 	}
 
 	if work.task.ScanMode == domain.StrmScanModeIncrementalUpdate || work.task.ScanMode == domain.StrmScanModeFullSync {
-		removed, cleanErr := cleanupCurrentDirectoryStrm(work.root, work.outputFolder, work.relDirs, seen, work.remoteDirNames)
+		removed, cleanErr := cleanupCurrentDirectoryStrm(work.root, work.outputFolder, work.relDirs, seen, work.remoteDirNames,
+			scrapedArtifactsGuarded(work.task))
 		if cleanErr != nil {
 			return out, cleanErr
 		}
@@ -402,7 +403,7 @@ func matchTaskForDisplayPath(tasks []*domain.StrmTask, currentPath string) (*dom
 	return best, bestRel
 }
 
-func cleanupCurrentDirectoryStrm(root, outputFolder string, relDirs []string, seen map[string]struct{}, remoteDirNames map[string]struct{}) (int64, error) {
+func cleanupCurrentDirectoryStrm(root, outputFolder string, relDirs []string, seen map[string]struct{}, remoteDirNames map[string]struct{}, guarded bool) (int64, error) {
 	currentLocalDir := localTaskDir(root, outputFolder, relDirs)
 	if pathHasOversizedComponent(currentLocalDir) {
 		return 0, nil
@@ -443,7 +444,7 @@ func cleanupCurrentDirectoryStrm(root, outputFolder string, relDirs []string, se
 		if _, ok := seen[rel]; ok {
 			continue
 		}
-		if err := removeStaleStrmAndSameStemSidecars(full); err != nil {
+		if err := removeStaleStrmAndSameStemSidecars(full, guarded); err != nil {
 			return removed, err
 		}
 		removed++

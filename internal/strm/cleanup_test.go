@@ -38,6 +38,7 @@ func TestCleanupScopedStaleFilesRemovesSameStemSidecarsOnly(t *testing.T) {
 		[]cleanupScope{{relDirs: nil, recursive: true}},
 		nil,
 		NewFailureCollector(),
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +78,7 @@ func TestCleanupMovedMediaSidecars(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			n, err := cleanupScopedStaleFiles(root, "任务", seen, []cleanupScope{{recursive: true}}, nil, NewFailureCollector())
+			n, err := cleanupScopedStaleFiles(root, "任务", seen, []cleanupScope{{recursive: true}}, nil, NewFailureCollector(), false)
 			if err != nil || n != 1 {
 				t.Fatalf("清理结果 %d, %v", n, err)
 			}

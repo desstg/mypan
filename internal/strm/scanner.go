@@ -383,7 +383,8 @@ func finalizeScan(
 		}
 
 		if cleanupEnabled {
-			removed, err := cleanupScopedStaleFiles(root, taskRelDir, seen, cleanupScopes, cleanupSkipped, failures)
+			removed, err := cleanupScopedStaleFiles(root, taskRelDir, seen, cleanupScopes, cleanupSkipped, failures,
+				scrapedArtifactsGuarded(task))
 			if err != nil {
 				return result, err
 			}
@@ -978,9 +979,25 @@ func isMetadataExtension(name string, metaExts map[string]struct{}) bool {
 }
 
 // removeStaleStrmAndSameStemSidecars 删除过期 STRM 及关联文件；目录只剩通用元数据时一并清理。
-func removeStaleStrmAndSameStemSidecars(strmPath string) error {
+//
+// # guarded：受保护的任务**只删 .strm 本身**，旁路一个都不碰
+//
+// 2026-10-08 用户报「同步一次，刮好的演员和剧照就没了」，端到端测试又逮到两个漏网的：
+// `<主干>.nfo` 与 `<主干>-thumb.jpg`（分集缩略图）。根子就在这里 —— 这个函数
+// **完全不看守卫**，只按「同主干 + 后缀」删。而 `<主干>.nfo` 明明在
+// `javArtifactNames` 的名单里（`isOurs` 返回 true），那条名单却只在**元数据同步**
+// 那条路上生效，这里管不着。
+//
+// 用户的语义是「**刮削的产物都不删**」，不是「删一半留一半」—— 所以受保护的任务
+// 在这里只删 `.strm`（那个确实过期了，网盘上没了），旁路留给用户。
+//
+// 目录级的收尾（「只剩共用元数据就整目录删」）也跟着跳过：产物还在，目录就不该没。
+func removeStaleStrmAndSameStemSidecars(strmPath string, guarded bool) error {
 	if err := os.Remove(strmPath); err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	if guarded {
+		return nil
 	}
 	base := filepath.Base(strmPath)
 	ext := filepath.Ext(base)
@@ -1161,7 +1178,7 @@ var sidecarImageSuffixes = []string{
 }
 
 // cleanupScopedStaleFiles 清理过期 .strm，并顺带删除同主干旁路元数据。
-func cleanupScopedStaleFiles(root, outputFolder string, seen map[string]struct{}, scopes []cleanupScope, skipped map[string]struct{}, failures *FailureCollector) (int64, error) {
+func cleanupScopedStaleFiles(root, outputFolder string, seen map[string]struct{}, scopes []cleanupScope, skipped map[string]struct{}, failures *FailureCollector, guarded bool) (int64, error) {
 	taskFolder := localTaskDir("", outputFolder, nil)
 	var removed int64
 	for _, sc := range scopes {
@@ -1204,7 +1221,7 @@ func cleanupScopedStaleFiles(root, outputFolder string, seen map[string]struct{}
 				if isStrmUnderSkipped(rel, taskFolder, skipped) {
 					return nil
 				}
-				if err := removeStaleStrmAndSameStemSidecars(path); err != nil {
+				if err := removeStaleStrmAndSameStemSidecars(path, guarded); err != nil {
 					return err
 				}
 				removed++
@@ -1243,7 +1260,7 @@ func cleanupScopedStaleFiles(root, outputFolder string, seen map[string]struct{}
 			if isStrmUnderSkipped(rel, taskFolder, skipped) {
 				continue
 			}
-			if err := removeStaleStrmAndSameStemSidecars(full); err != nil {
+			if err := removeStaleStrmAndSameStemSidecars(full, guarded); err != nil {
 				return removed, err
 			}
 			removed++
