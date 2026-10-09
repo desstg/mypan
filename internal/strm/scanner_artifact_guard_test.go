@@ -76,6 +76,13 @@ func scanFixture(t *testing.T) (root string, task *domain.StrmTask, deps ScanDep
 	}
 	write(filepath.Join(movie, "extrafanart", "fanart1.jpg"))
 	write(filepath.Join(movie, "extrafanart", "fanart2.jpg"))
+	// 演员头像：**任务根下**的 `media/actors/`（TMDB 刮削放这儿，跨作品共享）。
+	// 这一条是 2026-10-08 用户报的「同步之后剧照还在、演员头像全没了」。
+	if err := os.MkdirAll(filepath.Join(root, "任务", "media", "actors"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(root, "任务", "media", "actors", "976.jpg"))
+	write(filepath.Join(root, "任务", "media", "actors", "2091760.jpg"))
 	// 剧集：strm 在 Season 里 + tvshow.nfo + 分集缩略图（**带主干**，就是那个洞）
 	write(filepath.Join(season, "某剧 S01E01 [1080p].strm"))
 	write(filepath.Join(season, "某剧 S01E01 [1080p]-thumb.jpg"))
@@ -168,6 +175,9 @@ func artifactsStillThere(root string) []string {
 		filepath.Join("任务", "某剧 (2026)", "tvshow.nfo"),
 		filepath.Join("任务", "某剧 (2026)", "poster.jpg"),
 		filepath.Join("任务", "某剧 (2026)", "Season 01", "某剧 S01E01 [1080p]-thumb.jpg"),
+		// 演员头像（任务根下的 media/actors/）—— 用户实测被删的那批
+		filepath.Join("任务", "media", "actors", "976.jpg"),
+		filepath.Join("任务", "media", "actors", "2091760.jpg"),
 	} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
 			missing = append(missing, rel)

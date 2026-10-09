@@ -605,6 +605,27 @@ func TestScrapedArtifactsGuarded(t *testing.T) {
 // 原来只认**裸名**（`poster.jpg` / `fanart.jpg` / `thumb.jpg`），而
 // 分集缩略图是 `<主干>-thumb.jpg`、平铺布局的海报是 `<主干>-poster.jpg` ——
 // 两种形态都带主干，于是两边（番号与 TMDB）都不受保护。
+// TestIsSharedMediaSidecarDirCoversActorThumbs 钉住 `media/` 也在守卫名单里。
+//
+// 2026-10-08 用户报「同步之后剧照还在，演员头像全没了，只显示名字」——
+// 演员头像放在**任务根**下的 `media/actors/`，而任务根那一层同样会被
+// 「本地有、远端没有 → 删掉」判一次；`isSharedMediaSidecarDir` 原来只认
+// `extrafanart`，于是整个 `media/` 目录被 RemoveAll。
+func TestIsSharedMediaSidecarDirCoversActorThumbs(t *testing.T) {
+	yes := []string{"extrafanart", "Extrafanart", "media", "MEDIA"}
+	for _, n := range yes {
+		if !isSharedMediaSidecarDir(n) {
+			t.Errorf("%q 该被认成刮削产物目录", n)
+		}
+	}
+	no := []string{"电影", "Season 01", "extras", "actors"}
+	for _, n := range no {
+		if isSharedMediaSidecarDir(n) {
+			t.Errorf("%q 不该被认成刮削产物目录", n)
+		}
+	}
+}
+
 func TestIsSharedMediaSidecarCoversStemPrefixedImages(t *testing.T) {
 	yes := []string{
 		"poster.jpg", "fanart.jpg", "thumb.jpg", "movie.nfo", "tvshow.nfo", "season.nfo",

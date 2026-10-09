@@ -1118,12 +1118,22 @@ func scrapedArtifactsGuarded(task *domain.StrmTask) bool {
 	}
 }
 
-// isSharedMediaSidecarDir 报告一个子目录是不是「共用元数据目录」。
+// isSharedMediaSidecarDir 报告一个子目录是不是「本程序生成的刮削产物目录」。
 //
-// 目前只有 `extrafanart`（Emby / Kodi 的剧照目录，番号元数据往这里放 fanartN.jpg）。
-// 它的内容属于整部片，与同主干旁路同一个归属，所以在 .strm 消失后应当跟着走。
+// 两个都要认（2026-10-09 补第二个）：
+//
+//	extrafanart/  剧照（番号与 TMDB 都往这里放 fanartN.jpg）
+//	media/        演员头像（TMDB 刮削放 `media/actors/{tmdbid}.jpg`，跨作品共享）
+//
+// ⚠️ `media/` 原来不在名单里 —— 它是**任务根下**的目录，而任务根那一层同样会被
+// 「本地有、远端没有 → 删掉」判一次。用户报的正是这个：「同步之后剧照还在，
+// 演员头像全没了，只显示名字」。
+//
+// 判据用**一级目录名**：`media` 下还有一层 `actors`，但清理只判 localBase 的直接
+// 子项，所以判 `media` 就够了。副作用是「用户自己建了一个叫 media 的目录」也会被
+// 放过 —— 那是安全的一侧（宁可留着）。
 func isSharedMediaSidecarDir(name string) bool {
-	return strings.EqualFold(name, "extrafanart")
+	return strings.EqualFold(name, "extrafanart") || strings.EqualFold(name, "media")
 }
 
 // isSharedMediaSidecar 报告一个文件是不是「共用媒体旁路元数据」。
