@@ -203,3 +203,41 @@ func TestAutoScrapeTriggerCondition(t *testing.T) {
 		t.Error("安全保护触发时不该刮削（本地状态本身就不完整）")
 	}
 }
+
+// 标脏是**不看清扫间隔**的 —— 这是那个「一天白扫 4 轮」风暴的机制。
+//
+// 这条把机制本身钉住，这样「自写动作不该标脏」那几条测试才说得通：
+// 如果标脏也要等 6 小时，风暴根本不会发生，也就没有要修的东西。
+//
+// 判据：LastScan 刚更新过（远没到 6 小时），但账号是脏的 → 仍然 shouldRun。
+func TestShouldRunDirtyAccountBypassesInterval(t *testing.T) {
+	svc, _ := testService(t)
+	if err := svc.settings.Update(context.Background(), map[string]string{
+		settings.KeyStrmDefaultScanInterval: "360",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := &domain.StrmTask{
+		ID:           1,
+		AccountID:    1,
+		LastScan:     time.Now(), // 刚刚扫过
+		ScanInterval: 360,
+	}
+
+	if svc.shouldRun(task, time.Now()) {
+		t.Fatal("不脏、又没到间隔时不该跑")
+	}
+
+	svc.mu.Lock()
+	svc.dirtyAccounts[1] = true
+	svc.mu.Unlock()
+
+	if !svc.shouldRun(task, time.Now()) {
+		t.Fatal("标脏应当越过扫描间隔立刻跑 —— 这正是「放完文件马上生成 .strm」的机制")
+	}
+
+	// 跑过一次之后标记要消费掉，否则会每 30 秒扫一次、没完没了。
+	if svc.shouldRun(task, time.Now()) {
+		t.Fatal("标脏是一次性的：读过就该清掉，否则变成无限扫描")
+	}
+}
