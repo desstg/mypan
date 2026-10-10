@@ -40,6 +40,7 @@ import {
 import AccountFolderField from "@/components/admin/AccountFolderField.vue";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
 import AdminRunStatusCell from "@/components/admin/AdminRunStatusCell.vue";
+import AdminStatusPill from "@/components/admin/AdminStatusPill.vue";
 import AdminTableActionBtn from "@/components/admin/AdminTableActionBtn.vue";
 import AdminRowActions from "@/components/admin/AdminRowActions.vue";
 import type { AdminRunStatusVariant } from "@/components/admin/adminRunStatus";
@@ -295,6 +296,32 @@ const taskCount = computed(() => tasks.value.length);
 
 function accountName(id: number): string {
   return accounts.value.find((a) => a.id === id)?.name ?? `#${id}`;
+}
+
+/**
+ * 这条任务是番号方案还是 TMDB 方案。
+ *
+ * 判据与 STRM 任务列表同一套：先看 `use_jav`，再兜 `media_type === "jav"`。
+ * 两个都读是因为历史数据里可能只写了一个 —— 表单里它们本来是联动的
+ * （onMatchModeChange / onMediaTypeChange），但直接改库、导入备份、或更早版本
+ * 存下来的任务可能只有其中一个为真，只判一个会把它显示成 tmdb。
+ */
+function isJavTask(task: MediaOrganizeTask): boolean {
+  const cfg = task.config || {};
+  if (cfg.use_jav === true) return true;
+  return String(cfg.media_type ?? "").toLowerCase() === "jav";
+}
+
+/** 任务列的悬停提示：名字 + 账号 + 方案 + 目标目录，一行说清这条任务是干什么的。 */
+function taskTooltip(task: MediaOrganizeTask): string {
+  return [
+    task.task_name,
+    accountName(task.account_id),
+    isJavTask(task) ? "番号匹配" : "TMDB 匹配",
+    task.config?.target_directory || "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 const { display: sourceDirDisplay, title: sourceDirTitle } = useAccountPathLabel({
@@ -1022,8 +1049,15 @@ defineExpose({
         <tbody ref="organizeTaskList">
           <tr v-for="task in tasks" :key="task.id" class="organize-task-row" :data-dust-key="`organize-task-${task.id}`">
             <td>
-              <div class="organize-task-main" :title="`${task.task_name} · ${accountName(task.account_id)}`">
-                <div class="organize-task-name">{{ task.task_name }}</div>
+              <div class="organize-task-main" :title="taskTooltip(task)">
+                <div class="organize-task-name">
+                  <span class="organize-task-name__text">{{ task.task_name }}</span>
+                  <!-- 匹配方案角标。与 STRM 任务列表那颗「番号 / tmdb」同一个口径 ——
+                       用户在两处看到的应当是同一个词，别在这儿换个说法。 -->
+                  <AdminStatusPill :tone="isJavTask(task) ? 'warning' : 'brand'">
+                    {{ isJavTask(task) ? "番号" : "tmdb" }}
+                  </AdminStatusPill>
+                </div>
                 <div class="organize-account-sub">{{ accountName(task.account_id) }}</div>
               </div>
             </td>
@@ -1732,29 +1766,42 @@ defineExpose({
   table-layout: fixed;
 }
 
+/* 列宽比例。与 STRM 任务列表对齐（那边是 22 / 16 / 40 / 22），这边多一列
+   「操作方式」，所以把状态那列压窄一点、目录那列让出一点：
+   任务 22% / 目录 30% / 方式 10% / 状态 16% / 操作 22%。
+   原来任务列只有 15%，加了角标之后「番号整理」四个字都会被省略号吃掉。 */
 .organize-table th:nth-child(1),
 .organize-table td:nth-child(1) {
-  width: 15%;
+  width: 22%;
 }
 
 .organize-table th:nth-child(2),
 .organize-table td:nth-child(2) {
-  width: 41%;
+  width: 30%;
 }
 
 .organize-table th:nth-child(3),
 .organize-table td:nth-child(3) {
-  width: 9%;
+  width: 10%;
 }
 
 .organize-table th:nth-child(4),
 .organize-table td:nth-child(4) {
-  width: 18%;
+  width: 16%;
 }
 
 .organize-table th:last-child,
 .organize-table td:last-child {
+  width: 22%;
   text-align: center;
+}
+
+/* 名字与目录这两列会很长（用户起的任务名、深层目录），必须能缩出省略号。
+   不给 `max-width: 0` 的话 `table-layout: fixed` 下它们会把列撑破。 */
+.organize-table td:first-child,
+.organize-table td:nth-child(2) {
+  overflow: hidden;
+  max-width: 0;
 }
 
 .organize-task-row:hover {
@@ -1765,7 +1812,19 @@ defineExpose({
   min-width: 0;
 }
 
+/* 任务名 + 方案角标。与 STRM 任务列表 `.strm-task-name` 同一套规则：
+   名字可以缩到 0 撑出省略号，角标不许被挤掉（flex 默认 `1 1 auto` 会让名字
+   参与收缩却不给角标让位，长名字下角标先变形）。 */
 .organize-task-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.organize-task-name__text {
+  flex: 1 1 0;
+  min-width: 0;
   font-weight: 700;
   color: var(--text);
   overflow: hidden;
