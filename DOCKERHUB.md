@@ -87,7 +87,7 @@
 
 ## 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.7.11`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.7.12`
 
 ### 一、先确认共享挂载已开启（用到 FUSE 挂载才需要）
 
@@ -222,7 +222,7 @@ docker run -d --name pansou -p 805:80 ghcr.io/fish2018/pansou-web
 | 标签 | 说明 |
 |---|---|
 | `latest` | 最新发布版 |
-| `v2.7.11` | 固定版本 |
+| `v2.7.12` | 固定版本 |
 
 **默认只构建 `linux/amd64`。** 绝大多数 NAS（群晖、威联通、自建 x86）都是这个架构。
 需要 ARM 版时请在 Actions 里手动触发并填写 `linux/amd64,linux/arm64` ——
