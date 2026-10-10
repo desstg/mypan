@@ -415,12 +415,20 @@ WHERE id=?`, tsValue(at), id)
 	return wrapDB(err)
 }
 
-// MarkPushed 记录已推送的最高画质分。best_quality_score 只升不降 —— 它是洗版基线。
-func (r *tgSubscriptionRepo) MarkPushed(ctx context.Context, id int64, at time.Time, qualityScore float64) error {
+// MarkPushed 记录已推送的最高画质分。
+//
+// ⚠️ best_quality_score 只在**订阅开着洗版**时更新（见 domain 接口上的说明）。
+// 关着时传 0 进去，`MAX(best_quality_score, 0)` 是恒等 —— 这是「不抬基线」的
+// 最小表达，不需要 SQL 条件分支。
+func (r *tgSubscriptionRepo) MarkPushed(ctx context.Context, id int64, at time.Time, qualityScore float64, upgradeEnabled bool) error {
+	score := 0.0
+	if upgradeEnabled {
+		score = qualityScore
+	}
 	_, err := r.db.write.ExecContext(ctx, `
 UPDATE tg_subscriptions SET last_push_at=?, pushed_count=pushed_count+1,
        best_quality_score=MAX(best_quality_score, ?), last_error='', updated_at=CURRENT_TIMESTAMP
-WHERE id=?`, tsValue(at), qualityScore, id)
+WHERE id=?`, tsValue(at), score, id)
 	return wrapDB(err)
 }
 

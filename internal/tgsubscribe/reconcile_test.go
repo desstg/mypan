@@ -57,7 +57,7 @@ func TestReconcileFlipsFailedOfflineTask(t *testing.T) {
 		t.Fatalf("create sub: %v", err)
 	}
 	sub.ID = id
-	if err := s.subs.MarkPushed(ctx, id, time.Now(), 50); err != nil {
+	if err := s.subs.MarkPushed(ctx, id, time.Now(), 50, true); err != nil {
 		t.Fatalf("mark pushed: %v", err)
 	}
 

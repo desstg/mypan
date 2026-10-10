@@ -145,7 +145,14 @@ func (s *Service) subsNeedingSearch(ctx context.Context) []*domain.TGSubscriptio
 //
 // 电影：推过一次就算收齐。这里**不管洗版**：想要更高画质是频道抓取那条路的事
 // （它会按洗版基线重推），拿外部搜索去做洗版等于反复拿同一批结果去撞。
-// 剧集：已入库集数 < 已播出集数就要继续找。
+//
+// 剧集：**按缺口集合判**（已播出但还没收到的那几集），不是按计数。
+//
+// ⚠️ 2026-10-10 从「计数比较」改成「缺口集合」。计数那个判据（`len(rows) < aired`）
+// 只数条数、不看集号，跨季或跳集时会误判：季快照是 S1 两集 + S2 一集、手上是
+// {S1E1, S2E1} —— 计数 2 < 3 看着「还缺」，但它其实答不出「缺的是 S1E2」，
+// 而下游（拼集号搜索、整季包覆盖率拦截）要的正是这个集号。
+// 缺口集合是同一份真相的更强形式，且顺手把「搜哪一集」也回答了。
 //
 // 「算不出已播出集数」时一律返回 true：宁可多搜一轮，也不要因为 TMDB 快照缺季
 // 就把一部没追完的剧永久判成收齐 —— 那个错误用户完全看不出来。
@@ -156,17 +163,16 @@ func (s *Service) subscriptionNeedsResources(ctx context.Context, sub *domain.TG
 	if sub.MediaType != domain.TGMediaTypeTV {
 		return sub.PushedCount == 0
 	}
-	aired, ok := airedEpisodeTotal(sub.Seasons, time.Now())
-	if !ok || aired <= 0 {
+	if aired, ok := airedEpisodeTotal(sub.Seasons, time.Now()); !ok || aired <= 0 {
 		return true
 	}
-	rows, err := s.episodes.ListBySubscription(ctx, sub.ID)
-	if err != nil {
+	missing, ok := s.missingEpisodes(ctx, sub)
+	if !ok {
 		// 读不出来时偏向「需要搜」：漏搜一部的代价是晚点拿到资源，
 		// 误判成已收齐的代价是这部片再也不会被搜到。
 		return true
 	}
-	return len(rows) < aired
+	return len(missing) > 0
 }
 
 // autoSearchOne 对一条订阅跑一轮自动搜索。

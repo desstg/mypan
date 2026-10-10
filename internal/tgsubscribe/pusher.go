@@ -169,8 +169,9 @@ func (s *Service) pushRecord(ctx context.Context, sub *domain.TGSubscription, re
 		reason = degradeReason
 	}
 
-	// 推之前就记下基线：这次是首次推送，还是把已有版本洗掉了。
-	upgraded := sub.BestQualityScore > 0
+	// 这次算不算「洗版升级」。判据与 isUpgradeCandidate 的洗版分支**同源**，
+	// 见 isUpgradePush 的说明。
+	upgraded := isUpgradePush(sub, rec)
 
 	rec.Status = domain.TGRecordPushed
 	if upgraded {
@@ -193,7 +194,7 @@ func (s *Service) pushRecord(ctx context.Context, sub *domain.TGSubscription, re
 	}
 
 	s.recordPushTime()
-	if err := s.subs.MarkPushed(ctx, sub.ID, time.Now(), rec.QualityScore); err != nil {
+	if err := s.subs.MarkPushed(ctx, sub.ID, time.Now(), rec.QualityScore, sub.UpgradeEnabled); err != nil {
 		s.log.Warn("tg subscribe mark pushed failed", "sub", sub.ID, "err", err)
 	}
 	s.notifyPushed(ctx, sub, rec)
@@ -221,6 +222,27 @@ func (s *Service) pushRecord(ctx context.Context, sub *domain.TGSubscription, re
 		s.reconcilePackEpisodes(ctx, sub, rec, accountID, "", result.DeliveredFolderID)
 	}
 	return nil
+}
+
+// isUpgradePush 判断这次成功推送该不该记成「洗版升级」。
+//
+// ⚠️ 判据必须与 isUpgradeCandidate 的洗版分支**同源**（基线 > 0 且本条确实超过
+// 基线一个阈值），并且必须看开关。
+//
+// 过去这里只判 `sub.BestQualityScore > 0` —— 完全不读 UpgradeEnabled。于是只要
+// 历史上推过任意一条，之后**每次**成功推送都被标成 upgraded：推新的一集（画质分
+// 可能比基线低得多）也标，通知里还会写「洗版升级：画质分 50 超过此前最好版本 78.3」
+// 这种与事实相反的话。实测 26 条 upgraded 记录里 23 条属于**关着洗版**的订阅。
+//
+// 关着洗版时走得到这里只可能是因为它补了新集（isUpgradeCandidate 放行的两条路
+// 之一），那不是洗版。
+func isUpgradePush(sub *domain.TGSubscription, rec *domain.TGMatchRecord) bool {
+	if sub == nil || rec == nil {
+		return false
+	}
+	return sub.UpgradeEnabled &&
+		sub.BestQualityScore > 0 &&
+		rec.QualityScore > sub.BestQualityScore+upgradeThreshold
 }
 
 // describeUpgrade 解释这次为什么算洗版。

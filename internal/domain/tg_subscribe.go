@@ -138,10 +138,16 @@ type TGSubscription struct {
 	LastMatchAt       time.Time
 	LastPushAt        time.Time
 	MatchedCount      int64
-	PushedCount       int64
-	LastError         string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// PushedCount 是**推送动作数**，不是入库集数。
+	//
+	// 每次 pushRecord 成功 +1，所以一次整季包（推 40 集）只算 1、同一集重复手推会
+	// 重复计数。剧集侧的进度**别拿它当依据** —— 那里用的是 tg_subscription_episodes
+	// 的行数（missingEpisodes / maybeComplete 都走那张表）。它现在的两个消费者都在
+	// 电影那条路上：maybeComplete 判「推过就算入库」、subscriptionNeedsResources 同理。
+	PushedCount int64
+	LastError   string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // TGSubscriptionEpisode 是一条已收集的剧集（电影固定 season/episode 为 0）。
@@ -255,7 +261,15 @@ type TGSubscriptionRepository interface {
 	TouchPending(ctx context.Context, id int64, deadline time.Time) error
 	ClearPending(ctx context.Context, id int64) error
 	MarkMatched(ctx context.Context, id int64, at time.Time) error
-	MarkPushed(ctx context.Context, id int64, at time.Time, qualityScore float64) error
+	// MarkPushed 记一次成功推送：pushed_count +1，并按 upgradeEnabled 决定要不要更新
+	// 洗版基线 best_quality_score。
+	//
+	// ⚠️ **只在订阅开着洗版时才抬基线**。基线的唯一用途是给洗版当门槛，关着洗版时
+	// 它不拦任何东西，却会在用户日后打开洗版时**立刻生效** —— 那正是「关掉洗版、
+	// 基线却还在涨」的另一半成因（真机：43 条订阅里 22 条关着洗版，其中 21 条带着
+	// 非零基线，最高 78.3）。关着时传 false，这条 UPDATE 对基线零影响
+	// （MAX(best, 0) 是恒等），语义上等于「这个订阅没有基线」。
+	MarkPushed(ctx context.Context, id int64, at time.Time, qualityScore float64, upgradeEnabled bool) error
 	// UnmarkPushed 回退一次 MarkPushed：推送计数减一（不为负）。
 	//
 	// 用在「记录说推送成功、离线任务其实失败了」的对账上。不回退的话

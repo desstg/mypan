@@ -299,6 +299,11 @@ type RankedRecord struct {
 	Rank   int
 }
 
+// BatchRedundancy 是整季包/区间包的**重复率**：覆盖的集里已在库占的比例（0~1）。
+// 由调用方（dispatcher 的 dropFullyCovered）算好传进来 —— 它手上已经有
+// inspectCandidate 的结论，不必在这里再查一次库。
+type BatchRedundancy map[int64]float64
+
 // RankCandidates 对同一订阅在聚合窗口内的候选排序，最优的在最前。
 //
 // 排序键（降序）：有效画质分 → 匹配分 → 体积 → ID。
@@ -306,7 +311,11 @@ type RankedRecord struct {
 // 整季包惩罚是刻意的：用户多数时候只想要新出的那一集，整季包动辄几十 GB，
 // 不该因为画质分高就压过单集。只有当这个订阅还没有任何一集时，整季包才是
 // 最划算的选择 —— hasAnyEpisode 由调用方传入。
-func RankCandidates(records []*domain.TGMatchRecord, hasAnyEpisode bool) []RankedRecord {
+//
+// ⚠️ **惩罚是排序用的，不是拦截**。真正拦住「一集新集都带不来的包」的是
+// handler 的集级去重与 dispatcher 的 dropFullyCovered。别以为扣分就挡住了 ——
+// 窗口里只剩一条包时它照样会被推出去。
+func RankCandidates(records []*domain.TGMatchRecord, hasAnyEpisode bool, redundancy BatchRedundancy) []RankedRecord {
 	items := make([]RankedRecord, 0, len(records))
 	for _, rec := range records {
 		if rec == nil {
@@ -317,8 +326,8 @@ func RankCandidates(records []*domain.TGMatchRecord, hasAnyEpisode bool) []Ranke
 
 	sort.SliceStable(items, func(i, j int) bool {
 		a, b := items[i].Record, items[j].Record
-		aQuality := effectiveQuality(a, hasAnyEpisode)
-		bQuality := effectiveQuality(b, hasAnyEpisode)
+		aQuality := effectiveQuality(a, hasAnyEpisode, redundancy[a.ID])
+		bQuality := effectiveQuality(b, hasAnyEpisode, redundancy[b.ID])
 		if aQuality != bQuality {
 			return aQuality > bQuality
 		}
@@ -336,11 +345,19 @@ func RankCandidates(records []*domain.TGMatchRecord, hasAnyEpisode bool) []Ranke
 	return items
 }
 
-// effectiveQuality 是排序实际用的画质分：整季包在订阅已有集数时扣分。
-func effectiveQuality(rec *domain.TGMatchRecord, hasAnyEpisode bool) float64 {
+// effectiveQuality 是排序实际用的画质分：整季包在订阅已有集数时扣分，
+// 并**按重复率追加**扣分。
+//
+// ⚠️ 为什么要按重复率：固定 -30 拦不住「2160p 整季包赢过 1080p 单集」
+// （100-30=70 > 55），而那正是用户报的现象 —— 缺一集，却整包重下几十 GB。
+// 加上重复率后，已收 11/12 集的整季包罚 30+30×(11/12)≈57.5，2160p 落到 42.5，
+// 输给 1080p 单集的 55。而一集都没有时（hasAnyEpisode=false）**完全不罚** ——
+// 「一集没有时整季包最划算」是有意为之的口子，别堵。
+func effectiveQuality(rec *domain.TGMatchRecord, hasAnyEpisode bool, redundancy float64) float64 {
 	score := rec.QualityScore
 	if rec.IsBatch && hasAnyEpisode {
 		score -= batchPenalty
+		score -= batchPenalty * clampRedundancy(redundancy)
 	}
 	if score < 0 {
 		return 0
@@ -348,7 +365,20 @@ func effectiveQuality(rec *domain.TGMatchRecord, hasAnyEpisode bool) float64 {
 	return score
 }
 
-// batchPenalty 只在订阅已有集数时才惩罚整季包。
+// clampRedundancy 把重复率夹到 [0,1]：越界值（理论上不该有）按边界处理，
+// 免得一条脏数据把分数拉到负数或放大惩罚。
+func clampRedundancy(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// batchPenalty 是整季包在订阅已有集数时的**基础**惩罚；重复率再追加同样量级的惩罚。
+// 只在订阅已有集数时才生效 —— 一集都没有时整季包是最划算的选择。
 const batchPenalty = 30.0
 
 // DescribeSupersede 生成「被哪条取代」的说明，写进 superseded 记录的 reason。

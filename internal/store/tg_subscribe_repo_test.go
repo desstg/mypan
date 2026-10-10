@@ -196,10 +196,10 @@ func TestTGSubscriptionPendingWindow(t *testing.T) {
 	}
 
 	// best_quality_score 只升不降（洗版基线）。
-	if err := s.TGSubscriptions.MarkPushed(ctx, id, now, 80); err != nil {
+	if err := s.TGSubscriptions.MarkPushed(ctx, id, now, 80, true); err != nil {
 		t.Fatalf("mark pushed: %v", err)
 	}
-	if err := s.TGSubscriptions.MarkPushed(ctx, id, now, 60); err != nil {
+	if err := s.TGSubscriptions.MarkPushed(ctx, id, now, 60, true); err != nil {
 		t.Fatalf("mark pushed 2: %v", err)
 	}
 	got, _ = s.TGSubscriptions.Get(ctx, id)

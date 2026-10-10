@@ -309,36 +309,44 @@ func TestResourceFromShareFallsBackToText(t *testing.T) {
 //
 // ⚠️ 这些用例走的是**电影**形态（record 上不带集号）—— 一部电影只有一个正片，
 // 整部片一个基线是对的。剧集的按集语义另见 TestUpgradeCandidatePerEpisode。
+//
+// 电影的 facts 恒为「算不出覆盖范围」（inspectCandidate 对非 TV 直接返回
+// CoverageKnown=false），所以这里传零值即可。
 func TestUpgradeCandidateRules(t *testing.T) {
 	movie := &domain.TGMatchRecord{Season: -1, Episode: -1}
+	unknown := candidateFacts{}
 
 	fresh := &domain.TGSubscription{UpgradeEnabled: true, BestQualityScore: 0}
-	if !newServiceForTest().isUpgradeCandidate(fresh, movie, false, 10) {
+	if !newServiceForTest().isUpgradeCandidate(fresh, movie, unknown, 10) {
 		t.Fatal("没推过时任何画质都该是候选")
 	}
 
 	// 画质分小幅波动不该触发重复推送。
 	settled := &domain.TGSubscription{UpgradeEnabled: true, BestQualityScore: 80}
-	if newServiceForTest().isUpgradeCandidate(settled, movie, false, 85) {
+	if newServiceForTest().isUpgradeCandidate(settled, movie, unknown, 85) {
 		t.Fatal("提升不足阈值时不该再推")
 	}
-	if !newServiceForTest().isUpgradeCandidate(settled, movie, false, 95) {
+	if !newServiceForTest().isUpgradeCandidate(settled, movie, unknown, 95) {
 		t.Fatal("提升超过阈值时应当再推（洗版）")
 	}
 
 	// 关掉洗版后，推过就不再推。
 	off := &domain.TGSubscription{UpgradeEnabled: false, BestQualityScore: 80}
-	if newServiceForTest().isUpgradeCandidate(off, movie, false, 100) {
+	if newServiceForTest().isUpgradeCandidate(off, movie, unknown, 100) {
 		t.Fatal("未开启洗版时不该再推")
 	}
 }
 
-// 剧集的基线必须**按集**生效：这一集还没收到时，订阅级基线不适用。
+// 剧集的基线必须**按覆盖范围**生效：还有集缺着时，订阅级基线不适用。
 //
 // 这是实测踩出来的 bug：BestQualityScore 是订阅级的，过去被无差别地跟每一条候选比，
 // 于是只要这部剧推成功过任意一集，洗版一关，之后所有新集全部被拒 ——
 // 侠女内莉一集都没收到（基线是当初推的整季包留下的 78.3），从此什么都推不进去；
 // 绿灯军团只收到 E6，E5/E7 的 2160p（78.3，比基线 65 高）连同 E1/E8 一起被拒。
+//
+// ⚠️ 2026-10-10 又修了一次「放行写得太宽」：过去判的是 `!hasEpisode`，而 hasEpisode
+// 只在带明确集号时才去查，于是整季包与「这一集还没收到」共用同一个 return true ——
+// 一部 8 集全收齐的剧，再来一个整季包照样推。见 TestUpgradeCandidateFullyCoveredBatch。
 func TestUpgradeCandidatePerEpisode(t *testing.T) {
 	sub := &domain.TGSubscription{
 		UpgradeEnabled: false, BestQualityScore: 65,
@@ -346,28 +354,66 @@ func TestUpgradeCandidatePerEpisode(t *testing.T) {
 	}
 	svc := newServiceForTest()
 
+	// 这一集还没收到（NewEpisodes > 0）→ 放行。
 	missing := &domain.TGMatchRecord{Season: 1, Episode: 5}
-	if !svc.isUpgradeCandidate(sub, missing, false, 30) {
+	if !svc.isUpgradeCandidate(sub, missing, candidateFacts{NewEpisodes: 1, CoverageKnown: true}, 30) {
 		t.Fatal("这一集还没收到，基线不该拦它（哪怕洗版关着、画质分很低）")
 	}
 
-	// 这一集已经在库里了 —— 这才轮到基线说话。
+	// 覆盖的集全在库（NewEpisodes == 0）—— 这才轮到基线说话。
 	owned := &domain.TGMatchRecord{Season: 1, Episode: 6}
-	if svc.isUpgradeCandidate(sub, owned, true, 78) {
+	ownedFacts := candidateFacts{NewEpisodes: 0, CoverageKnown: true}
+	if svc.isUpgradeCandidate(sub, owned, ownedFacts, 78) {
 		t.Fatal("该集已有版本且洗版关着时不该再推")
 	}
 	sub.UpgradeEnabled = true
-	if !svc.isUpgradeCandidate(sub, owned, true, 78) {
+	if !svc.isUpgradeCandidate(sub, owned, ownedFacts, 78) {
 		t.Fatal("开了洗版、提升超过阈值时应当再推")
 	}
-	if svc.isUpgradeCandidate(sub, owned, true, 70) {
+	if svc.isUpgradeCandidate(sub, owned, ownedFacts, 70) {
 		t.Fatal("开了洗版但提升不足阈值时不该再推")
 	}
 
-	// 整季包（解析不出集号）按「还没收到」放行，交给窗口选优。
+	// 整季包、季号也解析不出 → 算不出覆盖范围 → 保守放行，交给窗口选优。
 	batch := &domain.TGMatchRecord{Season: -1, Episode: -1}
-	if !svc.isUpgradeCandidate(sub, batch, false, 10) {
-		t.Fatal("整季包没有集号，不该被订阅基线拦下")
+	if !svc.isUpgradeCandidate(sub, batch, candidateFacts{CoverageKnown: false}, 10) {
+		t.Fatal("算不出覆盖范围时不该被订阅基线拦下")
+	}
+}
+
+// 覆盖的集**全在库**的整季包必须走开关 + 基线，不能无条件放行。
+//
+// 这是 2026-10-10 用户报的现象：一部 8 集全收齐的剧，又来一个整季包照样整包重下，
+// 还被标成「洗版升级」。根因是 isUpgradeCandidate 过去判 `!hasEpisode`，而整季包
+// 不带集号 → hasEpisode 恒为 false → 命中那条放行分支。
+func TestUpgradeCandidateFullyCoveredBatch(t *testing.T) {
+	sub := &domain.TGSubscription{
+		UpgradeEnabled: false, BestQualityScore: 65,
+		MediaType: domain.TGMediaTypeTV,
+	}
+	svc := newServiceForTest()
+	// 整季包 S01，覆盖的集全在库。
+	pack := &domain.TGMatchRecord{Season: 1, Episode: -1, IsBatch: true}
+	covered := candidateFacts{NewEpisodes: 0, CoverageKnown: true}
+
+	if svc.isUpgradeCandidate(sub, pack, covered, 90) {
+		t.Fatal("整季包覆盖的集全在库、且洗版关着时，不该再推")
+	}
+
+	// 打开洗版、画质确实更好 → 这时才该推。
+	sub.UpgradeEnabled = true
+	if !svc.isUpgradeCandidate(sub, pack, covered, 90) {
+		t.Fatal("开了洗版、提升超过阈值时，整季包应当作为洗版候选")
+	}
+	if svc.isUpgradeCandidate(sub, pack, covered, 70) {
+		t.Fatal("开了洗版但提升不足阈值时不该再推")
+	}
+
+	// 这一季还缺集 → 照旧放行（22476f8 的本意）。
+	gapped := candidateFacts{NewEpisodes: 3, CoverageKnown: true}
+	sub.UpgradeEnabled = false
+	if !svc.isUpgradeCandidate(sub, pack, gapped, 10) {
+		t.Fatal("整季包能补到新集时不该被基线拦下")
 	}
 }
 

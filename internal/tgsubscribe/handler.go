@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -140,22 +141,33 @@ func (s *Service) applyQualityAndDedupe(
 	sub := decision.Best.Subscription
 	record.Reason = decision.Reason
 
-	// 内容级去重：该订阅的这一集已经入库了。
+	// 内容级去重：候选覆盖的集**全都已在库**才算重复。
 	//
-	// ⚠️ 这个 hasEpisode 还要往下传给洗版判定 —— 它决定了「该不该拿订阅基线来比」。
+	// ⚠️ 判据必须按**覆盖范围**算，不能只看 `Episode`。区间包
+	// （`S01E01-E12` → Episode=1 / EpisodeEnd=12 / IsBatch=true）与整季包
+	// （Episode=-1）都过不了「只看 Episode」这一关：
+	//   - 区间包：拿 E1 去查，只要 E1 已在库就把整个 E02–E12 的包判成重复丢掉；
+	//   - 整季包：Episode=-1，过去整条跳过这道门。
+	// 两种情况都是**无声地丢集**（EpisodeEnd 此前在非业务代码里没有任何消费者）。
+	//
+	// ⚠️ 覆盖范围算不出来时（没有 TMDB 季快照、解析不出季号）**不拦** ——
+	// 宁可多推一条，也不要把一整季挡在门外。
+	//
+	// ⚠️ 这份 facts 还要往下传给洗版判定 —— 它决定了「该不该拿订阅基线来比」。
 	// 别在这里 return 之后就不管了，那是两条判据共用的同一个事实。
-	hasEpisode := false
-	if sub.MediaType == domain.TGMediaTypeTV && record.Season >= 0 && record.Episode >= 0 {
-		has, err := s.episodes.Has(ctx, sub.ID, record.Season, record.Episode)
-		if err != nil {
-			s.log.Warn("tg subscribe check episode failed", "err", err)
-		}
-		if has {
-			record.Status = domain.TGRecordDuplicate
+	facts := s.inspectCandidate(ctx, sub, record)
+	if sub.MediaType == domain.TGMediaTypeTV && facts.CoverageKnown && facts.NewEpisodes == 0 {
+		record.Status = domain.TGRecordDuplicate
+		switch {
+		case record.EpisodeEnd > record.Episode:
+			record.Reason = fmt.Sprintf("S%02dE%02d-E%02d 覆盖的集都已入库，跳过",
+				record.Season, record.Episode, record.EpisodeEnd)
+		case record.Episode >= 0:
 			record.Reason = "该集已入库，跳过"
-			return
+		default:
+			record.Reason = "整季包覆盖的集都已入库，跳过"
 		}
-		hasEpisode = has
+		return
 	}
 
 	cfg, profileID := s.qualityConfigFor(ctx, sub)
@@ -170,9 +182,9 @@ func (s *Service) applyQualityAndDedupe(
 
 	// 洗版基线：已经推过更高的画质时，这一条只能作为升级候选，
 	// 低于基线直接跳过（省掉一轮无意义的窗口等待）。
-	if !s.isUpgradeCandidate(sub, record, hasEpisode, verdict.Score) {
+	if !s.isUpgradeCandidate(sub, record, facts, verdict.Score) {
 		record.Status = domain.TGRecordDuplicate
-		record.Reason = describeBelowBaseline(sub, record, hasEpisode, verdict.Score)
+		record.Reason = describeBelowBaseline(sub, record, facts, verdict.Score)
 		return
 	}
 
@@ -225,7 +237,7 @@ func decodeQualityConfig(raw json.RawMessage) (domain.TGQualityConfig, bool) {
 
 // isUpgradeCandidate 判断一条候选值不值得推。
 //
-// ⚠️ **剧集的基线只对「这一集已经收到过」的情况生效**，这是这个函数最重要的规则。
+// ⚠️ **剧集的基线只对「覆盖的集已经在库里」的情况生效**，这是这个函数最重要的规则。
 //
 // BestQualityScore 是**订阅级**的 —— 「这部片推出去过的最好版本」。过去它被无差别地
 // 拿来跟每一条候选比，于是只要这部剧推成功过任意一集，基线就立起来了；洗版一关，
@@ -237,23 +249,38 @@ func decodeQualityConfig(raw json.RawMessage) (domain.TGQualityConfig, bool) {
 //   - 绿灯军团：只收到 E6，基线 65，E5/E7 的 2160p（画质分 78.3，明显更好）
 //     连同 E1/E8 一起被拒，共 31 条堆在 duplicate 里。
 //
-// 正确语义是**按集**算：洗版的意思是「同一集有更好的版本」，而「这一集还缺着」
-// 根本不该被另一集的画质挡住。所以剧集只有 hasEpisode 为真时才拿基线去比；
-// 整季包、解析不出集号的发布名一律放行，交给窗口去选优（那里有 batchPenalty 压制）。
+// 正确语义是**按覆盖范围**算：洗版的意思是「这些集有更好的版本」，而「还有集缺着」
+// 根本不该被另一集的画质挡住。所以只有 `facts.NewEpisodes == 0`（覆盖的集全在库）
+// 时才轮到开关与基线说话。
+//
+// ⚠️ 2026-10-10 修的是**放行条件写得太宽**：过去这里判的是 `!hasEpisode`，而
+// hasEpisode 只在带明确集号时才去查，于是「整季包 / 解析不出集号」与「这一集还没
+// 收到」共用同一个 `return true`，把整季包也一起放了 —— 一部 8 集全收齐的剧，
+// 再来一个整季包照样推，而且还被标成「洗版升级」。现在改成按 facts 判：
+//   - 能补到新集 → 放行（22476f8 的本意，逐字保留）；
+//   - 算不出覆盖范围 → 保守放行（宁可多推一条，也别把一整季挡在门外）；
+//   - 覆盖的集全在库 → 与「这一集已收到」同等对待，走开关 + 基线。
 //
 // 电影没有「集」这个概念，整部片一个基线是对的 —— 沿用原规则。
 func (s *Service) isUpgradeCandidate(
 	sub *domain.TGSubscription,
 	record *domain.TGMatchRecord,
-	hasEpisode bool,
+	facts candidateFacts,
 	qualityScore float64,
 ) bool {
 	if sub.BestQualityScore <= 0 {
 		return true
 	}
-	if sub.MediaType == domain.TGMediaTypeTV && !hasEpisode {
-		// 这一集还没收到（或这条根本不是单集发布）→ 订阅级基线不适用。
-		return true
+	if sub.MediaType == domain.TGMediaTypeTV {
+		if facts.CoverageKnown && facts.NewEpisodes > 0 {
+			// 还有集缺着 → 订阅级基线不适用。
+			return true
+		}
+		if !facts.CoverageKnown {
+			// 覆盖范围算不出来（没有季快照、解析不出季号）→ 保守放行，
+			// 交给窗口用重复率惩罚压制。
+			return true
+		}
 	}
 	if !sub.UpgradeEnabled {
 		return false
@@ -268,19 +295,25 @@ const upgradeThreshold = 10.0
 func describeBelowBaseline(
 	sub *domain.TGSubscription,
 	record *domain.TGMatchRecord,
-	hasEpisode bool,
+	facts candidateFacts,
 	score float64,
 ) string {
 	if !sub.UpgradeEnabled {
 		return "已推送过更优版本，且该订阅未开启洗版"
 	}
-	// 剧集要说清是**哪一集**的基线，否则用户看到「画质分未超过基线」会以为
-	// 是这部片的整体基线，而实际上它比的是这一集已经推出去的那个版本。
-	if sub.MediaType == domain.TGMediaTypeTV && hasEpisode && record != nil {
-		return "这一集已有更优版本（S" + strconv.Itoa(record.Season) +
-			"E" + strconv.Itoa(record.Episode) +
-			"，基线 " + formatScore(sub.BestQualityScore) +
-			"，本条 " + formatScore(score) + "）"
+	if sub.MediaType == domain.TGMediaTypeTV && facts.CoverageKnown && facts.NewEpisodes == 0 && record != nil {
+		switch {
+		case record.EpisodeEnd > record.Episode:
+			return fmt.Sprintf("S%02dE%02d-E%02d 已有更优版本（基线 %s，本条 %s）",
+				record.Season, record.Episode, record.EpisodeEnd,
+				formatScore(sub.BestQualityScore), formatScore(score))
+		case record.Episode >= 0:
+			// 逐字保留既有文案：单集那条路的 reason 已经被用户和测试认熟了。
+			return "这一集已有更优版本（S" + strconv.Itoa(record.Season) +
+				"E" + strconv.Itoa(record.Episode) +
+				"，基线 " + formatScore(sub.BestQualityScore) +
+				"，本条 " + formatScore(score) + "）"
+		}
 	}
 	return "画质分未超过已推送版本（基线 " +
 		formatScore(sub.BestQualityScore) + "，本条 " + formatScore(score) + "）"

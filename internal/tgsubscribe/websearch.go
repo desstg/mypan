@@ -246,7 +246,8 @@ func (s *Service) searchWebOnce(
 	}
 
 	// 关键词复用频道搜索那一套：主标题 → 原名 → 别名，上限 3。
-	keywords := searchKeywords(sub)
+	// 剧集缺集时这里会多一条「原名 + SxxExx」，见 searchKeywordsFor 的说明。
+	keywords := s.searchKeywordsFor(ctx, sub)
 	if len(keywords) == 0 {
 		return nil, domain.Errorf(domain.CodeValidation, "这条订阅没有可用于搜索的片名")
 	}
@@ -311,6 +312,7 @@ type webRecordCandidate struct {
 //
 // 返回 ok=false 表示这条命中不该落库（不是影视资源 / 没匹配上这条订阅 / 分数太低）。
 func (s *Service) prepareWebRecord(
+	ctx context.Context,
 	hit webHit,
 	subs []*domain.TGSubscription,
 	subID int64,
@@ -372,6 +374,23 @@ func (s *Service) prepareWebRecord(
 	rec.SubscriptionID = subID
 	rec.MatchScore = decision.Best.Score
 
+	// 整季包 / 区间包：覆盖的集**全在库**时直接丢掉，不进匹配历史也不进窗口。
+	//
+	// 这是用户报的那个现象的另一半：搜「缺的那一集」时，结果里必然混着整季包，
+	// 而整季包不带集号（或只带区间起点），过去在 applyQualityAndDedupe 里被判成
+	// 「还没收到」一路放行 —— 一次推几十集、几十 GB，用户缺的只是其中一集。
+	//
+	// 用与 handler 完全相同的判据（inspectCandidate），**不是第二份实现**。
+	// 覆盖范围算不出来时不拦（宁可多推一条，也别把一整季挡在门外）；
+	// 一集都没有时整季包覆盖的集全是新的，自然也不会在这里被拦
+	// （保留「一集没有时整季包最划算」那个有意为之的口子）。
+	if parsed.IsBatch || rec.EpisodeEnd > rec.Episode {
+		facts := s.inspectCandidate(ctx, decision.Best.Subscription, rec)
+		if facts.CoverageKnown && facts.NewEpisodes == 0 {
+			return webRecordCandidate{}, false
+		}
+	}
+
 	// 同一份解析再补上体积与名字来源，交给画质判定 —— buildHistoryRecord 内部也
 	// 是这么补的，只是它不把 rel 返回来。体积参与画质规则的下限判断，不能省。
 	parsed.SizeBytes = res.SizeBytes
@@ -410,7 +429,7 @@ func (s *Service) ingestWebHit(
 	subs []*domain.TGSubscription,
 	subID int64,
 ) bool {
-	cand, ok := s.prepareWebRecord(hit, subs, subID)
+	cand, ok := s.prepareWebRecord(ctx, hit, subs, subID)
 	if !ok {
 		return false
 	}
@@ -437,7 +456,7 @@ func (s *Service) ingestWebHitAuto(
 	subs []*domain.TGSubscription,
 	subID int64,
 ) bool {
-	cand, ok := s.prepareWebRecord(hit, subs, subID)
+	cand, ok := s.prepareWebRecord(ctx, hit, subs, subID)
 	if !ok {
 		return false
 	}

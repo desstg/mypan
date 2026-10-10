@@ -154,7 +154,7 @@ func TestRankCandidatesPrefersQualityThenMatch(t *testing.T) {
 		{ID: 2, QualityScore: 100, MatchScore: 75, Resolution: "2160p", SourceTag: "Remux"},
 		{ID: 3, QualityScore: 100, MatchScore: 95, Resolution: "2160p", SourceTag: "Remux"},
 	}
-	ranked := RankCandidates(recs, true)
+	ranked := RankCandidates(recs, true, nil)
 	if ranked[0].Record.ID != 3 {
 		t.Fatalf("画质相同应比匹配分，第一名应为 3，实际 %d", ranked[0].Record.ID)
 	}
@@ -174,12 +174,12 @@ func TestRankCandidatesPenalizesBatchOnlyWhenEpisodesExist(t *testing.T) {
 	batch := &domain.TGMatchRecord{ID: 1, QualityScore: 100, MatchScore: 90, IsBatch: true, SizeBytes: 60 << 30}
 	single := &domain.TGMatchRecord{ID: 2, QualityScore: 95, MatchScore: 90, SizeBytes: 4 << 30}
 
-	withEpisodes := RankCandidates([]*domain.TGMatchRecord{batch, single}, true)
+	withEpisodes := RankCandidates([]*domain.TGMatchRecord{batch, single}, true, nil)
 	if withEpisodes[0].Record.ID != single.ID {
 		t.Fatal("已有集数时单集应胜出")
 	}
 
-	empty := RankCandidates([]*domain.TGMatchRecord{batch, single}, false)
+	empty := RankCandidates([]*domain.TGMatchRecord{batch, single}, false, nil)
 	if empty[0].Record.ID != batch.ID {
 		t.Fatal("一集都没有时整季包应胜出")
 	}
@@ -188,7 +188,7 @@ func TestRankCandidatesPenalizesBatchOnlyWhenEpisodesExist(t *testing.T) {
 func TestRankCandidatesTieBreaksBySizeThenID(t *testing.T) {
 	small := &domain.TGMatchRecord{ID: 1, QualityScore: 90, MatchScore: 90, SizeBytes: 3 << 30}
 	big := &domain.TGMatchRecord{ID: 2, QualityScore: 90, MatchScore: 90, SizeBytes: 8 << 30}
-	ranked := RankCandidates([]*domain.TGMatchRecord{small, big}, true)
+	ranked := RankCandidates([]*domain.TGMatchRecord{small, big}, true, nil)
 	if ranked[0].Record.ID != big.ID {
 		t.Fatal("同分应取体积更大的")
 	}
@@ -196,7 +196,7 @@ func TestRankCandidatesTieBreaksBySizeThenID(t *testing.T) {
 	// 完全同分时按 ID 升序，保证结果稳定可复现。
 	a := &domain.TGMatchRecord{ID: 5, QualityScore: 90, MatchScore: 90}
 	b := &domain.TGMatchRecord{ID: 3, QualityScore: 90, MatchScore: 90}
-	ranked = RankCandidates([]*domain.TGMatchRecord{a, b}, true)
+	ranked = RankCandidates([]*domain.TGMatchRecord{a, b}, true, nil)
 	if ranked[0].Record.ID != 3 {
 		t.Fatal("完全同分应按 ID 稳定排序")
 	}

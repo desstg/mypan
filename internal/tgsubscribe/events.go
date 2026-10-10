@@ -120,8 +120,14 @@ func (s *Service) reconcilePackEpisodes(
 	if s == nil || sub == nil || rec == nil || s.episodes == nil {
 		return
 	}
-	// 单集记录已经有精确的集号了，不需要这条。
-	if rec.Episode >= 0 {
+	// 真正的单集（带精确集号、且没有区间上界）不需要这条 —— applyDeliveryProgress
+	// 已经精确记过那一集了。
+	//
+	// ⚠️ **区间包要放进来**：`S01E01-E12` 落库是 Episode=1 / EpisodeEnd=12，过去
+	// 这一句只判 `rec.Episode >= 0` 就把它当单集跳过了，于是 E02–E12 从来没被补记过
+	// （盘上明明有、进度里只有 E1）。判据改成「单集」的准确形态：有集号**且**没有
+	// 区间上界。
+	if rec.Episode >= 0 && rec.EpisodeEnd <= rec.Episode {
 		return
 	}
 	if sub.MediaType != domain.TGMediaTypeTV {

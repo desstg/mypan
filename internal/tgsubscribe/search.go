@@ -2,6 +2,7 @@ package tgsubscribe
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -35,7 +36,11 @@ import (
 //
 // 每个关键词在每个频道上都是一次真实请求，所以要封顶：多语言片名 + 别名可能有十几个，
 // 全打出去就是几十次请求。按顺序取前几个（主标题优先，它命中最准）。
-const maxSearchKeywords = 3
+//
+// 2026-10-10 从 3 提到 4：追更时要额外插一条「原名 + 缺的那一集」（见
+// episodeKeyword），而原来的三个槽位会被 20~30 条别名占满，插不进去。
+// 只多一个请求，换来的是「缺的那一集」能被精确搜到。
+const maxSearchKeywords = 4
 
 // SearchHistory 手动搜索一条订阅的历史帖。
 //
@@ -71,7 +76,7 @@ func (s *Service) SearchHistory(ctx context.Context, subscriptionID int64) (*His
 		return nil, domain.Errorf(domain.CodeValidation, "还没有启用的频道，先添加频道再来搜历史")
 	}
 
-	keywords := searchKeywords(sub)
+	keywords := s.searchKeywordsFor(ctx, sub)
 	if len(keywords) == 0 {
 		return nil, domain.Errorf(domain.CodeValidation, "这条订阅没有可用于搜索的片名")
 	}
@@ -265,6 +270,120 @@ func searchKeywords(sub *domain.TGSubscription) []string {
 		out = out[:maxSearchKeywords]
 	}
 	return out
+}
+
+// searchKeywordsFor 给一条订阅拼搜索词，**剧集缺集时额外插一条带集号的**。
+//
+// # 为什么要带集号（2026-10-10 真机实测）
+//
+// 剧集订阅的自动搜索过去只按片名搜，而频道/盘搜站上整季包与单集是混发的 ——
+// 搜「Lanterns」回来 14 条里既有单集也有整季包，程序分不出哪个是缺的那一集。
+// 于是「缺一集 → 整轮按片名搜 → 结果里必然有整季包 → 整包重下几十 GB」。
+//
+// 实测「片名 + 集号」能精确命中（同一台盘搜站）：
+//
+//	Lanterns           → 14 条（8 条带集号）
+//	Lanterns S01E08    → 11 条，**全部**带集号
+//	Neagley S01E05     →  6 条，全部带集号
+//	Against the Current S01E17 → 1 条，正是那一集
+//
+// 三条实测出来的硬约束，改这里之前先看：
+//
+//  1. **必须用原名**（英文/罗马字）。中文名在这类站点上搜不到东西：
+//     `绿灯军团 S01E08` → 0 条，`兰香如故 S01E09` → 0 条。
+//  2. **一次只能拼一集**。`Lanterns S01E08 S01E09` → 0 条（多词是 AND，
+//     而没有任何一条发布名同时含两个集号）。
+//  3. **原名里的标点要先洗掉**。`Pinocchio: Unstrung` → 0 条，
+//     去掉冒号变成 `Pinocchio Unstrung` → 12 条。这条顺带修了一个既有 bug ——
+//     带标点的原名本来就在搜空（`Coyote vs. Acme` 同样）。
+//
+// 片名那个槽位**永远保留**（哪怕加了集号之后搜得更严）：万一某个源只认中文名，
+// 那一槽是唯一的兜底。算不出缺口（没有季快照、一集都不缺、原名非 ASCII）时
+// 逐字回落到 searchKeywords。
+func (s *Service) searchKeywordsFor(ctx context.Context, sub *domain.TGSubscription) []string {
+	base := searchKeywords(sub)
+	if sub == nil || sub.MediaType != domain.TGMediaTypeTV {
+		return base
+	}
+	missing, ok := s.missingEpisodes(ctx, sub)
+	if !ok {
+		return base
+	}
+	season, episode, ok := firstMissingEpisode(missing)
+	if !ok {
+		return base
+	}
+	kw := episodeKeyword(sub, season, episode)
+	if kw == "" {
+		return base
+	}
+	for _, seen := range base {
+		if strings.EqualFold(seen, kw) {
+			return base
+		}
+	}
+	// 带集号的那条**插在第二位**，紧跟主标题。
+	//
+	// ⚠️ 不能只是 append 到末尾：base 是「主标题、原名、别名…」按序取前 N 个，
+	// 而真实订阅的别名有 20~30 条 —— 一截断，集号那条就被切掉了
+	// （实测 sub 45 拼出来的关键词是 `["乌鸦学园","Coven Academy","女巫团学院","آکادمی جادوگران"]`，
+	// 集号那条根本没进去，等于白改）。
+	//
+	// 插第二位而不是第一位：主标题是「万一某个源只认中文名」的兜底，留着；
+	// 而原名（也就是拼集号用的那个名字）在第 N 位之后就可能被截断，
+	// 由集号那条顶掉它反而更稳 —— 带集号的词本身就含原名。
+	out := make([]string, 0, len(base)+1)
+	if len(base) > 0 {
+		out = append(out, base[0])
+	}
+	out = append(out, kw)
+	out = append(out, base[1:]...)
+	if len(out) > maxSearchKeywords {
+		out = out[:maxSearchKeywords]
+	}
+	return out
+}
+
+// episodeKeyword 拼「原名 + SxxExx」。拼不出来（原名非 ASCII / 洗完全是空的）返回空串。
+func episodeKeyword(sub *domain.TGSubscription, season, episode int) string {
+	if sub == nil || season <= 0 || episode <= 0 {
+		return ""
+	}
+	name := sanitizeSearchName(sub.OriginalTitle)
+	if name == "" {
+		name = sanitizeSearchName(sub.Title)
+	}
+	if name == "" {
+		return ""
+	}
+	return name + " " + fmt.Sprintf("S%02dE%02d", season, episode)
+}
+
+// sanitizeSearchName 把片名洗成「能拿去搜」的形态。
+//
+// 只保留 ASCII 字母数字与空格：非 ASCII 的片名（韩文/泰文/中文）在这类站点上
+// 搜不到任何东西（实测 `군체` / `스캔들` / `兰香如故` 全是 0 条），与其白打一次
+// 请求不如直接放弃。标点换成空格再折叠 —— 这是 `Pinocchio: Unstrung` → 0 条、
+// `Pinocchio Unstrung` → 12 条那个差异的成因。
+func sanitizeSearchName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ' || r == '-' || r == '_' || r == '.' || r == ':' || r == ',' ||
+			r == '\'' || r == '"' || r == '!' || r == '?' || r == '&' || r == '/':
+			b.WriteByte(' ')
+		default:
+			// 非 ASCII（含中文/韩文/泰文）→ 整名放弃：拼出来也是 0 条。
+			return ""
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
 }
 
 // sleepRequestGap 在两次真实请求之间等待。

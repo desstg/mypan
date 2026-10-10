@@ -130,7 +130,23 @@ func (s *Service) flushWindow(ctx context.Context, sub *domain.TGSubscription) {
 	if accountID, _, _, err := s.resolveTarget(ctx, sub); err == nil {
 		s.enrichShareRecords(ctx, accountID, deliverable)
 	}
-	ranked := RankCandidates(deliverable, hasEpisodes)
+	// 选优**之前**再剔一次「覆盖的集全在库」的候选，并算出每条包的重复率。
+	//
+	// handler 那道门是在**入库时**判的，而窗口里的候选来自不同时刻：一条整季包在
+	// E1 还缺时入库（合格），随后 E1 被同窗口的另一条候选补上 —— 这条包就变成纯重复了。
+	// 必须在 RankCandidates 之前剔，否则下面标 superseded 的那个循环会把它写成
+	// 「被更优画质取代」，用户看不懂为什么整季包没了。
+	//
+	// 重复率顺手一起算：固定 -30 分的惩罚拦不住 2160p 整季包赢过 1080p 单集
+	// （100-30=70 > 55），而「缺一集却整包重下几十 GB」正是用户报的现象。
+	deliverable, redundancy := s.dropFullyCovered(ctx, sub, deliverable)
+	if len(deliverable) == 0 {
+		s.log.Info("tg subscribe all candidates fully covered",
+			"sub", sub.ID, "title", sub.Title, "count", len(pending))
+		_ = s.subs.ClearPending(ctx, sub.ID)
+		return
+	}
+	ranked := RankCandidates(deliverable, hasEpisodes, redundancy)
 	winner := ranked[0].Record
 
 	if !s.autoPush() {
@@ -364,6 +380,44 @@ func (s *Service) subscriptionHasEpisodes(ctx context.Context, subID int64) bool
 		return false
 	}
 	return len(rows) > 0
+}
+
+// dropFullyCovered 剔掉「覆盖的集全在库」的候选（整季包 / 区间包），
+// 并返回剩下每条候选的**重复率**（供排序追加惩罚）。
+//
+// 判据与 handler.applyQualityAndDedupe 那道门**同一个函数**（inspectCandidate），
+// 只是时机不同：那道门在入库时判，这里在选优前再判一次（见 flushWindow 里的说明）。
+// 算不出覆盖范围的一律保留 —— 宁可多推一条，也别把一整季挡在门外。
+func (s *Service) dropFullyCovered(
+	ctx context.Context,
+	sub *domain.TGSubscription,
+	records []*domain.TGMatchRecord,
+) ([]*domain.TGMatchRecord, BatchRedundancy) {
+	redundancy := BatchRedundancy{}
+	if s == nil || sub == nil || sub.MediaType != domain.TGMediaTypeTV {
+		return records, redundancy
+	}
+	out := make([]*domain.TGMatchRecord, 0, len(records))
+	for _, rec := range records {
+		if rec == nil {
+			continue
+		}
+		// 只对「可能覆盖多集」的候选做这道判断：单集在入库时已经判过了。
+		if rec.IsBatch || rec.EpisodeEnd > rec.Episode || rec.Episode < 0 {
+			facts := s.inspectCandidate(ctx, sub, rec)
+			if facts.CoverageKnown && facts.NewEpisodes == 0 {
+				rec.Status = domain.TGRecordDuplicate
+				rec.Reason = "覆盖的集都已入库，跳过"
+				_ = s.records.Update(ctx, rec)
+				continue
+			}
+			if r := facts.redundancy(); r > 0 {
+				redundancy[rec.ID] = r
+			}
+		}
+		out = append(out, rec)
+	}
+	return out, redundancy
 }
 
 // cleanupRecords 清理过期历史。
