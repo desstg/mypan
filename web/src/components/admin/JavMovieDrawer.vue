@@ -382,7 +382,8 @@ const magnetCount = computed(() => detail.value?.magnets.length ?? 0);
  */
 async function load(refresh = false, local = true) {
   if (!props.movieId) return;
-  const first = !detail.value || detail.value.id !== props.movieId;
+  const target = props.movieId;
+  const first = !detail.value || detail.value.id !== target;
   if (first) {
     closePlayer();
     tab.value = TAB_MAGNETS;
@@ -409,8 +410,33 @@ async function load(refresh = false, local = true) {
   }
   error.value = "";
   try {
-    detail.value = await fetchJavMovie(props.movieId, refresh, local);
+    const got = await fetchJavMovie(target, refresh, local);
+    // ⚠️ **用户可能已经翻到别的片了**。不设这道闸的话，慢的那次请求回来会把
+    // 界面写回上一部 —— 而「关联影片」点下去正好会连开两次加载（换 movieId 触发
+    // 的那次 + 轮询那次），两条响应谁先回来不定。
+    if (props.movieId !== target) return;
+    detail.value = got;
   } catch (err) {
+    if (props.movieId !== target) return;
+    // 换片时本地查不到（关联影片里 85% 的条目本地根本没有）→ 走**上游那条同步路**
+    // 现抓一次。实测一次 JAVDB 请求 30ms~5s，比让用户对着「文件不存在」点按钮强。
+    //
+    // 只对「换片那一次」重试（`first`），不碰轮询：轮询每 3 秒一跳，让它也走上游
+    // 会把上游打疼（而详情页打开的自动 refresh 本来就会把这部抓下来，下一跳就有了）。
+    if (first && local) {
+      try {
+        const got = await fetchJavMovie(target, false, false);
+        if (props.movieId !== target) return;
+        detail.value = got;
+        error.value = "";
+        // 抓回来了，后面的补缺轮询照常开。
+        pollMustTickOnce.value = true;
+        return;
+      } catch {
+        // 上游也没有 → 落到下面那条错误分支（用户会看到「重新获取」）。
+      }
+      if (props.movieId !== target) return;
+    }
     error.value = getApiErrorMessage(err, "影片详情加载失败");
     // 刷新失败**不清空已有内容**：显示旧数据远好过一个空白页 +
     // 「重新获取」按钮（那条错误提示走 error 那条分支，见模板）。
@@ -556,7 +582,12 @@ function syncDetailPoll(round = 0) {
       if (detail.value && detail.value.magnets.length === 0) {
         void loadMagnets();
       }
-      const next = await fetchJavMovie(props.movieId, false, true);
+      const target = props.movieId;
+      const next = await fetchJavMovie(target, false, true);
+      // ⚠️ **两个判据都要**：`movieId` 没变（用户没翻页）+ 回来的还是同一部。
+      // 少前一个的话，翻页后那条在途的响应仍会把 refreshPending 按它的结果改掉 ——
+      // 而「获取中…」是跨片共享的那一个标志。
+      if (props.movieId !== target) return;
       const wasPending = refreshPending.value;
       // 只在还是同一部时才写回（用户可能已经翻到别的片了）。
       if (next.id === detail.value?.id) detail.value = next;
