@@ -478,6 +478,13 @@ func (h *Handler) generateCurrentDirectoryStrm(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, Resp{Success: true, Data: out, Message: "当前目录 STRM 生成完成"})
 }
 
+// replaceStrmBaseURL 起一个后台任务把整棵 STRM 目录树里的基址换掉，立刻返回。
+//
+// ⚠️ **不能同步跑**：要 WalkDir 遍历整个 STRM 输出目录、逐个读写 `.strm`，
+// 大库几分钟起步，而前端那条请求的超时是**浏览器自己的 90 秒** —— 到点 abort，
+// 但**前面那些文件已经改完了**，于是表现是「报失败，但一半文件已经生效」。
+//
+// 进度从 `/strm/replace-base-url/progress` 读（`running` / `total` / `updated`）。
 func (h *Handler) replaceStrmBaseURL(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strm != nil) {
 		return
@@ -489,16 +496,19 @@ func (h *Handler) replaceStrmBaseURL(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	result, err := h.strm.ReplaceBaseURL(r.Context(), strings.TrimSpace(in.NewBaseURL))
+	result, err := h.strm.StartReplaceBaseURL(r.Context(), strings.TrimSpace(in.NewBaseURL))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeOK(w, map[string]any{
-		"total":    result.Total,
-		"updated":  result.Updated,
-		"base_url": strm.NormalizeBaseURL(in.NewBaseURL),
-	})
+	writeOK(w, result)
+}
+
+func (h *Handler) getStrmReplaceBaseURLProgress(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strm != nil) {
+		return
+	}
+	writeOK(w, h.strm.ReplaceBaseURLProgress())
 }
 
 func (h *Handler) precheckStrmAccountRepair(w http.ResponseWriter, r *http.Request) {

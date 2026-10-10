@@ -661,16 +661,8 @@ function stopLogPolling() {
 function startPlanProgressPolling(taskId: string) {
   stopPlanProgressPolling();
   planProgress.value = {};
-  const tick = async () => {
-    try {
-      const next = await fetchMediaOrganizeProgress(taskId);
-      planProgress.value = next;
-      if (next.stage === "ai_recognition") startAIWaitTimer();
-      else stopAIWaitTimer();
-    } catch {}
-  };
-  void tick();
-  planProgressTimer = window.setInterval(tick, 1200);
+  void pollPlanProgressOnce(taskId);
+  planProgressTimer = window.setInterval(() => void pollPlanProgressOnce(taskId), 1200);
 }
 
 function stopPlanProgressPolling() {
@@ -679,6 +671,25 @@ function stopPlanProgressPolling() {
     planProgressTimer = null;
   }
   stopAIWaitTimer();
+}
+
+/**
+ * 拉一次进度，顺手喂给界面上那几个计数与 AI 等待计时。
+ *
+ * 抽出来是因为**两个地方**都要它：常驻的轮询定时器（用户停在面板上时给个实时观感），
+ * 以及 `waitForPlanDone`（它自己那一轮循环要读 `running`/`error`）。
+ * 两处共用同一个解析口径，免得一处认 `running`、另一处忘了。
+ */
+async function pollPlanProgressOnce(taskId: string): Promise<MediaOrganizeProgress | null> {
+  try {
+    const next = await fetchMediaOrganizeProgress(taskId);
+    planProgress.value = next;
+    if (next.stage === "ai_recognition") startAIWaitTimer();
+    else stopAIWaitTimer();
+    return next;
+  } catch {
+    return null;
+  }
 }
 
 function startAIWaitTimer() {
@@ -716,29 +727,78 @@ async function previewPlan(task: MediaOrganizeTask) {
       preview.loadPlan(existing);
       return;
     }
-    startPlanProgressPolling(task.id);
-    const result = await planMediaOrganizeTask(task.id);
-    preview.loadPlan(result.plan);
-  } catch (e) {
-    toast.error(getApiErrorMessage(e, "计划生成失败"));
+    await generatePlan(task.id);
   } finally {
-    stopPlanProgressPolling();
     planLoading.value = false;
   }
+}
+
+/**
+ * 生成计划：起后台任务 → 轮询到 `running=false` → 自己 `GET /plan` 拿结果。
+ *
+ * # 为什么不能 `await` 那次请求
+ *
+ * 生成计划要扫一遍目录树（每层之间还有限速间隔），目录一多就几分钟到十几分钟，
+ * 中间那层反代等不了就回 502。而后端那个 goroutine **还活着**、计划照样跑完落盘 ——
+ * 用户看到的是「报 502，过几分钟点开计划又在了」（2026-10-09 群晖实测）。
+ * 与番号「在线刮削」同一个形状，见 `planMediaOrganizeTask` 的说明。
+ *
+ * ⚠️ **收尾只看进度里的 `running`**，不看那条起任务的请求成没成 ——
+ * 502 恰恰就是「请求没了但任务还在跑」，按请求成败收尾会把正在跑的任务判死。
+ * 所以这里**先**起轮询再发请求，且请求失败也**不**停轮询。
+ *
+ * 失败原因也从进度里的 `error` 读（异步之后 HTTP 响应拿不到）。
+ */
+async function generatePlan(taskId: string): Promise<boolean> {
+  try {
+    await planMediaOrganizeTask(taskId);
+  } catch {
+    // 起任务的请求可能被反代掐掉（502）—— 任务还在跑，交给轮询收尾。
+  }
+  const finished = await waitForPlanDone(taskId);
+  stopPlanProgressPolling();
+  if (finished.error) {
+    toast.error(finished.error);
+    return false;
+  }
+  try {
+    preview.loadPlan(await fetchMediaOrganizePlan(taskId));
+    return true;
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "计划生成失败"));
+    return false;
+  }
+}
+
+/**
+ * 等计划生成结束，返回收尾那一拍的进度。
+ *
+ * 自己轮询（不复用 `startPlanProgressPolling` 那个定时器，免得同一份进度被两处拉）。
+ * 超时给得宽（10 分钟）且**只作兜底**：正常路径是进度里 `running` 变 false。
+ * 真撞上超时也不报错 —— 直接去拉一次计划，有就有、没有就让用户看日志。
+ */
+async function waitForPlanDone(taskId: string): Promise<MediaOrganizeProgress> {
+  const deadline = Date.now() + 10 * 60_000;
+  while (Date.now() < deadline) {
+    if (planTaskId.value !== taskId) return {}; // 用户把面板关了
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    const progress = await pollPlanProgressOnce(taskId);
+    if (!progress) continue; // 网络抖一下不该判死，下一轮继续问
+    // `running=false` 才收尾。**首拍就可能是它**（任务极快跑完），所以不能靠
+    // 「先看到 true」来判断 —— 那会让快任务一直等到超时。
+    if (!progress.running) return progress;
+  }
+  return {};
 }
 
 async function refreshPlan() {
   if (!planTaskId.value) return;
   planLoading.value = true;
-  startPlanProgressPolling(planTaskId.value);
   try {
-    const result = await planMediaOrganizeTask(planTaskId.value);
-    preview.loadPlan(result.plan);
-    toast.success("计划已重新生成");
-  } catch (e) {
-    toast.error(getApiErrorMessage(e, "生成失败"));
+    // ⚠️ 只在**真生成了**才报成功。以前这里是 `await` 完就 `toast.success`，
+    // 而异步之后「接口返回」只代表任务起了 —— 生成失败也会报「已重新生成」。
+    if (await generatePlan(planTaskId.value)) toast.success("计划已重新生成");
   } finally {
-    stopPlanProgressPolling();
     planLoading.value = false;
   }
 }
@@ -765,6 +825,8 @@ async function applyPlan() {
     if (task) openLogPanel(task, { autoCloseOnFinish: true });
     await loadTasks();
   } catch (e) {
+    // 走异步之后这里能弹出来的只有**真错误**（没有计划 / 任务正在跑 / 正在生成计划）。
+    // 以前 502 也落在这儿，于是「执行失败」把正在跑的任务说死了。
     toast.error(getApiErrorMessage(e, "执行失败"));
   } finally {
     planApplying.value = false;

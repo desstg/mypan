@@ -54,13 +54,15 @@ type Service struct {
 	// 走函数而不是字符串：目录是 jav 模块的设置项，而 strm 不该去读别人的键。
 	watermarkDirFn func() string
 
-	mu                       sync.Mutex
-	running                  map[int64]bool
-	runningAccounts          map[int64]struct{}
-	taskCancels              map[int64]context.CancelFunc
-	dirtyAccounts            map[int64]bool
-	pendingRun               map[int64]string
-	scanProgress             map[int64]liveScanProgress
+	mu              sync.Mutex
+	running         map[int64]bool
+	runningAccounts map[int64]struct{}
+	taskCancels     map[int64]context.CancelFunc
+	dirtyAccounts   map[int64]bool
+	pendingRun      map[int64]string
+	scanProgress    map[int64]liveScanProgress
+	// replaceBaseURL 是「一键替换基址」的后台任务状态（全局一个，不按任务）。
+	replaceBaseURL           *replaceBaseURLState
 	fileOperations           map[int64]struct{}
 	organizeBusy             RunningAccountLister
 	retentionBusy            RunningAccountLister
@@ -646,6 +648,105 @@ func (s *Service) UpdateRuntimeSettings(ctx context.Context, in map[string]strin
 func mustParseJavWallHiddenDirs(raw string) []string {
 	dirs, _ := settings.ParseJavWallHiddenDirs(raw)
 	return dirs
+}
+
+// StartReplaceBaseURL 起一个**后台**任务把整棵 STRM 目录树里的基址换掉，立刻返回。
+//
+// # 为什么要异步
+//
+// 这条路要 `filepath.WalkDir` 遍历**整个** STRM 输出目录，每个 `.strm` 读一遍再写
+// 一遍。群晖那片是 USB 盘、几千个文件，跑下来几分钟起步 —— 而前端那条 `post` 的
+// 超时是**浏览器自己的 90 秒**，到点就 abort。更糟的是**前面那些文件已经改完了**，
+// 于是表现是「报失败，但一半文件的新地址已经生效」。
+//
+// # 顺序
+//
+// `base_url` 设置**先落库**再动文件：这样即便文件还没换完，「程序自己新生成的 .strm」
+// 也已经用上新地址了（生成走的是设置项，不是扫描已有文件）。反过来就会有一个窗口期
+// —— 设置还是旧的、文件却是新的。
+//
+// # 并发
+//
+// 同一时间只允许一个（`replaceBaseURLRunning`）：两个任务一起遍历同一棵树，会互相
+// 读到对方写了一半的文件。
+func (s *Service) StartReplaceBaseURL(ctx context.Context, newBaseURL string) (map[string]any, error) {
+	base := NormalizeBaseURL(newBaseURL)
+	if err := ValidateBaseURL(base); err != nil {
+		return nil, domain.Errorf(domain.CodeValidation, "%s", err.Error())
+	}
+	if s.replaceBaseURLRunning() {
+		// 已在跑：直接返回当前进度（连点两次不该起第二个任务）。
+		return s.ReplaceBaseURLProgress(), nil
+	}
+
+	// 设置先落库（见上面「顺序」那段）。
+	if err := s.settings.Update(ctx, map[string]string{settings.KeyStrmBaseURL: base}); err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	s.replaceBaseURL = &replaceBaseURLState{BaseURL: base, Running: true}
+	s.mu.Unlock()
+
+	strmDir := s.strmDir
+	go func() {
+		result, err := ReplaceBaseURLInFilesWithProgress(strmDir, base, func(total, updated int) {
+			s.mu.Lock()
+			if s.replaceBaseURL != nil {
+				s.replaceBaseURL.Total = total
+				s.replaceBaseURL.Updated = updated
+			}
+			s.mu.Unlock()
+		})
+		s.mu.Lock()
+		if s.replaceBaseURL != nil {
+			s.replaceBaseURL.Running = false
+			s.replaceBaseURL.Total = result.Total
+			s.replaceBaseURL.Updated = result.Updated
+			if err != nil {
+				s.replaceBaseURL.Error = err.Error()
+			}
+		}
+		s.mu.Unlock()
+		if s.log != nil {
+			if err != nil {
+				s.log.Warn("strm base url replace failed", "base_url", base, "err", err)
+			} else {
+				s.log.Info("strm base url replaced", "base_url", base,
+					"total", result.Total, "updated", result.Updated)
+			}
+		}
+	}()
+	return s.ReplaceBaseURLProgress(), nil
+}
+
+// ReplaceBaseURLProgress 是「一键替换」的进度（前端轮询用）。
+//
+// 与整理那边一样，**结果挂在进度上**：异步之后 HTTP 响应在任务开始时就返回了，
+// 拿不到 `total` / `updated`。前端要的是 `running=false` 之后看那两个数字。
+func (s *Service) ReplaceBaseURLProgress() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.replaceBaseURL
+	if st == nil {
+		return map[string]any{}
+	}
+	out := map[string]any{
+		"base_url": st.BaseURL,
+		"running":  st.Running,
+		"total":    st.Total,
+		"updated":  st.Updated,
+	}
+	if st.Error != "" {
+		out["error"] = st.Error
+	}
+	return out
+}
+
+func (s *Service) replaceBaseURLRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.replaceBaseURL != nil && s.replaceBaseURL.Running
 }
 
 func (s *Service) ReplaceBaseURL(ctx context.Context, newBaseURL string) (ReplaceBaseURLResult, error) {

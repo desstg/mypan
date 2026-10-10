@@ -187,11 +187,20 @@ func (h *Handler) deleteMediaOrganizeTask(w http.ResponseWriter, r *http.Request
 	writeOK(w, map[string]any{"id": taskID})
 }
 
+// planMediaOrganizeTask 起一个后台计划生成任务，立刻返回。
+//
+// ⚠️ **不能同步跑**：生成计划要扫一遍目录树，每层之间还有限速间隔，目录一多就
+// 几分钟到十几分钟。同步等它会被中间那层反代 502 —— 而**后端那个 goroutine 还活着**，
+// 计划照样跑完落盘，于是现象是「报 502，过几分钟点开计划又在了」。
+// 与番号「在线刮削」那条路是同一个形状（见 mediaorganize.PlanTaskAsync 的说明）。
+//
+// 前端拿到的响应只是「已提交」，真正的结果从 `/progress` 读（`running=false` 之后
+// 再 `GET /plan`）。
 func (h *Handler) planMediaOrganizeTask(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.mediaOrganize != nil) {
 		return
 	}
-	result, err := h.mediaOrganize.PlanTask(r.Context(), chi.URLParam(r, "id"))
+	result, err := h.mediaOrganize.PlanTaskAsync(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -272,11 +281,20 @@ func (h *Handler) batchDeleteMediaOrganizePlanActions(w http.ResponseWriter, r *
 	writeOK(w, result)
 }
 
+// applyMediaOrganizeTask 起一个后台执行任务，立刻返回。
+//
+// ⚠️ **不能同步等它跑完**：执行是逐个动作提交网盘，一个几百项的任务要十几分钟，
+// 同步等会被中间那层反代 502。执行本来就已经在后台跑（`startRunner`），
+// 所以任务不会半路夭折 —— 但前端 `await` 的那个响应被掐掉之后，它只会弹一句
+// 「执行失败」，真正的结果（成功多少 / 失败多少）要用户自己去翻日志。
+//
+// 现在接口立刻返回「已提交」，前端弹「已开始执行」并打开日志面板 ——
+// 日志面板本来就在轮询任务状态，跑到哪、成没成，那里看得见。
 func (h *Handler) applyMediaOrganizeTask(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.mediaOrganize != nil) {
 		return
 	}
-	result, err := h.mediaOrganize.ApplyTask(r.Context(), chi.URLParam(r, "id"))
+	result, err := h.mediaOrganize.ApplyTaskAsync(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeErr(w, err)
 		return

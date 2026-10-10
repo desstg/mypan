@@ -323,10 +323,29 @@ export interface ReplaceStrmBaseURLResult {
   total: number;
   updated: number;
   base_url: string;
+  running?: boolean;
+  error?: string;
 }
 
+/**
+ * 「一键替换基址」：**后台任务**，接口立刻返回。
+ *
+ * # 为什么是异步（2026-10-09 实测）
+ *
+ * 它要遍历**整个** STRM 输出目录、逐个读写 `.strm`。群晖那片是 USB 盘、几千个文件，
+ * 跑下来几分钟起步 —— 而这条 `post` 的超时是浏览器自己的 90 秒，到点 abort。
+ * 更糟的是**前面那些文件已经改完了**，于是表现是「报失败，但一半文件已经生效」。
+ *
+ * 现在起任务就返回，进度从 `fetchStrmReplaceBaseURLProgress` 轮询
+ * （`running` / `total` / `updated`）。`base_url` 设置是**立刻落库**的，
+ * 所以文件还没换完时，程序自己新生成的 `.strm` 已经用上新地址了。
+ */
 export function replaceStrmBaseURL(newBaseURL: string) {
   return http.post<ReplaceStrmBaseURLResult>("/admin/strm/replace-base-url", {
     new_base_url: newBaseURL,
   });
+}
+
+export function fetchStrmReplaceBaseURLProgress() {
+  return http.get<ReplaceStrmBaseURLResult>("/admin/strm/replace-base-url/progress");
 }

@@ -16,7 +16,30 @@ type ReplaceBaseURLResult struct {
 
 var strmBaseURLPrefix = regexp.MustCompile(`^https?://[^/]+`)
 
+// replaceBaseURLState 是「一键替换基址」的后台任务状态。
+//
+// 全局一个（不是 per-task）：这个动作作用于**整个** strmDir，不针对某个任务。
+type replaceBaseURLState struct {
+	BaseURL string
+	Running bool
+	Total   int
+	Updated int
+	Error   string
+}
+
 func ReplaceBaseURLInFiles(strmDir, newBaseURL string) (ReplaceBaseURLResult, error) {
+	return ReplaceBaseURLInFilesWithProgress(strmDir, newBaseURL, nil)
+}
+
+// ReplaceBaseURLInFilesWithProgress 与 ReplaceBaseURLInFiles 一样，只是多一个进度回调。
+//
+// 抽出来是因为这条路要**改成后台跑**（见 Service.StartReplaceBaseURL）：走完整棵
+// STRM 目录树要逐个读写文件，媒体库一大的话几分钟起步，同步等会被反代 502。
+// 异步之后调用方拿不到返回值，进度就是唯一的观感来源。
+//
+// onProgress 在每个**改成功**的文件上回调一次（total, updated）。失败的不报 ——
+// 前端要的是「还剩多少」，不是「扫到第几个」。
+func ReplaceBaseURLInFilesWithProgress(strmDir, newBaseURL string, onProgress func(total, updated int)) (ReplaceBaseURLResult, error) {
 	var result ReplaceBaseURLResult
 	base := NormalizeBaseURL(newBaseURL)
 	if base == "" {
@@ -60,6 +83,9 @@ func ReplaceBaseURLInFiles(strmDir, newBaseURL string) (ReplaceBaseURLResult, er
 		}
 		if err := os.WriteFile(path, []byte(out), 0o644); err == nil {
 			result.Updated++
+			if onProgress != nil {
+				onProgress(result.Total, result.Updated)
+			}
 		}
 		return nil
 	})

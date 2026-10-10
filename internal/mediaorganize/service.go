@@ -187,7 +187,28 @@ func (s *Service) DeleteTask(ctx context.Context, id string) (stopping bool, err
 	return wasRunning, nil
 }
 
+// PlanTask 同步生成一份计划并返回。
+//
+// ⚠️ **HTTP 那条路不该走这里** —— 见 PlanTaskAsync。扫一遍目录树（每层之间还有限速
+// 间隔）再规划，目录一多就要几分钟到十几分钟，中间那层反代等不了就回 502
+// （2026-10-08 在番号「在线刮削」上实测过同一个形状：跑到 20 部左右断掉）。
+// 留着它是给测试与「必须拿到计划本体」的内部调用。
 func (s *Service) PlanTask(ctx context.Context, taskID string) (map[string]any, error) {
+	plan, err := s.planTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"plan": plan,
+		"summary": map[string]any{
+			"actions": len(plan.Actions),
+			"skipped": len(plan.Skipped),
+		},
+	}, nil
+}
+
+// planTask 是 PlanTask / PlanTaskAsync 共用的那一段：扫描 → 规划 → 落盘。
+func (s *Service) planTask(ctx context.Context, taskID string) (*Plan, error) {
 	task, err := s.requireTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -228,15 +249,142 @@ func (s *Service) PlanTask(ctx context.Context, taskID string) (map[string]any, 
 		"skipped":    len(plan.Skipped),
 		"updated_at": time.Now().Format("15:04:05"),
 	})
-	return map[string]any{
-		"plan": plan,
-		"summary": map[string]any{
-			"actions": len(plan.Actions),
-			"skipped": len(plan.Skipped),
-		},
-	}, nil
+	return plan, nil
 }
 
+// PlanTaskAsync 起一个**后台**计划生成任务，立刻返回。
+//
+// # 为什么要异步（与番号「在线刮削」同一个形状）
+//
+// 生成计划要扫一遍目录树，**每一层目录之间还有限速间隔**（`api_request_interval_ms`，
+// 默认 300ms），目录一多就轻松超过反代的等待上限 —— 表现是「点生成计划，转一会儿
+// 报 502，过几分钟再打开，计划又在了」。
+//
+// 后一句正是**同步跑**的铁证：后端那个 goroutine 还活着、把计划跑完并落了盘，
+// 只是那条 HTTP 响应早就没了（前端 `catch` 到 502 就走 `finally` 把进度轮询停了，
+// 于是屏幕上只有一句「计划生成失败」）。
+//
+// 现在：接口立刻返回（进度里 `running=true`），活在后头跑，前端轮询
+// `/progress` 直到 `running=false`，结果从进度里读。
+//
+// # 并发
+//
+// 同一任务已在生成时直接返回当前进度（不报错、不排队）—— 连点两次不该起两个
+// 任务去抢网盘接口。
+func (s *Service) PlanTaskAsync(ctx context.Context, taskID string) (map[string]any, error) {
+	// 守卫放在起任务**之前**：进去之后就是异步的，错误只能落在进度里，调用方拿不到。
+	task, err := s.requireTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	// ⚠️ **顺序**：先看「是不是已经在生成计划」，再看「是不是在执行」。
+	// 反过来的话，第二次点击会撞上下面 `startRunner` 登记的那把 running 锁，
+	// 回一句「任务正在执行中」—— 而用户只是想再点一下看看进度。
+	if s.planRunning(taskID) {
+		return s.planProgressSnapshot(taskID), nil
+	}
+	if s.IsRunning(taskID) {
+		return nil, domain.Errorf(domain.CodeValidation, "任务正在执行中")
+	}
+
+	s.discardStop(taskID)
+	s.clearLogs(taskID)
+	s.resetProgress(taskID)
+	s.appendLog(taskID, "[MediaOrganize] 生成计划开始")
+
+	// 账号在这里就解析出来（而不是留给后台那个 goroutine）：解析失败要**同步**报给
+	// 调用方，异步之后错误只能落在进度里，用户看到的就只是「转一会儿没了」。
+	// 顺带把它登记进 runningAccounts —— 同一个账号不该同时被两个任务扫。
+	cfg, err := s.loadTaskConfig(task)
+	if err != nil {
+		return nil, err
+	}
+	accountID, err := s.resolveAccountID(task, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// 进度先立起来：前端下一次轮询就能看到 running=true，而不是「什么都没发生」。
+	s.updateProgress(taskID, map[string]any{"stage": "planning", "running": true})
+
+	// **不随请求结束**：这条 HTTP 请求马上就返回了，任务得自己活着。
+	s.startRunner(taskID, accountID, func(runCtx context.Context) {
+		settingsDict := SettingsDict(s.settings)
+		delayMS := intFromAny(settingsDict["api_request_interval_ms"], 300)
+		runCtx = driver.WithExtraAPIDelay(runCtx, delayMS)
+
+		task.Status = domain.MediaOrganizeStatusPlanning
+		_ = s.repo.Update(runCtx, task)
+
+		// 收尾统一走这里：**三种结局都要把 running 落回 false**，
+		// 否则前端会一直转圈（它只认进度里的这个字段）。
+		finish := func(buildErr error, plan *Plan) {
+			task.Status = domain.MediaOrganizeStatusIdle
+			_ = s.repo.Update(context.Background(), task)
+			info := map[string]any{
+				"stage":      "done",
+				"running":    false,
+				"updated_at": time.Now().Format("15:04:05"),
+			}
+			if buildErr != nil {
+				info["error"] = buildErr.Error()
+			} else {
+				info["actions"] = len(plan.Actions)
+				info["skipped"] = len(plan.Skipped)
+			}
+			s.updateProgress(taskID, info)
+		}
+
+		plan, buildErr := s.buildPlan(runCtx, taskID, task, settingsDict)
+		if buildErr != nil {
+			if errors.Is(buildErr, ErrTaskAborted) {
+				s.appendLog(taskID, "[MediaOrganize] 任务已停止")
+			} else {
+				s.appendLog(taskID, fmt.Sprintf("[MediaOrganize] 任务异常: %v", buildErr))
+			}
+			finish(buildErr, nil)
+			return
+		}
+		if err := s.savePlan(taskID, plan); err != nil {
+			s.appendLog(taskID, fmt.Sprintf("[MediaOrganize] 任务异常: %v", err))
+			finish(err, nil)
+			return
+		}
+		s.appendLog(taskID, fmt.Sprintf("[MediaOrganize] 计划生成完成: %d 个动作, 跳过 %d 个", len(plan.Actions), len(plan.Skipped)))
+		finish(nil, plan)
+	})
+	return s.planProgressSnapshot(taskID), nil
+}
+
+// planRunning 报告这个任务是不是正在后台生成计划。
+//
+// 判据是进度里的 `running`，**不是** `IsRunning`（那是「执行」用的）——
+// 两者可以并存：计划生成中用户当然不该能点执行，但执行中也不该能生成计划，
+// 那道闸由两个方法各自开头那句 `IsRunning` 挡。
+//
+// ⚠️ 只认 `stage == "planning"` 的那一拍。执行阶段也会往进度里写东西，
+// 而 `applyPlanRunner` 收尾时写的那条**不带 running 字段** —— 不带就取不到值、
+// 判成 false，正是我们要的。
+func (s *Service) planRunning(taskID string) bool {
+	progress := s.GetProgress(taskID)
+	running, _ := progress["running"].(bool)
+	return running
+}
+
+// planProgressSnapshot 是「立刻返回」的那个响应体。
+//
+// 与「在线刮削」那条路一样，**结果挂在进度上**：异步之后 HTTP 响应在任务开始时
+// 就返回了，拿不到计划本体。前端要的是 `running=false` 之后自己去 `GET /plan`。
+func (s *Service) planProgressSnapshot(taskID string) map[string]any {
+	return map[string]any{"task_id": taskID, "submitted": true}
+}
+
+// ApplyTask 同步执行计划并等它跑完。
+//
+// ⚠️ **HTTP 那条路不该走这里** —— 见 ApplyTaskAsync。执行是逐个动作提交网盘
+// （改名 / 移动 / 删小文件），一个几百项的任务要十几分钟，同步等会被中间那层反代
+// 502，而后端还在跑 —— 表现与生成计划那条路一模一样（见 PlanTaskAsync）。
+// 留着它是给测试与内部调用。
 func (s *Service) ApplyTask(ctx context.Context, taskID string) (map[string]any, error) {
 	task, err := s.requireTask(ctx, taskID)
 	if err != nil {
@@ -244,6 +392,60 @@ func (s *Service) ApplyTask(ctx context.Context, taskID string) (map[string]any,
 	}
 	if s.IsRunning(taskID) {
 		return nil, domain.Errorf(domain.CodeValidation, "任务正在执行中")
+	}
+	cfg, err := s.loadTaskConfig(task)
+	if err != nil {
+		return nil, err
+	}
+	accountID, err := s.resolveAccountID(task, cfg)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := s.loadPlan(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if plan == nil {
+		return nil, domain.Errorf(domain.CodeValidation, "当前没有可执行的计划，请先生成计划")
+	}
+
+	s.discardStop(taskID)
+	s.appendLog(taskID, "[MediaOrganize] 开始执行计划")
+	s.applyPlanRunner(ctx, taskID, plan, task, cfg, accountID)
+	return map[string]any{"task_id": taskID, "submitted": true}, nil
+}
+
+// ApplyTaskAsync 起一个**后台**执行任务，立刻返回。
+//
+// # 为什么
+//
+// 与生成计划同一个理由（见 PlanTaskAsync）：执行是逐个动作提交网盘，一个几百项的
+// 任务要十几分钟，同步等会被反代 502。区别是执行这条路**本来就已经在后台跑了**
+// （`ApplyTask` 一直用的是 `startRunner`），所以这里没有「任务会半路夭折」的问题 ——
+// 前端 `await` 的那个响应被掐掉，任务照样跑完。
+//
+// 那为什么还要改：**执行失败时用户看不到**。`applyPlanRunner` 把结果写进
+// `task.LastRunResult`，而前端在 502 那一拍就走 `catch` 弹「执行失败」，
+// 真正的结果（成功 153 / 失败 0）要等用户自己去翻日志或任务列表。
+//
+// # 收尾
+//
+// 执行的结果与成败**不落在进度里**（那条路走 `LastRunResult` + 日志，
+// 前端本来就有日志面板在轮询）。所以这里只做两件事：起任务、立刻返回。
+func (s *Service) ApplyTaskAsync(ctx context.Context, taskID string) (map[string]any, error) {
+	// 守卫放在起任务**之前**：进去之后就是异步的，错误只能落在日志里，调用方拿不到。
+	task, err := s.requireTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if s.IsRunning(taskID) {
+		return nil, domain.Errorf(domain.CodeValidation, "任务正在执行中")
+	}
+	// ⚠️ 计划正在生成时不能执行 —— 手上这份计划可能马上就被覆盖掉。
+	// 放在 `IsRunning` **之后**：执行中要回「任务正在执行中」（更准），
+	// 生成计划中才回下面这句。
+	if s.planRunning(taskID) {
+		return nil, domain.Errorf(domain.CodeValidation, "正在生成计划，请稍候")
 	}
 	cfg, err := s.loadTaskConfig(task)
 	if err != nil {

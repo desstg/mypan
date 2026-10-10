@@ -67,6 +67,10 @@ export interface MediaOrganizePlan {
 
 export interface MediaOrganizeProgress {
   stage?: string;
+  /** 计划生成是否还在后台跑。前端轮询到 false 才去 `GET /plan` 拿结果。 */
+  running?: boolean;
+  /** 计划生成失败时的原因（异步之后错误只能落在这里）。 */
+  error?: string;
   scanned_dirs?: number;
   scanned_files?: number;
   groups?: number;
@@ -210,43 +214,55 @@ export function deleteMediaOrganizeTask(id: string) {
 }
 
 export interface MediaOrganizePlanResult {
-  plan: MediaOrganizePlan;
+  /**
+   * 异步化之后**这个字段不再有值**：接口立刻返回「已提交」，计划本体要等进度
+   * `running=false` 之后自己 `GET /plan` 拿。留着是为了兼容（也见下面的注释）。
+   */
+  plan?: MediaOrganizePlan;
   summary?: { actions?: number; skipped?: number };
+  task_id?: string;
+  submitted?: boolean;
 }
 
 /**
- * 整理任务的预览与执行要跑很久：扫一遍目录树（每个目录之间还有限速间隔）再规划/执行，
- * 目录一多就轻松超过**前端默认的 90 秒**（`client.ts` 的 `defaultRequestTimeoutMs`）。
+ * 生成整理计划：**后台任务**，接口立刻返回。
  *
- * 超时的表现极具迷惑性：是**浏览器自己** abort 掉请求，后端拿到 `context canceled`、
- * 扫描中途夭折（日志里就一句「列目录失败 …context canceled，跳过该目录」），
- * 而界面上只是「转了会儿就停了」——
- * 计划因此从没保存下来（`GET /plan` 返回 null，看着像「执行后就丢弃了」），
- * 执行也会在扫描到一半时断掉，成了「明明扫描出来了、后半截却不处理」。
+ * # 为什么不能同步等（2026-10-09 群晖实测）
  *
- * 与 115 扫码那条长轮询同一个道理，都走 `postWithTimeout`。
+ * 生成计划要扫一遍目录树，而每层目录之间还有限速间隔（`api_request_interval_ms`，
+ * 默认 300ms），目录一多就轻松超过反代的等待上限。原来这里 `await` 到底，
+ * 现象是「点生成计划转一会儿报 502，**过几分钟再打开计划又在了**」——
+ * 后一句是关键：后端那个 goroutine 还活着、把计划跑完并落了盘，只是那条 HTTP
+ * 响应早就没了。前端 `catch` 到 502 就走 `finally` 把进度轮询也停了，
+ * 屏幕上只剩一句「计划生成失败」。
+ *
+ * 现在与番号「在线刮削」同一个形状：起任务 → 轮询 `/progress` 到 `running=false`
+ * → 再 `GET /plan` 拿结果。
  */
-const ORGANIZE_LONG_TIMEOUT_MS = 10 * 60_000;
-
 export function planMediaOrganizeTask(id: string) {
-  return http.postWithTimeout<MediaOrganizePlanResult>(
-    `/admin/media-organize/tasks/${id}/plan`,
-    {},
-    ORGANIZE_LONG_TIMEOUT_MS,
-  );
+  return http.post<MediaOrganizePlanResult>(`/admin/media-organize/tasks/${id}/plan`, {});
 }
 
 export function fetchMediaOrganizePlan(id: string) {
   return http.get<MediaOrganizePlan>(`/admin/media-organize/tasks/${id}/plan`);
 }
 
-// 执行同样会长跑（逐个动作提交网盘），用同一份放宽后的超时。
+/**
+ * 执行计划：**后台任务**，接口立刻返回。
+ *
+ * # 为什么也改成异步
+ *
+ * 与生成计划同一个理由（见 `planMediaOrganizeTask`）：执行是逐个动作提交网盘
+ * （改名 / 移动 / 删小文件），一个几百项的任务要十几分钟，同步等会被中间那层反代
+ * 502。区别是这条路**本来就已经在后台跑**（后端用的是 startRunner），所以任务不会
+ * 半路夭折 —— 真正的问题是**失败时用户看不到**：前端在 502 那一拍就弹「执行失败」，
+ * 而真实结果是「成功 153 / 失败 0」，得用户自己去翻日志。
+ *
+ * 现在接口立刻返回「已提交」，前端弹「已开始执行」并打开日志面板 ——
+ * 那边本来就在轮询任务状态。
+ */
 export function applyMediaOrganizeTask(id: string) {
-  return http.postWithTimeout<Record<string, unknown>>(
-    `/admin/media-organize/tasks/${id}/apply`,
-    {},
-    ORGANIZE_LONG_TIMEOUT_MS,
-  );
+  return http.post<Record<string, unknown>>(`/admin/media-organize/tasks/${id}/apply`, {});
 }
 
 export function stopMediaOrganizeTask(id: string) {

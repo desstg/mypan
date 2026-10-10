@@ -3,9 +3,11 @@ import { computed, onMounted, ref } from "vue";
 import { getApiErrorMessage } from "@/api/client";
 import {
   CONFLICT_POLICIES,
+  fetchStrmReplaceBaseURLProgress,
   fetchStrmSettings,
   replaceStrmBaseURL,
   saveStrmSettings,
+  type ReplaceStrmBaseURLResult,
   type StrmSettings,
 } from "@/api/strm";
 import AppButton from "@/components/base/AppButton.vue";
@@ -256,15 +258,46 @@ async function handleReplaceBaseURL() {
   }
   replacingBaseURL.value = true;
   try {
-    const data = await replaceStrmBaseURL(baseURL);
-    settings.base_url = data.base_url ?? baseURL;
+    // 后台任务：起任务就返回，结果从进度轮询读（见 waitReplaceBaseURL）。
+    // ⚠️ **不能 await 到底**：要遍历整个 STRM 目录树，大库几分钟起步，
+    // 浏览器 90 秒就 abort —— 而前面那些文件已经改完了，报「失败」是假的。
+    await replaceStrmBaseURL(baseURL);
+    const done = await waitReplaceBaseURL();
+    settings.base_url = done.base_url ?? baseURL;
     snapshotBaseline();
-    toast.success(`替换完成：${data.updated}/${data.total}`);
+    if (done.error) {
+      toast.error(done.error);
+    } else {
+      toast.success(`替换完成：${done.updated}/${done.total}`);
+    }
   } catch (e) {
     toast.error(getApiErrorMessage(e, "替换失败"));
   } finally {
     replacingBaseURL.value = false;
   }
+}
+
+/**
+ * 轮询「一键替换」的进度，返回收尾那一拍。
+ *
+ * ⚠️ **收尾只看进度里的 `running`**，不看起任务那条请求成没成 ——
+ * 请求被浏览器超时 abort 恰恰是「任务还在跑」，按请求成败收尾会把它判死。
+ *
+ * 超时给得宽（10 分钟）且只作兜底：正常路径是 `running` 变 false。
+ */
+async function waitReplaceBaseURL(): Promise<ReplaceStrmBaseURLResult> {
+  const deadline = Date.now() + 10 * 60_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    let progress: ReplaceStrmBaseURLResult;
+    try {
+      progress = await fetchStrmReplaceBaseURLProgress();
+    } catch {
+      continue; // 网络抖一下不该判死，下一轮继续问
+    }
+    if (!progress.running) return progress;
+  }
+  return { base_url: "", total: 0, updated: 0 };
 }
 
 function getDefaultScanInterval(): number {

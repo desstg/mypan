@@ -326,6 +326,7 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/settings", h.getStrmSettings)
 					r.Put("/settings", h.updateStrmSettings)
 					r.Post("/replace-base-url", h.replaceStrmBaseURL)
+					r.Get("/replace-base-url/progress", h.getStrmReplaceBaseURLProgress)
 					r.Post("/tasks/precheck-account-repair", h.precheckStrmAccountRepair)
 					r.Post("/tasks/repair-account-references", h.repairStrmAccountReferences)
 					r.Post("/generate-current-directory", h.generateCurrentDirectoryStrm)
