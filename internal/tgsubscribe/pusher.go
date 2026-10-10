@@ -9,6 +9,7 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/driver"
+	"litepan/internal/mutation"
 	"litepan/internal/offlinedownload"
 )
 
@@ -455,7 +456,9 @@ func (s *Service) ensureTargetFolder(ctx context.Context, req DeliverRequest) (t
 	var mine bool
 	item, err := s.folderGroup.DoCtx(ctx, key, func(callCtx context.Context) (*domain.FileItem, error) {
 		mine = true
-		return s.folders.CreateFolder(callCtx, req.AccountID, req.TargetParentID, folderName)
+		// 标成「本程序自己建的」：不标的话，投递建专属目录就会把账号标脏，
+		// 立刻招来一轮 STRM 扫描。与番号侧车/推送在 internal/mutation 里是同一件事。
+		return s.folders.CreateFolder(mutation.Internal(callCtx), req.AccountID, req.TargetParentID, folderName)
 	})
 	if err != nil {
 		// 建目录失败。**先试着把已存在的同名子目录找回来**，再考虑退回父目录。

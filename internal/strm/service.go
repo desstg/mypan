@@ -14,6 +14,7 @@ import (
 	"litepan/internal/domain"
 	"litepan/internal/eventbus"
 	"litepan/internal/file"
+	"litepan/internal/mutation"
 	"litepan/internal/playback"
 	"litepan/internal/settings"
 	"litepan/internal/startupwait"
@@ -580,7 +581,30 @@ func (s *Service) RunTaskNow(ctx context.Context, id int64, runMode string) (*do
 
 func (s *Service) OnFileMutated(ctx context.Context, e eventbus.FileMutated) {
 	s.invalidateMutatedDirCache(ctx, e)
-	if e.Op == "move" || isMetadataSyncMutation(ctx) {
+	// 移动不标脏（搬走的文件不需要重扫；这一步本来就有）。
+	if e.Op == "move" {
+		return
+	}
+	// ⚠️ **本程序自己写出来的文件不标脏**。
+	//
+	// 这一条修的是一个静默的扫描风暴（2026-10-10 群晖实测）。原来的判据是
+	// 「是不是 move / 是不是元数据同步」——元数据同步那一支后来也被合并到这里
+	// （见 internal/mutation）。除了这两类，任何别的自写动作都会把账号重新标脏，
+	// 而标脏在 `shouldRun` 里是**不看清扫间隔**的 —— 下一轮 30 秒的调度 tick 立刻
+	// 又扫一遍，扫完看到的正是它自己刚写的东西，白打一遍网盘接口。
+	//
+	// 真机证据（`data/log/2026-10-10.log`，「番号影片」= task 13）：
+	//   - 07:02:04 `jav push completed` / 07:02:08 `jav sidecar done`
+	//     → 07:02:19 扫描（上一次是 06:50，间隔 12 分钟，远没到 6 小时）；
+	//   - 17:23:25 刚扫完（108 部、0 变更）→ **30 秒后** 17:23:55 又扫一遍。
+	// 这天它一共跑了 8 轮，其中 4 轮紧跟在一次自写动作之后；每轮打 100+ 次网盘接口。
+	//
+	// 用户的操作（上传、新建目录、删除）**不带**这个标记，照旧立即触发扫描 ——
+	// 那才是这条机制存在的理由。代价是「本程序自己写的落盘要等下一个定时周期
+	// （任务的扫描间隔 `scan_interval`，默认 6 小时）才被扫到」，
+	// 以及依赖「扫到落盘」的下游环节（番号侧车回写后的元数据补生成）跟着慢半拍。
+	// 这是选 B 时明确接受的代价，见 internal/mutation 的说明。
+	if mutation.IsInternal(ctx) {
 		return
 	}
 	s.mu.Lock()

@@ -10,6 +10,7 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/driver"
+	"litepan/internal/mutation"
 )
 
 const (
@@ -67,15 +68,16 @@ type metadataSyncResult struct {
 	Deleted    int64
 }
 
-type metadataSyncMutationKey struct{}
-
+// ⚠️ 这个标记已经**合并进** internal/mutation 的通用标记（见那边顶部说明）：
+// 元数据同步上传不过是「本程序自己写盘」的其中一种，单独留一套键只会让
+// OnFileMutated 里排一串 if。留这两个薄包装是为了**测试可读性** ——
+// metadata_reconcile_test.go 直接用它们构造「同步写入」的 ctx。
 func withMetadataSyncMutation(ctx context.Context) context.Context {
-	return context.WithValue(ctx, metadataSyncMutationKey{}, true)
+	return mutation.Internal(ctx)
 }
 
 func isMetadataSyncMutation(ctx context.Context) bool {
-	marked, _ := ctx.Value(metadataSyncMutationKey{}).(bool)
-	return marked
+	return mutation.IsInternal(ctx)
 }
 
 func normalizeMetadataSyncMode(raw string) string {

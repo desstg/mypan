@@ -7,6 +7,7 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/driver"
+	"litepan/internal/mutation"
 	"litepan/internal/offlinedownload"
 	"litepan/internal/settings"
 )
@@ -363,7 +364,9 @@ func (s *Service) ensureTargetFolder(ctx context.Context, accountID int64, paren
 
 	key := fmt.Sprintf("%d:%s:%s", accountID, parentID, folderName)
 	item, err := s.folderGroup.DoCtx(ctx, key, func(callCtx context.Context) (*domain.FileItem, error) {
-		return s.folders.CreateFolder(callCtx, accountID, parentID, folderName)
+		// 标成「本程序自己建的」：不标的话，推送建这个专属目录就会把账号标脏，
+		// 立刻招来一轮 STRM 扫描。与侧车回写在 internal/mutation 里是同一件事。
+		return s.folders.CreateFolder(mutation.Internal(callCtx), accountID, parentID, folderName)
 	})
 	if err != nil {
 		if found, ok := s.findChildFolder(ctx, accountID, parentID, folderName); ok {

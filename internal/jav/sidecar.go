@@ -11,6 +11,7 @@ import (
 	"litepan/internal/domain"
 	"litepan/internal/driver"
 	"litepan/internal/jav/quality"
+	"litepan/internal/mutation"
 	"litepan/internal/settings"
 )
 
@@ -779,7 +780,10 @@ func (s *Service) uploadSidecar(ctx context.Context, accountID int64, parentID, 
 		return err
 	}
 
-	_, err = s.folders.UploadLocal(ctx, accountID, driver.LocalUploadRequest{
+	// ⚠️ 标成「本程序自己写的」：不标的话，侧车一落盘就把账号标脏，
+	// 下一轮 30 秒的调度 tick 立刻叫起 STRM 扫描 —— 而这次扫描看到的正是
+	// 它自己刚写的这些文件，白打一遍网盘接口。见 internal/mutation 的说明。
+	_, err = s.folders.UploadLocal(mutation.Internal(ctx), accountID, driver.LocalUploadRequest{
 		LocalPath: tmpName,
 		FileName:  fileName,
 		ParentID:  parentID,

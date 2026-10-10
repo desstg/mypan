@@ -11,6 +11,7 @@ import (
 	"litepan/internal/domain"
 	"litepan/internal/driver"
 	"litepan/internal/eventbus"
+	"litepan/internal/mutation"
 )
 
 type metadataFilesStub struct {
@@ -317,5 +318,54 @@ func TestBuildMetadataSyncPlanKeepsDownloadedSubtitles(t *testing.T) {
 	}
 	if len(deletes) != 1 || deletes[0] != "other-movie.zh-CN.srt" {
 		t.Errorf("应当只删别的片子的字幕，got %v", deletes)
+	}
+}
+
+// 本程序自己写的落盘（侧车回写、推送建目录、投递落盘）不该把账号标脏。
+//
+// 不挡的后果（2026-10-10 群晖实测）：扫描刚跑完，番号侧车一回写就把账号标脏，
+// 下一轮 30 秒的调度 tick 立刻又扫一遍 —— 扫完看到的正是它自己刚写的东西，
+// 白打 100+ 次网盘接口。一天下来多跑 4 轮。
+//
+// 这条与 TestMetadataUploadMutationDoesNotWakeScanner 是同一个判据的两半：
+// 那一半钉「元数据同步不标脏」，这一半钉「jav / tgsubscribe 的写盘走的是同一条路」。
+func TestInternalWriteDoesNotWakeScanner(t *testing.T) {
+	svc := NewService(ServiceOptions{})
+
+	// jav 侧车回写、推送建目录、tgsubscribe 投递落盘 —— 三处都标了 mutation.Internal。
+	for _, op := range []string{"create", "delete"} {
+		svc.OnFileMutated(mutation.Internal(t.Context()), eventbus.FileMutated{
+			AccountID: 9,
+			Op:        op,
+		})
+		if svc.dirtyAccounts[9] {
+			t.Fatalf("本程序自己写的 %s 不该标脏", op)
+		}
+	}
+
+	// 用户的操作没标记 → 照旧标脏（这正是这条机制存在的理由）。
+	svc.OnFileMutated(t.Context(), eventbus.FileMutated{AccountID: 9, Op: "create"})
+	if !svc.dirtyAccounts[9] {
+		t.Fatal("用户自己上传/新建仍应标脏，否则「放完文件等半天不扫」")
+	}
+}
+
+// 缓存失效与标脏是两件事：自写动作不标脏，但**仍要让目录路径映射失效**。
+//
+// 判据：不标脏的那条路上，invalidateMutatedDirCache 有没有被跳过。
+// 这里只断言「标脏」这一半 —— 缓存那半由 dir_cache_mutation_test.go 覆盖，
+// 而 OnFileMutated 的第一句始终是它，改动时别把顺序调了。
+func TestInternalWriteStillInvalidatesCache(t *testing.T) {
+	svc := NewService(ServiceOptions{})
+	// 标了 internal 也要走到 invalidateMutatedDirCache（它不问标记）。
+	// 这里用一个不会 panic 的最小事件验证调用路径存在。
+	svc.OnFileMutated(mutation.Internal(t.Context()), eventbus.FileMutated{
+		AccountID: 9,
+		Op:        "rename",
+		ParentID:  "p1",
+		FileID:    "f1",
+	})
+	if svc.dirtyAccounts[9] {
+		t.Fatal("自写动作不该标脏")
 	}
 }
