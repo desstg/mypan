@@ -615,7 +615,8 @@ func (s *Service) discardCreatedFolder(
 		return ""
 	}
 
-	if err := s.folders.DeleteFiles(ctx, accountID, []string{folderID}, ""); err != nil {
+	// 标成自写：删的是本程序自己刚建的空目录，同样不该招来一轮扫描。
+	if err := s.folders.DeleteFiles(mutation.Internal(ctx), accountID, []string{folderID}, ""); err != nil {
 		s.log.Warn("tg subscribe cleanup empty folder failed",
 			"account", accountID, "folder", folderID, "err", err)
 		return ""

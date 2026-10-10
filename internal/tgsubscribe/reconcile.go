@@ -7,6 +7,7 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/driver"
+	"litepan/internal/mutation"
 	"litepan/internal/offlinedownload"
 )
 
@@ -263,7 +264,8 @@ func (s *Service) discardEmptyChildFolder(
 		return
 	}
 
-	if err := s.folders.DeleteFiles(ctx, accountID, []string{folderID}, ""); err != nil {
+	// 标成自写：删的是本程序自己建的空目录，不该招来一轮扫描。
+	if err := s.folders.DeleteFiles(mutation.Internal(ctx), accountID, []string{folderID}, ""); err != nil {
 		s.log.Warn("tg subscribe cleanup empty folder after offline failure failed",
 			"account", accountID, "folder", folderID, "err", err)
 		return
