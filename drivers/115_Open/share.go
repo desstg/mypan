@@ -176,6 +176,9 @@ func (d *Driver) PeekShare(ctx context.Context, req driver.SharePeekRequest) (dr
 // ShareReceiveCapabilities 报告当前账号能不能做分享转存。
 //
 // 廉价、不发请求 —— 它在派发窗口的过滤阶段会被调用，那个阶段绝不能有网络往返。
+// ShareKinds 报告这个驱动只转存 115 自己的分享链。
+func (d *Driver) ShareKinds() string { return driver.ShareKind115 }
+
 func (d *Driver) ShareReceiveCapabilities() driver.ShareReceiveCapabilities {
 	if strings.TrimSpace(d.currentCookie()) == "" {
 		return driver.ShareReceiveCapabilities{

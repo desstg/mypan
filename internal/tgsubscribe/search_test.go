@@ -86,6 +86,7 @@ func newSearchServiceForTest(t *testing.T, fetcher PageFetcher) (*Service, *stor
 		quality:      st.TGQualityProfiles,
 		registry:     newRegistry(),
 		fetcher:      fetcher,
+		accounts:     st.Accounts,
 		log:          slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelError})),
 		channelPosts: map[int64]time.Time{},
 	}

@@ -415,15 +415,27 @@ func TestBuiltinCapabilitiesExposeMagnetScheme(t *testing.T) {
 		Accounts: offlineAccountRepo{account: &domain.Account{ID: 7, Name: "测试盘", DriverType: "offline-test"}},
 		Repo:     newOfflineTaskRepo(),
 	})
+	// ⚠️ 内置下载器要挂上**上传服务**才报可用：那条路是「本机下载后自动上传」，
+	// 没有上传服务时它会回「上传服务未就绪」。界面承诺的通道必须是提交时真能走的，
+	// 所以没挂时 BuiltinEnabled=false（夸克账号尤其依赖这一条 —— 它没有原生离线）。
+	before, err := svc.Capabilities(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("获取能力失败: %v", err)
+	}
+	if before.BuiltinEnabled {
+		t.Fatalf("没挂上传服务时内置下载器不该报告可用: %#v", before)
+	}
+	if len(before.BuiltinURLSchemes) != 3 || before.BuiltinURLSchemes[2] != "magnet" {
+		t.Fatalf("内置 scheme 声明不正确: %#v", before.BuiltinURLSchemes)
+	}
+
+	svc.SetUploads(&upload.Manager{})
 	cap, err := svc.Capabilities(context.Background(), 7)
 	if err != nil {
 		t.Fatalf("获取能力失败: %v", err)
 	}
 	if !cap.BuiltinEnabled || !cap.BuiltinSupportsURLs {
-		t.Fatalf("内置能力不正确: %#v", cap)
-	}
-	if len(cap.BuiltinURLSchemes) != 3 || cap.BuiltinURLSchemes[2] != "magnet" {
-		t.Fatalf("内置 scheme 声明不正确: %#v", cap.BuiltinURLSchemes)
+		t.Fatalf("挂了上传服务后内置能力应当可用: %#v", cap)
 	}
 }
 

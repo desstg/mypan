@@ -34,8 +34,9 @@ type ProbeResourceCount struct {
 	// 「抓到了但投不了」和「压根抓不到」是两种完全不同的处置，前端要能分开显示。
 	//
 	// ⚠️ 只说类型，不说账号：体检按频道做，没有账号上下文。
-	// 115 分享就属于「类型支持、但要账号配了网页 Cookie 才真的能转」，
-	// 这一层由 probeWarnings 用文字交代，不在这里下结论。
+	// 115 分享属于「类型支持、但要账号配了网页 Cookie 才真的能转」，
+	// 夸克分享同样要账号自己的 Cookie；这一层由 probeWarnings 用文字交代，
+	// 不在这里下结论。
 	Deliverable bool `json:"deliverable"`
 }
 
@@ -43,11 +44,14 @@ type ProbeResourceCount struct {
 //
 // 能投递的排前面，只识别不投递的按实测出现频率排 —— 频道的「体检」报告
 // 是要给人看的，顺序本身就在回答「这个频道的资源主要是什么形态」。
+//
+// 115 / 123 / 夸克 / 光鸭 都属于「类型支持、账号配置另说」（各自的分享接口都要那份
+// 网盘侧的凭据），所以排在同一档；它们的账号前提由 probeWarnings 用文字交代。
 var probeKindOrder = []string{
-	KindMagnet, KindED2K, KindHTTP, KindShare115, KindShareQuark,
-	// 以下只识别、不投递。实测频率：夸克/百度最多，其次迅雷、阿里。
+	KindMagnet, KindED2K, KindHTTP, KindShare115, KindShare123, KindShareQuark, KindShareGuangya,
+	// 以下只识别、不投递。实测频率：百度最多，其次迅雷、阿里。
 	KindShareBaidu, KindShareXunlei, KindShareAliyun, KindShareUC,
-	KindShare123, KindShare189, KindSharePikPak, KindShareLanzou,
+	KindShare189, KindSharePikPak, KindShareLanzou,
 	KindShareGDrive, KindShareOneDrive, KindShareMega,
 }
 
@@ -134,9 +138,13 @@ func (s probeScan) total() int {
 	return n
 }
 
-// shares 是分享类资源的命中数（两类分享链之和）。
+// shares 是分享类资源的命中数（各类分享链之和）。
 func (s probeScan) shares() int {
-	return s.counts[KindShare115] + s.counts[KindShareQuark]
+	n := 0
+	for _, kind := range []string{KindShare115, KindShare123, KindShareQuark, KindShareGuangya} {
+		n += s.counts[kind]
+	}
+	return n
 }
 
 // topHosts 返回排好序的前 n 个第三方域名。
@@ -219,12 +227,24 @@ func (s *Service) probeWarnings(scan probeScan, urlButtonCount int) []string {
 		}
 		warnings = append(warnings, line)
 	}
-	// 115 分享链的前置条件必须单独说：体检是**按频道**做的，没有账号上下文，
-	// 判断不了「这个账号配没配 Cookie」，所以只能把前提讲清楚而不是下结论。
+	// 分享链的前置条件必须单独说：体检是**按频道**做的，没有账号上下文，
+	// 判断不了「这个账号配没配凭据」，所以只能把前提讲清楚而不是下结论。
 	// 不讲的话用户会看到「115 分享 15」却没有一条进历史，然后去翻日志。
 	if scan.counts[KindShare115] > 0 {
 		warnings = append(warnings, "其中 115 分享链需要目标账号配置「网页 Cookie」才能自动转存"+
 			"（115 的分享转存只有网页接口能做，开放平台令牌不行）；没配的账号上这些记录会以「暂不支持投递」出现。")
+	}
+	if scan.counts[KindShare123] > 0 {
+		warnings = append(warnings, "其中 123 分享链需要目标账号配置「网页账号 / 密码」才能自动转存"+
+			"（123 的分享转存与磁力离线只有网页接口能做，开放平台令牌不认）；没配的账号上这些记录会以「暂不支持投递」出现。")
+	}
+	if scan.counts[KindShareQuark] > 0 {
+		warnings = append(warnings, "其中夸克分享链需要目标账号是**夸克账号**（并且它的 Cookie 还有效）才能自动转存"+
+			"；推到别的网盘账号上这些记录会以「暂不支持投递」出现。")
+	}
+	if scan.counts[KindShareGuangya] > 0 {
+		warnings = append(warnings, "其中光鸭分享链需要目标账号是**光鸭账号**才能自动转存"+
+			"（光鸭用的是它自己的登录令牌，别的网盘账号转不了）。")
 	}
 	if scan.discarded > 0 {
 		warnings = append(warnings, "另有 "+strconv.Itoa(scan.discarded)+

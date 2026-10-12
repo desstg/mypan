@@ -97,7 +97,12 @@ func (d *Driver) OfflineDownloadCapabilities() driver.OfflineDownloadCapabilitie
 		SupportsURLs:      true,
 		SupportsBatchURLs: true,
 		SupportsTorrent:   false,
-		URLSchemes:        []string{"http", "https", "ftp", "thunder", "magnet"},
+		// ⚠️ ed2k 是 2026-10-12 真机补上的：此前这里没有它，于是「搜索转存」页
+		// 对光鸭账号把 ed2k 判成「网盘与内置下载器都不支持」，而实际打过去
+		// 光鸭收下了（resolve 认出 emuleResInfo、create_task 返回了 taskId）。
+		// 声明少了 = 功能被自己的白名单挡在门外，比报错还难查 ——
+		// 用户看到的是「不支持」，根本不会想到去查驱动声明。
+		URLSchemes:        []string{"http", "https", "ftp", "thunder", "magnet", "ed2k"},
 		RootTargetAllowed: true,
 		RemoteDelete:      true,
 	}

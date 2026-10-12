@@ -64,6 +64,18 @@ const (
 	OfflineStatusFailed   = "failed"
 )
 
+// WebLoginChecker 是可选扩展：报告「需要网页登录态的那部分能力」当下能不能用。
+//
+// 出现的理由：有些驱动的原生离线通道**声明**支持某个 scheme，而实现那条路走的是
+// 网页接口、需要一份与开放平台令牌不同的登录态。不报告的话，公共层只看 scheme
+// 白名单就会把任务派过去，然后必然 401 —— 用户看到的是「网盘不支持」，
+// 而真实原因是「这个账号没配那份额外凭据」。
+//
+// 实现方必须**廉价且无副作用**（只看本地配置）。不实现一律视为「不需要」。
+type WebLoginChecker interface {
+	WebLoginReady() bool
+}
+
 // OfflineDownloadProvider 声明驱动支持的原生离线下载能力。
 type OfflineDownloadProvider interface {
 	OfflineDownloadCapabilities() OfflineDownloadCapabilities

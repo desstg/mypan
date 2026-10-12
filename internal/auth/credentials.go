@@ -14,6 +14,8 @@ const (
 	KeyCookie        = "cookie"
 	KeyTokenExpires  = "token_expires"
 	KeyCookieExpires = "cookie_expires"
+	// KeyWebToken 是网页版登录态（见 domain.AuthCredentials.WebToken 的说明）。
+	KeyWebToken = "web_token"
 )
 
 var credentialKeys = []string{
@@ -22,6 +24,7 @@ var credentialKeys = []string{
 	KeyCookie,
 	KeyTokenExpires,
 	KeyCookieExpires,
+	KeyWebToken,
 }
 
 // Fields 是从账号 config JSON 提取出的认证字段（落库到 account_auth_states）。
@@ -31,6 +34,7 @@ type Fields struct {
 	Cookie        string
 	TokenExpires  time.Time
 	CookieExpires time.Time
+	WebToken      string
 }
 
 // SplitConfig 把 config JSON 拆成静态配置与认证字段。
@@ -65,6 +69,9 @@ func MergeConfig(static string, st *domain.AuthState) string {
 	if st.Cookie != "" {
 		m[KeyCookie] = st.Cookie
 	}
+	if st.WebToken != "" {
+		m[KeyWebToken] = st.WebToken
+	}
 	if !st.TokenExpires.IsZero() {
 		m[KeyTokenExpires] = st.TokenExpires.UTC().Format(time.RFC3339)
 	}
@@ -93,6 +100,9 @@ func CoalesceFields(incoming Fields, existing *domain.AuthState) Fields {
 	if out.Cookie == "" {
 		out.Cookie = existing.Cookie
 	}
+	if out.WebToken == "" {
+		out.WebToken = existing.WebToken
+	}
 	if out.TokenExpires.IsZero() {
 		out.TokenExpires = existing.TokenExpires
 	}
@@ -116,6 +126,9 @@ func ComposeConfig(static string, fields Fields) string {
 	}
 	if fields.Cookie != "" {
 		m[KeyCookie] = fields.Cookie
+	}
+	if fields.WebToken != "" {
+		m[KeyWebToken] = fields.WebToken
 	}
 	if !fields.TokenExpires.IsZero() {
 		m[KeyTokenExpires] = fields.TokenExpires.UTC().Format(time.RFC3339)
@@ -145,6 +158,9 @@ func ApplyUpdate(existing *domain.AuthState, fields Fields) *domain.AuthState {
 	if fields.Cookie != "" {
 		out.Cookie = fields.Cookie
 	}
+	if fields.WebToken != "" {
+		out.WebToken = fields.WebToken
+	}
 	if !fields.TokenExpires.IsZero() {
 		out.TokenExpires = fields.TokenExpires
 	}
@@ -157,7 +173,7 @@ func ApplyUpdate(existing *domain.AuthState, fields Fields) *domain.AuthState {
 // CredentialsChanged 比较已提交的非空认证字段，空值视为保留原状态。
 func CredentialsChanged(existing *domain.AuthState, fields Fields) bool {
 	if existing == nil {
-		return fields.AccessToken != "" || fields.RefreshToken != "" || fields.Cookie != ""
+		return fields.AccessToken != "" || fields.RefreshToken != "" || fields.Cookie != "" || fields.WebToken != ""
 	}
 	if fields.AccessToken != "" && fields.AccessToken != existing.AccessToken {
 		return true
@@ -168,6 +184,9 @@ func CredentialsChanged(existing *domain.AuthState, fields Fields) bool {
 	if fields.Cookie != "" && fields.Cookie != existing.Cookie {
 		return true
 	}
+	if fields.WebToken != "" && fields.WebToken != existing.WebToken {
+		return true
+	}
 	return false
 }
 
@@ -176,7 +195,7 @@ func HasCredentials(st *domain.AuthState) bool {
 	if st == nil {
 		return false
 	}
-	return st.AccessToken != "" || st.RefreshToken != "" || st.Cookie != ""
+	return st.AccessToken != "" || st.RefreshToken != "" || st.Cookie != "" || st.WebToken != ""
 }
 
 func parseConfigMap(configJSON string) (map[string]any, error) {
@@ -218,6 +237,7 @@ func extractFields(m map[string]any) Fields {
 	f.AccessToken = stringField(m, KeyAccessToken)
 	f.RefreshToken = stringField(m, KeyRefreshToken)
 	f.Cookie = stringField(m, KeyCookie)
+	f.WebToken = stringField(m, KeyWebToken)
 	f.TokenExpires = timeField(m, KeyTokenExpires)
 	f.CookieExpires = timeField(m, KeyCookieExpires)
 	return f

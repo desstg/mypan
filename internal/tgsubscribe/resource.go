@@ -18,20 +18,21 @@ import (
 // 再实现一个 Supports(kind) 返回 true 的 Deliverer。匹配、去重、派发、历史
 // 这一整条链路都不用改。
 const (
-	KindMagnet     = telegram.ResourceKindMagnet
-	KindED2K       = telegram.ResourceKindED2K
-	KindShare115   = telegram.ResourceKindShare115
-	KindShareQuark = telegram.ResourceKindShareQuark
-	KindHTTP       = telegram.ResourceKindHTTP
+	KindMagnet       = telegram.ResourceKindMagnet
+	KindED2K         = telegram.ResourceKindED2K
+	KindShare115     = telegram.ResourceKindShare115
+	KindShareQuark   = telegram.ResourceKindShareQuark
+	KindShare123     = telegram.ResourceKindShare123
+	KindShareGuangya = telegram.ResourceKindShareGuangya
+	KindHTTP         = telegram.ResourceKindHTTP
 
 	// 以下这些**只识别、不投递**（没有对应的 Deliverer）。详见 telegram/share.go
-	// 的 shareSpecs：加它们的目的是「看得见」，实测频道里夸克/百度/迅雷的分享链
-	// 占了大部分，过去连记录都不产生。
+	// 的 shareSpecs：加它们的目的是「看得见」，实测频道里百度/迅雷/阿里的分享链
+	// 占了不少，过去连记录都不产生。
 	KindShareAliyun   = telegram.ResourceKindShareAliyun
 	KindShareBaidu    = telegram.ResourceKindShareBaidu
 	KindShareXunlei   = telegram.ResourceKindShareXunlei
 	KindShareUC       = telegram.ResourceKindShareUC
-	KindShare123      = telegram.ResourceKindShare123
 	KindShare189      = telegram.ResourceKindShare189
 	KindSharePikPak   = telegram.ResourceKindSharePikPak
 	KindShareLanzou   = telegram.ResourceKindShareLanzou
@@ -233,8 +234,12 @@ func labelKind(kind string) string {
 		return "磁力链接"
 	case KindShare115:
 		return "115 分享"
+	case KindShare123:
+		return "123 网盘分享"
 	case KindShareQuark:
 		return "夸克分享"
+	case KindShareGuangya:
+		return "光鸭分享"
 	case KindED2K:
 		return "ed2k 链接"
 	case KindHTTP:
@@ -250,8 +255,6 @@ func labelKind(kind string) string {
 		return "迅雷云盘分享"
 	case KindShareUC:
 		return "UC 网盘分享"
-	case KindShare123:
-		return "123 网盘分享"
 	case KindShare189:
 		return "天翼云盘分享"
 	case KindSharePikPak:

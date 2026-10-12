@@ -44,6 +44,7 @@ import (
 	"litepan/internal/offlinedownload"
 	"litepan/internal/playback"
 	"litepan/internal/quarktv"
+	"litepan/internal/searchtransfer"
 	"litepan/internal/settings"
 	"litepan/internal/share/dav"
 	"litepan/internal/spacecleanup"
@@ -93,6 +94,7 @@ type Deps struct {
 	SpaceCleanup      *spacecleanup.Service
 	CoverExtract      *coverextract.Service
 	TGSubscribe       *tgsubscribe.Service
+	SearchTransfer    *searchtransfer.Service
 	JAV               *jav.Service
 	DataDir           string
 	StrmDir           string
@@ -136,6 +138,7 @@ type Handler struct {
 	spaceCleanup      *spacecleanup.Service
 	coverExtract      *coverextract.Service
 	tgSubscribe       *tgsubscribe.Service
+	searchTransfer    *searchtransfer.Service
 	jav               *jav.Service
 	dataDir           string
 	strmDir           string
@@ -187,6 +190,7 @@ func NewRouter(d Deps) http.Handler {
 		spaceCleanup:      d.SpaceCleanup,
 		coverExtract:      d.CoverExtract,
 		tgSubscribe:       d.TGSubscribe,
+		searchTransfer:    d.SearchTransfer,
 		jav:               d.JAV,
 		dataDir:           d.DataDir,
 		strmDir:           d.StrmDir,
@@ -672,6 +676,21 @@ func NewRouter(d Deps) http.Handler {
 				// 状态
 				r.Get("/stats", h.getTGSubscribeStats)
 				r.Get("/provider-summary", h.getTGProviderSummary)
+			})
+
+			// 搜索转存：关键词搜盘搜 + 把链接存进指定网盘。
+			// 磁力/ed2k/http 等的提交走既有的 /files/offline-download/urls，
+			// 这里只多两件离线下载没有的事：站点探活与 115 分享链的手工转存。
+			r.Route("/search-transfer", func(r chi.Router) {
+				r.Get("/site", h.searchTransferSite)
+				r.Post("/search", h.searchTransferSearch)
+				r.Get("/save-capabilities", h.searchTransferCapabilities)
+				r.Post("/save-share", h.saveShareToAccount)
+				// 「转存」tab 的批量提交：服务端按行判类型分派并逐条落记录。
+				r.Post("/save-links", h.searchTransferSaveLinks)
+				// 转存记录（搜索页与转存页共用一张表）。
+				r.Get("/records", h.transferRecords)
+				r.Post("/records/delete", h.deleteTransferRecords)
 			})
 
 			r.Post("/oauth/start", h.startOAuth)

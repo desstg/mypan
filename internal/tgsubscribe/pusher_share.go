@@ -11,11 +11,11 @@ import (
 	"litepan/internal/driver"
 )
 
-// ShareSaveDeliverer 把 115 分享链转存进订阅的目标目录。
+// ShareSaveDeliverer 把分享链（115 / 123 / 夸克）转存进订阅的目标目录。
 //
 // 与 Pusher（离线下载双通道）并列的第二种投递方式。它必须单独存在的理由：
-// 网盘的离线下载接口不收分享链，能收的只有网页版的 share/receive，
-// 而那是另一套接口、另一份凭据（见 drivers/115_Open 的 Addition.Cookie）。
+// 网盘的离线下载接口不收分享链，能收的只有各家网页版/客户端的分享接口，
+// 而那是另一套接口、另一份凭据（见各驱动的 Addition）。
 //
 // ⚠️ 它**不产生离线任务**，DeliverResult.TaskID 永远是空的。这不只是个字段差异：
 // 订阅进度回写是靠离线任务完成事件驱动的，所以 pushRecord 对「无 TaskID 的成功投递」
@@ -23,8 +23,12 @@ import (
 type ShareSaveDeliverer struct{ svc *Service }
 
 func (p *ShareSaveDeliverer) Supports(kind string) bool {
-	// 夸克分享的转存接口没做，它仍然落在「只识别不投递」那一档。
-	return kind == KindShare115
+	// 四种分享链都走这里。**但「这个驱动能不能转这种分享」是另一回事** ——
+	// 那由驱动自己报的 ShareKinds() 决定，见 Deliver / Deliverability 里的
+	// shareKindMatches 闸门：把夸克分享推给 115 账号必须被明确挡住，
+	// 否则会拿夸克的分享码去打 115 的接口，回来一句与真实原因无关的错误。
+	return kind == KindShare115 || kind == KindShare123 ||
+		kind == KindShareQuark || kind == KindShareGuangya
 }
 
 // Deliver 执行一次分享转存。
@@ -61,6 +65,15 @@ func (p *ShareSaveDeliverer) Deliver(ctx context.Context, req DeliverRequest) (D
 		if err != nil {
 			return domain.Errorf(domain.CodeNotImplement, "当前网盘驱动不支持分享转存")
 		}
+		// ⚠️ 驱动只认某几种分享链时要在这里挡住别的 —— 否则夸克的分享码会被
+		// 当成 115 的去打接口，回来一句与真实原因无关的驱动错误。
+		// 与 searchtransfer.SaveShare 里的同一道闸**同源**（那边一直有，这边早先漏了）。
+		if reporter, ok := receiver.(driver.ShareKindReporter); ok {
+			if !shareKindMatches(reporter.ShareKinds(), req.Resource.Kind) {
+				return domain.Errorf(domain.CodeValidation,
+					"当前网盘不支持 %s 转存", labelKind(req.Resource.Kind))
+			}
+		}
 		got, err := receiver.ReceiveShare(ctx, driver.ShareReceiveRequest{
 			ShareCode:   share.code,
 			ReceiveCode: share.password,
@@ -88,15 +101,18 @@ func (p *ShareSaveDeliverer) Deliver(ctx context.Context, req DeliverRequest) (D
 	}, nil
 }
 
-// Deliverability 报告这个账号现在能不能转存 115 分享。
+// Deliverability 报告这个账号现在能不能转存**这种**分享链。
 //
-// 与离线通道的区别：那边问的是「网盘支不支持这种 scheme」，这边问的是
-// 「这个账号配没配网页 Cookie」—— 只有投递器自己知道答案。
+// 两件事一起判：
+//   - 驱动认不认这一种分享（ShareKinds）—— 夸克分享推给 115 账号必须在这里
+//     就被挡住，而不是等投递时拿夸克分享码去打 115 的接口；
+//   - 这个账号当下能不能转（ShareReceiveCapabilities，115 要网页 Cookie、123 要
+//     网页账号密码、夸克要 Cookie）—— 只有驱动自己知道答案。
 //
 // 探测失败一律视为可投递（ok=true）：把账号临时退避、驱动异常误判成
 // 「不支持分享转存」，会让记录永久停在 unsupported 且不会自己复活。
 // 这条与 partitionByDeliverable 的保守规则同源。
-func (p *ShareSaveDeliverer) Deliverability(ctx context.Context, accountID int64, _ string) (string, bool) {
+func (p *ShareSaveDeliverer) Deliverability(ctx context.Context, accountID int64, kind string) (string, bool) {
 	if p == nil || p.svc == nil || p.svc.exec == nil {
 		return "", true
 	}
@@ -108,6 +124,13 @@ func (p *ShareSaveDeliverer) Deliverability(ctx context.Context, accountID int64
 			reason = "当前网盘驱动不支持分享转存"
 			probed = true
 			return nil
+		}
+		if reporter, ok := receiver.(driver.ShareKindReporter); ok {
+			probed = true
+			if !shareKindMatches(reporter.ShareKinds(), kind) {
+				reason = "当前网盘不支持" + labelKind(kind) + "转存"
+				return nil
+			}
 		}
 		caps := receiver.ShareReceiveCapabilities()
 		probed = true
@@ -126,6 +149,36 @@ func (p *ShareSaveDeliverer) Deliverability(ctx context.Context, accountID int64
 		return "", true
 	}
 	return reason, false
+}
+
+// shareKindMatches 报告驱动报的 ShareKinds() 认不认这一种资源类型。
+//
+// ⚠️ 这是 tgsubscribe 的 Kind* 与 driver.ShareKind* 两套词表之间的**唯一**转换点
+// （与 searchtransfer 的 kindLabelOfShare 互为对偶，那边是搜索转存页那一侧）。
+// 加一种分享链时两处都要动。
+//
+// 驱动**没实现** ShareKindReporter 时按「只认 115」处理 —— 那是这个接口出现之前
+// 唯一存在的一种（见 internal/driver/share.go 的接口说明），调用方自己判 ok。
+func shareKindMatches(reported, kind string) bool {
+	want := ""
+	switch kind {
+	case KindShare115:
+		want = driver.ShareKind115
+	case KindShare123:
+		want = driver.ShareKind123
+	case KindShareQuark:
+		want = driver.ShareKindQuark
+	case KindShareGuangya:
+		want = driver.ShareKindGuangya
+	default:
+		return false
+	}
+	for _, v := range strings.Split(reported, ",") {
+		if strings.EqualFold(strings.TrimSpace(v), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // shareRef 是一条分享链里真正有用的两样东西。

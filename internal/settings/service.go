@@ -51,6 +51,16 @@ func (s *Service) raw(key string) (string, bool) {
 	return v, ok
 }
 
+// Stored 报告这个键在库里**有没有被写过**，返回写的那个值。
+//
+// 与 String / StringAllowEmpty 的区别：那两个都会在缺失时回落注册表里的 Default，
+// 于是「从没写过」和「写了个空串」分不出来。有些键的默认值会随版本变，
+// 而旧默认值一旦被当成用户意图就会一直粘着（见 tgsubscribe.UpdateConfig 里
+// 搜索类型那一段的说明）—— 那种判断需要这里的原始事实。
+func (s *Service) Stored(key string) (string, bool) {
+	return s.raw(key)
+}
+
 // String 返回字符串设置，缺失/空回落默认，并应用 normalize（如有）。
 func (s *Service) String(key string) string {
 	sp := s.byKey[key]

@@ -11,7 +11,7 @@ type authStateRepo struct{ db *DB }
 
 func (r *authStateRepo) Get(ctx context.Context, accountID int64) (*domain.AuthState, error) {
 	row := r.db.read.QueryRowContext(ctx,
-		`SELECT account_id,status,access_token,refresh_token,token_expires,cookie,cookie_expires,
+		`SELECT account_id,status,access_token,refresh_token,token_expires,cookie,cookie_expires,web_token,
 		        active_attempts,passive_attempts,last_error,last_failure_kind,next_retry_at,last_refresh_at,last_notified_at
 		 FROM account_auth_states WHERE account_id=?`, accountID)
 
@@ -26,7 +26,7 @@ func (r *authStateRepo) Get(ctx context.Context, accountID int64) (*domain.AuthS
 		failureKind  sql.NullString
 	)
 	err := row.Scan(&s.AccountID, &status, &s.AccessToken, &s.RefreshToken, &tokenExp,
-		&s.Cookie, &cookieExp, &s.ActiveAttempts, &s.PassiveAttempts, &s.LastError, &failureKind,
+		&s.Cookie, &cookieExp, &s.WebToken, &s.ActiveAttempts, &s.PassiveAttempts, &s.LastError, &failureKind,
 		&nextRetry, &lastRefresh, &lastNotified)
 	if err != nil {
 		return nil, wrapDB(err)
@@ -48,18 +48,19 @@ func (r *authStateRepo) Upsert(ctx context.Context, s *domain.AuthState) error {
 	}
 	_, err := r.db.write.ExecContext(ctx,
 		`INSERT INTO account_auth_states
-		   (account_id,status,access_token,refresh_token,token_expires,cookie,cookie_expires,
+		   (account_id,status,access_token,refresh_token,token_expires,cookie,cookie_expires,web_token,
 		    active_attempts,passive_attempts,last_error,last_failure_kind,next_retry_at,last_refresh_at,last_notified_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(account_id) DO UPDATE SET
 		    status=excluded.status, access_token=excluded.access_token, refresh_token=excluded.refresh_token,
 		    token_expires=excluded.token_expires, cookie=excluded.cookie, cookie_expires=excluded.cookie_expires,
+		    web_token=excluded.web_token,
 		    active_attempts=excluded.active_attempts, passive_attempts=excluded.passive_attempts,
 		    last_error=excluded.last_error, last_failure_kind=excluded.last_failure_kind,
 		    next_retry_at=excluded.next_retry_at,
 		    last_refresh_at=excluded.last_refresh_at, last_notified_at=excluded.last_notified_at`,
 		s.AccountID, string(status), s.AccessToken, s.RefreshToken, tsValue(s.TokenExpires),
-		s.Cookie, tsValue(s.CookieExpires), s.ActiveAttempts, s.PassiveAttempts, s.LastError,
+		s.Cookie, tsValue(s.CookieExpires), s.WebToken, s.ActiveAttempts, s.PassiveAttempts, s.LastError,
 		string(s.LastFailureKind), tsValue(s.NextRetryAt), tsValue(s.LastRefreshAt), tsValue(s.LastNotifiedAt))
 	return wrapDB(err)
 }

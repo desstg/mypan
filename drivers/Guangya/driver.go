@@ -325,4 +325,7 @@ var (
 	_ driver.AuthPersistConsumer      = (*Driver)(nil)
 	_ driver.ConnectionErrorExplainer = (*Driver)(nil)
 	_ driver.RequestIntervalConsumer  = (*Driver)(nil)
+	_ driver.ShareReceiver            = (*Driver)(nil)
+	_ driver.ShareKindReporter        = (*Driver)(nil)
+	_ driver.ShareMetaPeeker          = (*Driver)(nil)
 )

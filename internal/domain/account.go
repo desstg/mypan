@@ -36,13 +36,15 @@ const (
 
 // AuthState 是账号的认证运行态，独立于静态配置存储。
 type AuthState struct {
-	AccountID       int64
-	Status          AuthStatus
-	AccessToken     string
-	RefreshToken    string
-	TokenExpires    time.Time
-	Cookie          string
-	CookieExpires   time.Time
+	AccountID     int64
+	Status        AuthStatus
+	AccessToken   string
+	RefreshToken  string
+	TokenExpires  time.Time
+	Cookie        string
+	CookieExpires time.Time
+	// WebToken 是网页版登录态（见 AuthCredentials.WebToken 的说明）。
+	WebToken        string
 	ActiveAttempts  int
 	PassiveAttempts int
 	LastError       string
@@ -56,9 +58,14 @@ type AuthState struct {
 type AuthCredentials struct {
 	AccessToken   string
 	RefreshToken  string
-	Cookie        string
 	TokenExpires  time.Time
+	Cookie        string
 	CookieExpires time.Time
+	// WebToken 是**网页版**登录态。它的存在理由与 Cookie 一模一样
+	// （分享转存 / 离线这类操作只有网页接口能做，开放平台令牌不认），
+	// 只是有些网盘传的是 Cookie、有些传的是 Bearer 令牌 —— 123 属于后者，
+	// 而且它在 123 上的作用更大：连磁力离线下载都只有网页接口收。
+	WebToken string
 }
 
 // CredentialsFromState 从 AuthState 转为驱动注入结构。
@@ -72,6 +79,7 @@ func CredentialsFromState(st *AuthState) AuthCredentials {
 		Cookie:        st.Cookie,
 		TokenExpires:  st.TokenExpires,
 		CookieExpires: st.CookieExpires,
+		WebToken:      st.WebToken,
 	}
 }
 
@@ -86,6 +94,9 @@ func MergeAuthCredentials(existing *AuthState, creds AuthCredentials) *AuthState
 	}
 	if creds.RefreshToken != "" {
 		out.RefreshToken = creds.RefreshToken
+	}
+	if creds.WebToken != "" {
+		out.WebToken = creds.WebToken
 	}
 	if creds.Cookie != "" {
 		out.Cookie = creds.Cookie

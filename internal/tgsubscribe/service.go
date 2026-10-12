@@ -47,6 +47,10 @@ type Options struct {
 	// Exec 用于分享转存这类「直接调驱动」的投递方式；为空时分享转存不可用
 	// （分享链会落 unsupported，不会去重试）。
 	Exec *driverexec.Executor
+	// Accounts 用来把「这条订阅的推送目标账号」解析成盘搜的网盘类型，
+	// 从而决定**网盘搜索该搜哪些类型**（见 effectiveCloudTypes）。
+	// 为空时回落到设置里那份全局列表。
+	Accounts domain.AccountRepository
 }
 
 // capabilityProber 是「探测某个账号的离线下载能力」这一步的最小依赖。
@@ -66,7 +70,10 @@ type Service struct {
 	records  domain.TGMatchRecordRepository
 	offline  *offlinedownload.Service
 	// prober 默认就是 offline；只有测试会把它换成桩。
-	prober   capabilityProber
+	prober capabilityProber
+	// accounts 用来把推送目标账号解析成盘搜的网盘类型
+	// （网盘搜索要按「这条订阅存到哪个网盘」决定搜哪些类型）。
+	accounts domain.AccountRepository
 	folders  *filesvc.Service
 	media    *mediaorganize.Service
 	settings *settings.Service
@@ -178,6 +185,7 @@ func New(opts Options) *Service {
 		records:      opts.Records,
 		offline:      opts.Offline,
 		prober:       opts.Offline,
+		accounts:     opts.Accounts,
 		folders:      opts.Folders,
 		media:        opts.Media,
 		settings:     opts.Settings,

@@ -24,9 +24,10 @@ type shareSpec struct {
 	pathRe *regexp.Regexp
 	// deliverable 标记这一种**当前版本能投递**。
 	//
-	// 只有 115 是真的能转存的（ShareSaveDeliverer）。其余一律 false：
-	// 投递链会自动把它们标成 unsupported（delivererFor 返回 nil），
-	// 不误推、不报错、界面上看得见。这个字段只用于自描述与排查。
+	// 115 / 123 / 夸克 是真的能转存的（都走 ShareSaveDeliverer，各自要一份
+	// 网盘侧的凭据）；其余一律 false：投递链会自动把它们标成 unsupported
+	// （delivererFor 返回 nil），不误推、不报错、界面上看得见。
+	// 这个字段只用于自描述与排查。
 	deliverable bool
 }
 
@@ -54,9 +55,18 @@ var onedrivePathRe = regexp.MustCompile(
 // megaPathRe 匹配 MEGA 新版分享：`/file/<id>`（#<key> 不在 Path 里，单独处理）。
 var megaPathRe = regexp.MustCompile(`^/(?:file|folder)/([A-Za-z0-9_-]{6,16})$`)
 
+// shareGuangyaPathRe 匹配光鸭云盘分享页：`https://www.guangyapan.com/s/<数字id>_<token>`。
+//
+// ⚠️ **不能落到 defaultSharePathRe 上**：光鸭的分享码是「数字 id + 下划线 + 一串 token」，
+// 实测长度 33 位（如 `1950788535291969602_aeWYeSwV3ZOZlzEy`），
+// 而默认那条把分享码卡在 2~64 位且**不带捕获组的语义差别** —— 这里显式给出，
+// 免得将来默认规则一收紧，光鸭就静默地全部认不出来了。
+// 与 internal/searchtransfer 的 shareGuangyaPathRe 同源，改一处要核对另一处。
+var shareGuangyaPathRe = regexp.MustCompile(`^/s/([A-Za-z0-9_-]{2,128})$`)
+
 // shareSpecs 是**全部**认得的分享域名。
 //
-// ⚠️ 只有 115 有投递器（转存）。夸克及以下十一种当前版本**只识别、不投递** ——
+// ⚠️ 115 / 123 / 夸克 三种有投递器（转存）；其余十种当前版本**只识别、不投递** ——
 // 它们照样产生匹配记录，状态落在 unsupported 上，在匹配历史里能看到
 // 「已识别到 X，当前版本只记录、不支持投递」。
 //
@@ -106,10 +116,21 @@ var shareSpecs = []shareSpec{
 		prefix: "uc:",
 	},
 	{
+		// 123 网盘。路径与 115 同形。
 		kind:   ResourceKindShare123,
 		hosts:  []string{"123pan.com", "123684.com", "123865.com", "123912.com", "123pan.cn"},
 		canon:  "https://www.123pan.com",
 		prefix: "123:",
+	},
+	{
+		// 光鸭云盘。⚠️ 分享码是 `<数字id>_<token>`，比 115 那套宽 ——
+		// 用专门的 shareGuangyaPathRe，别落到 defaultSharePathRe 上（那个只认
+		// 纯 [A-Za-z0-9_-]{2,64}，光鸭的码更长，会被拒）。
+		kind:   ResourceKindShareGuangya,
+		hosts:  []string{"guangyapan.com"},
+		canon:  "https://www.guangyapan.com",
+		prefix: "guangya:",
+		pathRe: shareGuangyaPathRe,
 	},
 	{
 		kind:   ResourceKindShare189,

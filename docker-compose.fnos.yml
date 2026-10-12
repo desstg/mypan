@@ -1,7 +1,7 @@
 services:
-  litepan:
+  mypan:
     image: desstg/mypan:latest
-    container_name: litepan
+    container_name: mypan
     environment:
       - TZ=Asia/Shanghai
     volumes:

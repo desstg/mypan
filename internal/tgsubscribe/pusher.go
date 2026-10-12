@@ -348,13 +348,45 @@ func chooseProvider(caps offlinedownload.Capabilities, pushProvider, kind string
 		return offlinedownload.ProviderBuiltin, "", nil
 	}
 
-	if caps.SupportsURLs && containsAnyFold(caps.URLSchemes, schemes) {
+	// 判据全在 offlinedownload.Capabilities 上（只此一份）。
+	// 这里要按 scheme 逐条问：一个 kind 可能对应多个 scheme（http 那档是 http+https）。
+	if anySchemeUsable(caps, schemes, true) {
 		return offlinedownload.ProviderNative, "", nil
 	}
-	if caps.BuiltinEnabled && containsAnyFold(caps.BuiltinURLSchemes, schemes) {
-		return offlinedownload.ProviderBuiltin, "网盘不支持" + label + "，已自动降级到内置下载器", nil
+	if anySchemeUsable(caps, schemes, false) {
+		reason := "网盘不支持" + label + "，已自动降级到内置下载器"
+		if anySchemeDeclared(caps, schemes) {
+			// 网盘**声明**支持，但那条路要一份额外的网页登录态而这个账号没配 ——
+			// 提示要说清是缺凭据，不是「网盘不支持」，否则用户不会想到去补配置。
+			reason = "该账号未配置网页登录凭据，无法用网盘原生通道，已自动降级到内置下载器"
+		}
+		return offlinedownload.ProviderBuiltin, reason, nil
 	}
 	return "", "", domain.Errorf(domain.CodeNotImplement, "该网盘与内置下载器都不支持%s", label)
+}
+
+// anySchemeUsable 报告 schemes 里有没有任意一条在网盘原生（native=true）
+// 或内置下载器（native=false）上可用。
+func anySchemeUsable(caps offlinedownload.Capabilities, schemes []string, native bool) bool {
+	for _, scheme := range schemes {
+		if native && caps.NativeSchemeUsable(scheme) {
+			return true
+		}
+		if !native && caps.BuiltinSchemeUsable(scheme) {
+			return true
+		}
+	}
+	return false
+}
+
+// anySchemeDeclared 报告 schemes 里有没有任意一条被网盘**声明**支持（不看凭据）。
+func anySchemeDeclared(caps offlinedownload.Capabilities, schemes []string) bool {
+	for _, scheme := range schemes {
+		if caps.SchemeDeclared(scheme) {
+			return true
+		}
+	}
+	return false
 }
 
 // deliverabilityFor 报告一种资源类型在目标账号上是否真的投得出去。

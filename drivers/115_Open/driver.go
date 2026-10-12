@@ -266,6 +266,7 @@ var (
 	_ driver.OfflineTaskDeleter       = (*Driver)(nil)
 	_ driver.OfflineTorrentDownloader = (*Driver)(nil)
 	_ driver.ShareReceiver            = (*Driver)(nil)
+	_ driver.ShareKindReporter        = (*Driver)(nil)
 	_ driver.ShareMetaPeeker          = (*Driver)(nil)
 	_ driver.QRLoginProvider          = (*Driver)(nil)
 )

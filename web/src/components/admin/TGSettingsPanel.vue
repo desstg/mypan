@@ -55,7 +55,10 @@ const draft = reactive<TGConfigInput>({
   backfill_pages: 1,
   web_search_enabled: true,
   web_search_base_url: "",
-  web_search_cloud_types: "magnet,115",
+  // 留空 = 每条订阅按它推送到的那个网盘自动决定搜什么（后端 effectiveCloudTypes）。
+  // 不给默认值 —— 给一个「magnet,115」会让指向夸克/光鸭的订阅被追加一个它存不了的类型，
+  // 搜出来一屏灰按钮，而用户从没主动填过这一栏。
+  web_search_cloud_types: "",
   web_search_token: "",
   web_search_use_proxy: false,
   web_search_auto: true,
@@ -63,6 +66,21 @@ const draft = reactive<TGConfigInput>({
 });
 
 const pickerOpen = ref(false);
+
+/**
+ * 「地址是内置默认」—— 后端报的是**生效值**，用户没填过时它是内置盘搜的地址。
+ * 用它决定要不要在输入框旁标一个「内置」角标，免得用户以为「我没填过怎么冒出来个地址」。
+ *
+ * ⚠️ 只在 load 时按后端那个布尔赋值，**不跟着 draft 实时算** —— 用户一改输入框就
+ * 变成显式值，角标该消失，但那属于「已修改」而不是「还是内置」，语义不同。
+ */
+const baseUrlIsBuiltin = ref(false);
+
+/** 用户一改地址，角标就不再是「内置」—— 从此以用户的为准。 */
+function onBaseUrlInput(value: string | number | null) {
+  draft.web_search_base_url = String(value ?? "");
+  baseUrlIsBuiltin.value = false;
+}
 
 /** 脏判断只看用户能编辑、且会回传的字段。 */
 function snapshot() {
@@ -120,6 +138,7 @@ function applyConfig(cfg: TGConfig) {
   // 读回来的是**生效值**（后端把留空回落成了默认），所以这里直接赋值 ——
   // 不用 `|| 默认` 兜底，否则用户清空地址后就再也看不出回落到了哪里。
   draft.web_search_base_url = cfg.web_search_base_url;
+  baseUrlIsBuiltin.value = Boolean(cfg.web_search_base_url_is_default);
   draft.web_search_cloud_types = cfg.web_search_cloud_types;
   draft.web_search_token = cfg.web_search_token;
   draft.web_search_use_proxy = cfg.web_search_use_proxy;
@@ -378,19 +397,21 @@ defineExpose(
           <template #info>
             <SettingsRowLabel label="搜索服务地址" help-title="搜索服务地址">
               <p>
-                <strong>填哪个：</strong>自建盘搜的地址（<b>推荐</b>），或留空用内置默认。
+                <strong>留空 = 用内置盘搜。</strong>装了 compose 里的
+                <code>pansou</code> 容器时，这里会显示它的地址并标「内置」；
+                <b>「影视订阅 → 搜网盘」与「搜索转存」页共用这一项</b>。
               </p>
               <p>
-                <strong>怎么填：</strong>只填到端口，<b>不带</b> <code>/api/search</code>。
-                比如自建在 <code>192.168.31.4</code> 的 <code>805</code> 端口，
-                就填 <code>http://192.168.31.4:805</code>。局域网地址不要写
-                <code>127.0.0.1</code>。
+                <strong>用自己的盘搜：</strong>只填到端口，<b>不带</b>
+                <code>/api/search</code>。比如自建在 <code>192.168.31.4</code> 的
+                <code>805</code> 端口，就填 <code>http://192.168.31.4:805</code>。
+                局域网地址不要写 <code>127.0.0.1</code>。<b>填了就用你的。</b>
               </p>
               <p>
-                <strong>为什么建议自建：</strong>内置默认是公开演示站
-                （<code>so.252035.xyz</code>），pansou 作者在 issue #46 里自己说过
-                「被薅到摆烂、返回 mock 数据，效果可忽略」。自建只需 Docker 一条命令，
-                <b>不需要 Telegram 的 api_id/api_hash</b>。
+                <strong>没装内置盘搜、这里也留空：</strong>搜索直接用不了，
+                「搜网盘」会明确报错告诉你先装或先填 ——
+                <b>不会</b>拿着一个连不上的默认地址去打。
+                （老版本那个公开演示站 <code>so.252035.xyz</code> 已实测连不上，已经删掉。）
               </p>
               <p>
                 <strong>两个坑：</strong>① 盘搜要能连上 t.me 才有 TG 频道那一半结果，
@@ -401,10 +422,16 @@ defineExpose(
             </SettingsRowLabel>
           </template>
           <template #control>
-            <AppInput
-              v-model="draft.web_search_base_url"
-              placeholder="http://192.168.31.4:805"
-            />
+            <div class="search-base-control">
+              <AppInput
+                :model-value="draft.web_search_base_url"
+                placeholder="http://192.168.31.4:805"
+                @update:model-value="onBaseUrlInput"
+              />
+              <!-- 用户没填过时后端回的是内置默认地址，这里标一句，
+                   免得用户以为「我没填过，怎么冒出来个地址」。 -->
+              <span v-if="baseUrlIsBuiltin" class="search-base-badge">内置</span>
+            </div>
           </template>
         </SettingsRow>
 
@@ -412,22 +439,26 @@ defineExpose(
           <template #info>
             <SettingsRowLabel label="搜索的资源类型" help-title="资源类型">
               <p>
-                逗号分隔。<strong>建议保留默认的 <code>magnet,115</code></strong> ——
-                这个搜索站的国产内容里磁力占比只有 0%~4%，只填 <code>magnet</code>
-                等于把绝大多数结果扔掉。
+                <strong>留空即可</strong>：每条订阅会自动按「它推送到的那个网盘」决定搜什么 ——
+                磁力 + 那个网盘自己的分享链（115 / 123 / 夸克 / 光鸭 各一类）。
+                这样搜出来的结果才有对应得上账号的存法。
               </p>
               <p>
-                这两类的区别：磁力走离线下载通道；115 分享走转存，
-                需要目标账号配好「网页 Cookie」。
+                填了则以这里的为准（逗号分隔）。<strong>建议至少留 <code>magnet</code></strong> ——
+                这个搜索站的国产内容里磁力占比只有 0%~4%，只填别的等于把一大半结果扔掉。
               </p>
               <p>
-                夸克/百度/阿里等也可以填进来，但当前版本只会把它们收进匹配历史
-                供你复制链接，**推不进网盘**（没有对应驱动与账号）。
+                这两类的区别：磁力走离线下载通道；分享链走转存 ——
+                115 要目标账号配好「网页 Cookie」、123 要「网页账号 / 密码」、
+                夸克与光鸭用它们自己的登录态。
+              </p>
+              <p>
+                百度 / 阿里 / 迅雷 / UC / 天翼 等仍只会被收进匹配历史供你复制链接，推不进网盘。
               </p>
             </SettingsRowLabel>
           </template>
           <template #control>
-            <AppInput v-model="draft.web_search_cloud_types" placeholder="magnet,115" />
+            <AppInput v-model="draft.web_search_cloud_types" placeholder="留空 = 按目标网盘自动决定" />
           </template>
         </SettingsRow>
 

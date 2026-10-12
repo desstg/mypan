@@ -25,6 +25,7 @@ import (
 	"litepan/internal/offlinedownload"
 	"litepan/internal/playback"
 	"litepan/internal/quarktv"
+	"litepan/internal/searchtransfer"
 	"litepan/internal/settings"
 	"litepan/internal/strm"
 	"litepan/internal/strmscrape"
@@ -54,6 +55,7 @@ type servicesBundle struct {
 	favorites        *favorites.Service
 	quarktv          *quarktv.Service
 	tgSubscribe      *tgsubscribe.Service
+	searchTransfer   *searchtransfer.Service
 	jav              *jav.Service
 }
 
@@ -105,6 +107,18 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		DataDir:  cfg.DataDir,
 		Bus:      core.bus,
 		Log:      logs.For(logx.ModuleFileOp),
+	})
+	// 后台「搜索转存」页：关键词搜盘搜 + 把链接存进指定网盘。
+	// 搜索复用 internal/pansou（与 TG 订阅的网盘搜索同一份客户端）；
+	// 磁力/ed2k/http 等的保存复用 offlineDownloadSvc；只有 115 分享的手工转存
+	// 要直接调驱动，所以单独要一份执行器。
+	searchTransferSvc := searchtransfer.New(searchtransfer.Options{
+		Offline:  offlineDownloadSvc,
+		Exec:     core.exec,
+		Settings: st.settings,
+		Accounts: st.store.Accounts,
+		Records:  st.store.TransferRecords,
+		Log:      logs.For(logx.ModuleSystem),
 	})
 	fusemount.ApplyConfiguredMountRoot(context.Background(), st.store.Configs)
 	fuseSvc := fusemount.New(fusemount.Options{
@@ -219,6 +233,8 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		DataDir:  cfg.DataDir,
 		// 分享转存（115 分享链）直接调驱动，不走离线下载服务，所以单独要一份执行器。
 		Exec: core.exec,
+		// 网盘搜索要按「这条订阅存到哪个网盘」决定搜哪些类型，所以要知道账号。
+		Accounts: st.store.Accounts,
 	})
 	tgSubscribeSvc.SetStartupGate(startupGate)
 	// 番号（JAV）：JAVDB/JAVBUS 抓取 + 媒体库入库联动 + 磁力订阅推送。
@@ -327,6 +343,7 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		favorites:        favoritesSvc,
 		quarktv:          quarktvSvc,
 		tgSubscribe:      tgSubscribeSvc,
+		searchTransfer:   searchTransferSvc,
 		jav:              javSvc,
 	}
 }

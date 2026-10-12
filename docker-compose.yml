@@ -1,7 +1,16 @@
+# MyPan的 compose。
+#
+# 两个 service：
+#   - mypan  本体的部署单元；
+#   - pansou   可选的**内置盘搜**，给「搜索转存」页与「影视订阅 → 搜网盘」提供搜索源。
+#
+# 不想要内置盘搜：把 pansou 那个 service 整段注释掉即可 —— 但那样「搜索转存」页
+# 会提示「搜索服务不可用」，除非你到「影视订阅 → 网盘搜索 → 搜索服务地址」
+# 填一个自己的盘搜地址（填了就用你的）。
 services:
-  litepan:
+  mypan:
     image: desstg/mypan:latest
-    container_name: litepan
+    container_name: mypan
     restart: unless-stopped
     ports:
       - "5211:5211"
@@ -15,6 +24,10 @@ services:
       # - "42069:42069/udp"
     environment:
       - TZ=Asia/Shanghai
+      # 内置盘搜的地址。指到下面那个 pansou service 的**容器名与内部端口**
+      # （不是宿主机端口）。不装内置盘搜就把这行删掉/注释掉，
+      # 让「搜索服务地址」回落到用户自己填的值。
+      - LITEPAN_PANSOU_BASE_URL=http://pansou:8888
     volumes:
       - ./data:/app/data
       - ./strm:/app/strm
@@ -26,3 +39,39 @@ services:
       - /dev/fuse:/dev/fuse
     pid: "host"
     privileged: true
+
+  # ——————————————————— 可选：内置盘搜 ———————————————————
+  #
+  # 上游项目：https://github.com/fish2018/pansou（镜像直接用官方的，不自建）。
+  # 不装的话把这一整段删掉 —— 但 litepan 那边也要把 LITEPAN_PANSOU_BASE_URL 去掉，
+  # 否则会一直去连一个不存在的容器名。
+  #
+  # ⚠️ 盘搜要靠 TG 频道才有一半结果，而 t.me 在部分网络下连不上：
+  # 那种情况给下面加 `HTTPS_PROXY`（地址写**宿主机的局域网 IP**，
+  # 不能写 127.0.0.1 —— 那指的是容器自己）。
+  pansou:
+    image: ghcr.io/fish2018/pansou:latest
+    container_name: pansou
+    restart: unless-stopped
+    # 只在内部网络暴露，不发布到宿主机。要在浏览器里单独用它的话，
+    # 取消下面两行的注释（注意别和 litepan 的端口撞）。
+    # ports:
+    #   - "8888:8888"
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=8888
+      - CACHE_ENABLED=true
+      - CACHE_PATH=/app/cache
+      # 必须显式指定启用的插件；改完重启容器即可生效。
+      - ENABLED_PLUGINS=dyyjpro,duoduo,djgou,feikuai,gaoqing888,gying,hdmoli,haitunsou,hunhepan,ikantv,jutoushe,kkv,dy4k,libvio,lingjisp,lou1,melost,meitizy,miosou,nyaa,ouge,panlian,pansearch,qqpd,quark4k,quarksoo,quarktv,qupanshe,sousou,thepiratebay,ting77,wanou,weibo,xb6v,xiaokupan,xiaozhang,xiaoyu,yingso,yulinshufa,yunso,yunsou,zlxapp,zxzj,rrbt,quarkres,diduan,erxiao,huban,labi,muou,shandian,zhizhen,clxiong,cyg,jsnoteclub,duanjuw,dyyj,nsgame,cldi,clmao,susu,u3c3,5266ys,dygang,leso,btbtlb,aipan,sopanya,hjzhencai,pan365,buerchen
+      # 认证默认关闭。开了的话，把用户名密码写进 AUTH_USERS，
+      # 并在 MyPan 的「搜索服务地址」旁边那个 Token 里填上登录拿到的令牌。
+      - AUTH_ENABLED=false
+    volumes:
+      - ./data/pansou-cache:/app/cache
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8888/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

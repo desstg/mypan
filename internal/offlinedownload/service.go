@@ -155,6 +155,9 @@ func (s *Service) Capabilities(ctx context.Context, accountID int64) (Capabiliti
 		return Capabilities{}, domain.Errorf(domain.CodeValidation, "非法 account_id")
 	}
 	var cap driver.OfflineDownloadCapabilities
+	// 需要网页登录态的能力（目前只有 123 的磁力）当下能不能用，由驱动自己报。
+	// 不实现这个可选接口的驱动一律视为「不需要额外凭据」= true。
+	webReady := true
 	err := s.exec.Run(ctx, accountID, func(drv driver.Driver) error {
 		d, ok := drv.(driver.OfflineDownloadProvider)
 		if !ok {
@@ -163,11 +166,28 @@ func (s *Service) Capabilities(ctx context.Context, accountID int64) (Capabiliti
 		cap = d.OfflineDownloadCapabilities()
 		_, canDelete := drv.(driver.OfflineTaskDeleter)
 		cap.RemoteDelete = cap.RemoteDelete && canDelete
+		if gate, ok := drv.(driver.WebLoginChecker); ok {
+			webReady = gate.WebLoginReady()
+		}
 		return nil
 	})
 	if err != nil {
 		return Capabilities{}, err
 	}
+	_, driverType, lookupErr := s.lookupAccount(ctx, accountID)
+	if lookupErr != nil {
+		driverType = ""
+	}
+	// ⚠️ 内置下载器能不能用，取决于**上传服务挂没挂上**（它会下到本机再传回网盘）。
+	// 早先这里硬编码 true，于是没有上传服务的部署上，界面会显示「走内置下载器」、
+	// 点下去却回「上传服务未就绪」—— 与夸克这次修的那个 bug 是同一族：
+	// **界面承诺的通道必须是提交时真的能走的通道**。
+	//
+	// 对夸克尤其重要：它没有原生离线，内置下载器是磁力/直链**唯一**的通道，
+	// 这里报错就是彻底不能用，必须先说清楚。
+	s.mu.Lock()
+	builtinReady := s.uploads != nil
+	s.mu.Unlock()
 	return Capabilities{
 		Supported:              true,
 		SupportsURLs:           cap.SupportsURLs,
@@ -176,7 +196,9 @@ func (s *Service) Capabilities(ctx context.Context, accountID int64) (Capabiliti
 		URLSchemes:             append([]string(nil), cap.URLSchemes...),
 		RootTargetAllowed:      cap.RootTargetAllowed,
 		RemoteDelete:           cap.RemoteDelete,
-		BuiltinEnabled:         true,
+		DriverType:             driverType,
+		WebLoginReady:          webReady,
+		BuiltinEnabled:         builtinReady,
 		BuiltinSupportsURLs:    true,
 		BuiltinURLSchemes:      builtinURLSchemes(),
 		BuiltinSupportsTorrent: false,
@@ -201,7 +223,9 @@ func (s *Service) AddURLs(ctx context.Context, p AddURLParams) ([]Task, error) {
 		return nil, domain.Errorf(domain.CodeValidation, "请至少填写一个离线下载链接")
 	}
 	if providerKind == ProviderBuiltin {
-		return s.addBuiltinURLs(ctx, p, urls)
+		created, err := s.addBuiltinURLs(ctx, p, urls)
+		notifyRecordSink(p, created)
+		return created, err
 	}
 	accountName, driverType, err := s.lookupAccount(ctx, p.AccountID)
 	if err != nil {
@@ -304,7 +328,19 @@ func (s *Service) AddURLs(ctx context.Context, p AddURLParams) ([]Task, error) {
 		s.putTask(&task)
 		created = append(created, task)
 	}
+	notifyRecordSink(p, created)
 	return created, nil
+}
+
+// notifyRecordSink 把新建的任务交给调用方留档（见 AddURLParams.RecordSink）。
+//
+// 只在**任务真的建出来之后**调：网盘整批拒绝时 created 为空，回调也就不会被触发，
+// 调用方据此写「提交失败」的记录（它自己手里有入参，知道失败原因）。
+func notifyRecordSink(p AddURLParams, created []Task) {
+	if p.RecordSink == nil || len(created) == 0 {
+		return
+	}
+	p.RecordSink(created)
 }
 
 func (s *Service) PrepareTorrent(ctx context.Context, accountID int64, localPath, fileName string) (*TorrentPreparation, error) {

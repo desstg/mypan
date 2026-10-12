@@ -34,6 +34,12 @@ const (
 	pathCopyFile         = "/userres/v1/file/copy_file"
 	pathTaskStatus       = "/userres/v1/get_task_status"
 
+	// 分享链转存（见 share.go）。
+	pathShareAccessToken = "/userres/v1/get_share_access_token"
+	pathShareSummary     = "/userres/v1/get_share_summary"
+	pathSharePageFiles   = "/userres/v1/get_share_page_files_list"
+	pathShareRestore     = "/userres/v1/restore_share"
+
 	listPageSize            = 50
 	listOrderByDefault      = 3
 	listSortTypeDefault     = 1

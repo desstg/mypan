@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"litepan/internal/domain"
+	"litepan/internal/pansou"
 	"litepan/internal/store"
 )
 
@@ -219,7 +220,7 @@ func TestSearchWebDeduplicatesAcrossRuns(t *testing.T) {
 func TestSearchWebReportsFailuresWithoutStoringJunk(t *testing.T) {
 	var calls []string
 	stub := &webSearchStub{
-		err:   &searchError{Reason: "站点返回 HTTP 403", Detail: "HTTP 403: blocked"},
+		err:   &pansou.Error{Reason: "站点返回 HTTP 403", Detail: "HTTP 403: blocked"},
 		calls: &calls,
 	}
 	s, st := newWebSearchServiceForTest(t, stub)
@@ -284,16 +285,18 @@ func TestTopFailureReasonsOrderAndCap(t *testing.T) {
 	}
 }
 
-// 地址留空必须回落内置默认，**而且展示值与实际发请求的值必须是同一个**。
+// 地址留空 = 用**内置盘搜**（compose 里 pansou sidecar 的地址，走环境变量），
+// 而且展示值与实际发请求的值必须是同一个。
 //
 // 这条是有来历的：ConfigView 里写了回落、webSearcher 里漏了，结果界面上显示着
 // 默认地址、客户端却拿着空串发请求 —— 用户看到的是「没有配置网盘搜索服务地址」，
 // 而设置页面上明明有地址。两个读取点各写一份，就会这样漂移。
-func TestWebSearchFallsBackToDefaultBaseURL(t *testing.T) {
+func TestWebSearchFallsBackToBuiltinPansou(t *testing.T) {
+	t.Setenv("LITEPAN_PANSOU_BASE_URL", "http://pansou:8888")
 	s, _ := newWebSearchServiceForTest(t, nil)
 	ctx := context.Background()
 
-	// 复现线上那份配置：开关打开、地址是空串。
+	// 复现线上那份配置：开关打开、地址是空串（用户没填过）。
 	if err := s.UpdateConfig(ctx, ConfigInput{
 		WebSearchEnabled:    true,
 		WebSearchBaseURL:    "",
@@ -302,12 +305,13 @@ func TestWebSearchFallsBackToDefaultBaseURL(t *testing.T) {
 		t.Fatalf("UpdateConfig: %v", err)
 	}
 
-	baseURL, cloudTypes, _ := s.webSearchSettings()
-	if baseURL != defaultWebBaseURL {
-		t.Errorf("生效地址 = %q，留空应当回落 %q", baseURL, defaultWebBaseURL)
+	baseURL, _ := s.webSearchSettings()
+	cloudTypes := s.effectiveCloudTypes(nil)
+	if baseURL != "http://pansou:8888" {
+		t.Errorf("生效地址 = %q，留空应当落到内置盘搜", baseURL)
 	}
-	if cloudTypes != defaultWebCloudTypes {
-		t.Errorf("生效类型 = %q，留空应当回落 %q", cloudTypes, defaultWebCloudTypes)
+	if cloudTypes != pansou.DefaultCloudTypes {
+		t.Errorf("生效类型 = %q，留空应当回落 %q", cloudTypes, pansou.DefaultCloudTypes)
 	}
 
 	// 展示值必须与生效值一致 —— 否则用户照着界面看不出问题在哪。
@@ -316,17 +320,56 @@ func TestWebSearchFallsBackToDefaultBaseURL(t *testing.T) {
 		t.Errorf("界面显示 %q 而实际用的是 %q：两处回落逻辑又漂移了",
 			view.WebSearchBaseURL, baseURL)
 	}
-	if view.WebSearchCloudTypes != cloudTypes {
-		t.Errorf("界面显示 %q 而实际用的是 %q", view.WebSearchCloudTypes, cloudTypes)
+	if !view.WebSearchBaseURLIsDefault {
+		t.Error("用户没填过时 WebSearchBaseURLIsDefault 应当为 true（界面据此标「内置」）")
 	}
 
-	// 真正构造出来的客户端也必须拿着那个地址。
-	client, ok := s.webSearcher().(*pansouClient)
+	// 真正构造出来的客户端也必须拿着那个地址。适配器把 pansou.Client 包了一层，
+	// 所以从适配器里把 baseURL 取出来核对（client 字段是本包的，测试同包可见）。
+	adapter, ok := s.webSearcher(nil).(*pansouAdapter)
 	if !ok {
-		t.Fatalf("应当构造出 pansouClient，实际 %T", s.webSearcher())
+		t.Fatalf("应当构造出 pansouAdapter，实际 %T", s.webSearcher(nil))
 	}
-	if client.baseURL != defaultWebBaseURL {
-		t.Errorf("客户端 baseURL = %q，want %q", client.baseURL, defaultWebBaseURL)
+	if got := adapter.client.BaseURL(); got != "http://pansou:8888" {
+		t.Errorf("客户端 baseURL = %q，want 内置盘搜地址", got)
+	}
+}
+
+// 既没装内置盘搜、用户也没填地址 —— **不构造客户端**，并给出一句可执行的提示。
+//
+// 这里刻意不兜底到任何公网站：老默认 `so.252035.xyz` 已实测连不上，
+// 写死它会让用户看到一个「有地址、但每次搜索都超时」的界面，完全看不出该去哪装。
+func TestWebSearchWithoutAnyPansouGivesActionableError(t *testing.T) {
+	t.Setenv("LITEPAN_PANSOU_BASE_URL", "")
+	s, _ := newWebSearchServiceForTest(t, nil)
+	ctx := context.Background()
+	if err := s.UpdateConfig(ctx, ConfigInput{WebSearchEnabled: true, WebSearchBaseURL: ""}); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+
+	if baseURL, _ := s.webSearchSettings(); baseURL != "" {
+		t.Fatalf("没有内置地址时生效地址应当是空串，实际 %q", baseURL)
+	}
+	if searcher := s.webSearcher(nil); searcher != nil {
+		t.Errorf("地址为空时不该构造客户端，实际 %T", searcher)
+	}
+
+	// 提示必须指向「去装内置盘搜或填地址」，而不是那句含糊的「未启用」。
+	_, err := s.searchWebOnce(ctx, &domain.TGSubscription{ID: 1, Title: "x"}, nil)
+	if err == nil {
+		t.Fatal("没有可用盘搜时应当报错")
+	}
+	if !strings.Contains(err.Error(), "内置盘搜") {
+		t.Errorf("提示应当告诉用户去装内置盘搜或填地址，实际: %v", err)
+	}
+
+	// 开关没开时报的是另一句话 —— 两件事不能糊成一句。
+	if err := s.UpdateConfig(ctx, ConfigInput{WebSearchEnabled: false}); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	_, err = s.searchWebOnce(ctx, &domain.TGSubscription{ID: 1, Title: "x"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "未启用") {
+		t.Errorf("开关没开时应当提示去打开开关，实际: %v", err)
 	}
 }
 
@@ -339,7 +382,7 @@ func TestWebSearchKeepsExplicitBaseURL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateConfig: %v", err)
 	}
-	baseURL, _, _ := s.webSearchSettings()
+	baseURL, _ := s.webSearchSettings()
 	if baseURL != "https://pansou.example.com/" {
 		t.Errorf("生效地址 = %q，显式配置不该被默认值盖掉", baseURL)
 	}
@@ -352,7 +395,7 @@ func TestWebSearchKeepsExplicitBaseURL(t *testing.T) {
 // 只搜 magnet 等于把 96%~100% 的结果扔掉，界面上表现就是「几乎永远搜不到」——
 // 而这看起来像站点的问题，不像配置的问题，排查起来很费劲。所以直接钉住。
 func TestDefaultCloudTypesIncludeNetdisk(t *testing.T) {
-	types := strings.Split(defaultWebCloudTypes, ",")
+	types := strings.Split(pansou.DefaultCloudTypes, ",")
 	want := map[string]bool{"magnet": false, "115": false}
 	for _, ty := range types {
 		if _, ok := want[strings.TrimSpace(ty)]; ok {
@@ -362,13 +405,13 @@ func TestDefaultCloudTypesIncludeNetdisk(t *testing.T) {
 	for name, found := range want {
 		if !found {
 			t.Errorf("默认类型 %q 里缺 %q —— 只搜磁力会丢掉 96%%~100%% 的结果",
-				defaultWebCloudTypes, name)
+				pansou.DefaultCloudTypes, name)
 		}
 	}
 
 	// 而且必须只有这两类：其余类型没有投递器，收进来只会堆一屏「暂不支持投递」。
 	if len(types) != len(want) {
-		t.Errorf("默认类型 = %q，应当恰好是 magnet 与 115 两类", defaultWebCloudTypes)
+		t.Errorf("默认类型 = %q，应当恰好是 magnet 与 115 两类", pansou.DefaultCloudTypes)
 	}
 }
 

@@ -30,6 +30,14 @@ type Driver struct {
 	token          string
 	refresh        string
 	offlineMissing map[string]int
+
+	// 网页版登录态（分享转存 / 磁力离线用，见 web_transport.go）。
+	webUser     string
+	webPassword string
+	webToken    string
+	webTokenAt  time.Time
+	// webLoginInflight 让并发的调用只登录一次。
+	webLoginInflight chan struct{}
 }
 
 func (d *Driver) SetAuthCredentials(creds domain.AuthCredentials) {
@@ -37,6 +45,9 @@ func (d *Driver) SetAuthCredentials(creds domain.AuthCredentials) {
 	defer d.mu.Unlock()
 	d.token = strings.TrimSpace(creds.AccessToken)
 	d.refresh = strings.TrimSpace(creds.RefreshToken)
+	if w := strings.TrimSpace(creds.WebToken); w != "" {
+		d.webToken = w
+	}
 }
 
 func (d *Driver) SetAuthPersister(fn driver.AuthPersistFunc) { d.persist = fn }
@@ -95,6 +106,16 @@ func (d *Driver) Init(ctx context.Context) error {
 	if token == "" && refresh == "" {
 		return domain.Errorf(domain.CodeValidation, "access_token 与 refresh_token 不能都为空")
 	}
+	// 网页凭据只是**附加**凭据：没有也不影响初始化，只是分享转存与磁力用不了
+	// （见 ShareReceiveCapabilities 与 AddOfflineURLs 的磁力分支）。
+	d.mu.Lock()
+	if d.webUser == "" {
+		d.webUser = strings.TrimSpace(d.add.WebUser)
+	}
+	if d.webPassword == "" {
+		d.webPassword = strings.TrimSpace(d.add.WebPassword)
+	}
+	d.mu.Unlock()
 	d.mu.Lock()
 	d.token = token
 	d.refresh = refresh
@@ -221,4 +242,8 @@ var (
 	_ driver.OfflineDownloadProvider  = (*Driver)(nil)
 	_ driver.OfflineURLDownloader     = (*Driver)(nil)
 	_ driver.OfflineTaskRefresher     = (*Driver)(nil)
+	_ driver.WebLoginChecker          = (*Driver)(nil)
+	_ driver.ShareReceiver            = (*Driver)(nil)
+	_ driver.ShareKindReporter        = (*Driver)(nil)
+	_ driver.ShareMetaPeeker          = (*Driver)(nil)
 )

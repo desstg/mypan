@@ -36,6 +36,11 @@ const (
 	pathUploadAuth   = "/file/upload/auth"
 	pathUploadFinish = "/file/upload/finish"
 
+	// 分享链转存（见 share.go）。
+	pathShareToken  = "/share/sharepage/token"
+	pathShareDetail = "/share/sharepage/detail"
+	pathShareSave   = "/share/sharepage/save"
+
 	listPageSize          = 200
 	requestInterval       = 0
 	convergeDelayMS       = 500
@@ -108,6 +113,16 @@ func (d *Driver) apiRequestTo(ctx context.Context, apiBase, method, path string,
 	case resp.StatusCode == http.StatusForbidden:
 		return nil, domain.Errorf(domain.CodePermissionDenied, "夸克访问被拒绝，Cookie 权限不足")
 	case resp.StatusCode >= 400:
+		// ⚠️ 夸克把**业务错误**也放在 4xx 里（HTTP 400 + code 14001、404 + 41012…）。
+		// 先试着解出外壳并按业务码翻译，翻不出来再退回「HTTP xxx」——
+		// 否则用户看到的是一大坨 JSON，而里面那句「好友已取消了分享」才是真正的原因
+		// （真机踩到过）。
+		var env quarkEnvelope
+		if json.Unmarshal(data, &env) == nil && env.Code != 0 {
+			if err := mapBusinessError(env); err != nil {
+				return nil, err
+			}
+		}
 		return nil, domain.Errorf(domain.CodeDriverError, "夸克 HTTP %d: %s", resp.StatusCode, httpx.Truncate(data, 300))
 	}
 
@@ -136,6 +151,10 @@ func mapBusinessError(env quarkEnvelope) error {
 		return domain.Errorf(domain.CodeAuthExpired, "夸克 Cookie 认证失败：%s", msg)
 	case http.StatusForbidden:
 		return domain.Errorf(domain.CodePermissionDenied, "夸克访问被拒绝：%s", msg)
+	}
+	// 分享链的错误码要单独翻成人话（见 share.go 的分享转存）。
+	if err := mapShareError(env.Code, msg); err != nil {
+		return err
 	}
 	return domain.Errorf(domain.CodeDriverError, "夸克接口错误(%d)：%s", env.Code, msg)
 }

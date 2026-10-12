@@ -1,6 +1,12 @@
 package driver
 
-import "context"
+import (
+	"context"
+	"net/url"
+	"strings"
+
+	"litepan/internal/domain"
+)
 
 // ShareReceiveRequest 是一次「把别人的分享转存到自己的网盘」请求。
 type ShareReceiveRequest struct {
@@ -55,6 +61,23 @@ type ShareReceiver interface {
 	ReceiveShare(ctx context.Context, req ShareReceiveRequest) (ShareReceiveResult, error)
 }
 
+// 分享链的种类。
+const (
+	ShareKind115     = "115"
+	ShareKind123     = "123"
+	ShareKindQuark   = "quark"
+	ShareKindGuangya = "guangya"
+)
+
+// ShareKindReporter 是可选扩展：报告这个驱动能转存哪些**种类的分享链**。
+//
+// 一个驱动的 ShareReceiver 可能只认其中一种（123 驱动不认 115 的分享码，
+// 反之亦然）。不实现它就按「只认 115」处理 —— 那是这个接口出现之前
+// 唯一存在的一种，老的实现不必改。
+type ShareKindReporter interface {
+	ShareKinds() string
+}
+
 // SharePeekRequest 是「不写入地看一眼分享里有什么」的输入。
 type SharePeekRequest struct {
 	ShareCode   string
@@ -86,4 +109,50 @@ type SharePeekResult struct {
 // 匹配历史的展示与选优排序都会准得多。
 type ShareMetaPeeker interface {
 	PeekShare(ctx context.Context, req SharePeekRequest) (SharePeekResult, error)
+}
+
+// ShareRef 是一条分享链里真正有用的两样东西。
+type ShareRef struct {
+	Code     string
+	Password string
+}
+
+// ParseShareLink 从一条 115 分享链里取出分享码与提取码。
+//
+// 唯一一份实现，两个调用方：
+//   - TG 订阅的分享转存（tgsubscribe.parseShareResource，从抽链阶段归一化过的
+//     Resource.Raw 里取）；
+//   - 后台「搜索转存」页的手工转存（用户直接粘贴一条链接）。
+//
+// 两处都只做**最后一道兜底**：分享码的合法性在抽取阶段已经卡死
+// （`^/s/<2-64 位 [A-Za-z0-9_-]>$`），这里防的是手工改过库里的值、或用户粘贴的脏值。
+// 提取码优先级：显式参数 → `?password=` → `?pwd=`（实测百度/迅雷的分享链全是 pwd 形态）。
+func ParseShareLink(raw, explicitPassword string) (ShareRef, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ShareRef{}, domain.Errorf(domain.CodeValidation, "分享链接为空")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ShareRef{}, domain.Errorf(domain.CodeValidation, "分享链接解析失败：%s", raw)
+	}
+	code := ""
+	if segments := strings.Split(strings.Trim(parsed.Path, "/"), "/"); len(segments) == 2 && segments[0] == "s" {
+		code = strings.TrimSpace(segments[1])
+	}
+	if code == "" {
+		return ShareRef{}, domain.Errorf(domain.CodeValidation, "从分享链接里取不出分享码：%s", raw)
+	}
+	query := parsed.Query()
+	password := firstNonEmpty(explicitPassword, query.Get("password"), query.Get("pwd"))
+	return ShareRef{Code: code, Password: password}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }

@@ -33,10 +33,14 @@ const peekTimeout = 8 * time.Second
 //     分享链之前恒为 0，等于在排序上天生吃亏。
 //
 // 三条保守规则：
-//   - 只处理 share_115（其它类型的名字本来就来自链接自带，不需要补）；
+//   - 只处理**能从分享里读出元信息**的那几类（115 / 123 / 夸克）——
+//     其余类型的名字本来就来自正文首行，没有可补的东西；
 //   - 只在**窗口冲刷前**做（不是每条帖子入库时做）—— 后者会让 QukanMovie 这种
 //     一页 20 条分享链的频道每次轮询多打 20 次请求；
 //   - 失败一律忽略：补不上信息不该影响这次推送。
+//
+// ⚠️ 夸克这一档只在**目标账号是夸克**时才有用：它的分享接口要账号自己的 Cookie，
+// 拿 115 账号去偷看夸克分享必然失败 —— 那种情况静默跳过（peekShare 的既定行为）。
 func (s *Service) enrichShareRecords(ctx context.Context, accountID int64, records []*domain.TGMatchRecord) {
 	if s == nil || s.exec == nil || accountID <= 0 || len(records) == 0 {
 		return
@@ -47,7 +51,9 @@ func (s *Service) enrichShareRecords(ctx context.Context, accountID int64, recor
 		if len(targets) >= maxPeekPerFlush {
 			break
 		}
-		if recordKind(rec) != KindShare115 {
+		switch recordKind(rec) {
+		case KindShare115, KindShare123, KindShareQuark, KindShareGuangya:
+		default:
 			continue
 		}
 		// 大小已经有了就没什么可补的（名字一般也一起来了）。

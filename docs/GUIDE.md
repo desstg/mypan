@@ -63,8 +63,8 @@ MyPan 是一个自托管的网盘聚合面板。它把 115、夸克、百度、�
 | **能接收秒传**（作为传输目标） | 仅 `123_open`、`guangya`、`189_cloud` |
 | **秒传预检**（先探测再传） | 仅 `189_cloud` |
 | **能提供秒传哈希**（作为传输源） | `baidu_open`、`guangya`、`189_cloud` |
-| **网盘离线下载** | `115_open`（最全，含磁力、ed2k 和种子）、`guangya`（批量 URL，无 ed2k）、`123_open`（单条 URL，且不支持删除离线任务） |
-| **分享转存**（把别人的分享存进自己网盘） | 仅 `115_open`，且**该账号需额外配置网页 Cookie** —— 见 [TG 影片订阅](#14-tg-影片订阅) |
+| **网盘离线下载** | `115_open`（最全，含磁力、ed2k 和种子）、`guangya`（批量 URL，含磁力/ed2k/迅雷）、`123_open`（单条 URL，且不支持删除离线任务） |
+| **分享转存**（把别人的分享存进自己网盘） | `115_open`（需账号额外配网页 Cookie）、`123_open`（需配网页账号 / 密码）、`quark`（用它自己的 Cookie）、`guangya`（用登录令牌，无需额外配置） —— 见 [TG 影片订阅](#14-tg-影片订阅) |
 | **302 直链** | 除夸克外均支持；**夸克只支持本机代理**，不支持 302 |
 | 全量递归列目录（STRM 扫描加速） | 仅 `115_open` |
 
@@ -245,14 +245,14 @@ TMDB 识别 → **生成计划** → **预览** → **应用**。识别出的影
 
 有两条路：
 
-**网盘离线下载** —— 把链接或种子交给网盘，让网盘自己去下（不占服务器带宽）。支持情况见[能力表](#1-多网盘聚合)：115 最全（含磁力/种子/ed2k），光鸭支持批量 URL（无 ed2k），123 只支持单条 URL 且不能删除任务。链接类型是按 **scheme**（`magnet:` / `ed2k:` / `http(s):`）与网盘声明支持的能力匹配的，具体某个账号支持哪些在「TG 订阅」的推送里会自动判定。
+**网盘离线下载** —— 把链接或种子交给网盘，让网盘自己去下（不占服务器带宽）。支持情况见[能力表](#1-多网盘聚合)：115 最全（含磁力/种子/ed2k），光鸭支持批量 URL（含磁力/ed2k/迅雷），123 只支持单条 URL 且不能删除任务。链接类型是按 **scheme**（`magnet:` / `ed2k:` / `http(s):`）与网盘声明支持的能力匹配的，具体某个账号支持哪些在「TG 订阅」的推送里会自动判定。
 
 **内置下载器** —— MyPan 自己下载，支持：
 
 - **HTTP / HTTPS**：支持断点续传
 - **磁力 / BitTorrent**：基于 DHT，TCP/uTP 双协议
 
-⚠️ 内置下载器**不支持 ed2k**。ed2k 只能走 115 网盘的原生离线下载。
+⚠️ 内置下载器**不支持 ed2k**。ed2k 只能走网盘的原生离线下载（115 与光鸭都吃）。
 
 内置 BT 的**默认监听端口是 42069**（TCP + UDP），所以 Docker 里 `EXPOSE 42069/tcp 42069/udp` 就是它。用 host 网络时无需额外映射；用 bridge 网络记得把 TCP 和 UDP 都映射出去，否则 DHT 拿不到节点、速度会很差。
 
@@ -305,10 +305,16 @@ TMDB 识别 → **生成计划** → **预览** → **应用**。识别出的影
 | 类型 | 抽取 | 投递 |
 |---|---|---|
 | 磁力链接（magnet） | ✅ | ✅ 网盘原生离线，不支持时自动降级到内置下载器 |
-| ed2k | ✅ | ⚠️ **只有 115 网盘**能投（内置下载器与其它网盘都不吃 ed2k） |
+| ed2k | ✅ | ⚠️ **115 与光鸭**能投（内置下载器与其余网盘都不吃 ed2k） |
 | http/https 视频直链 | ✅ | ✅ 网盘原生离线或内置下载器 |
 | 115 分享链（`115.com/s/xxx`） | ✅ | ✅ 自动转存 —— **需要该 115 账号配置「网页 Cookie」**，见下 |
-| 夸克分享链（`pan.quark.cn/s/xxx`） | ✅ | ❌ 目前只能识别 |
+| 123 分享链（`123865.com/s/xxx`） | ✅ | ✅ 自动转存 —— **需要该 123 账号配置「网页账号 / 密码」** |
+| 夸克分享链（`pan.quark.cn/s/xxx`） | ✅ | ✅ 自动转存 —— **目标账号得是夸克账号**（用它自己的 Cookie） |
+| 光鸭分享链（`guangyapan.com/s/xxx`） | ✅ | ✅ 自动转存 —— **目标账号得是光鸭账号**（用登录令牌，无需额外配置） |
+| 百度 / 阿里 / 迅雷 / UC / 天翼 … 分享链 | ✅ | ❌ 目前只能识别（会进匹配历史供你复制链接） |
+
+**分享链的自动转存**：四家网盘各自的分享转存接口都不一样，而且**分享链与目标账号必须对得上** ——
+把夸克分享推给 115 账号会被明确拒绝（理由里写明），不会拿夸克的分享码去打 115 的接口。
 
 **115 分享链的自动转存**：115 的分享转存只有**网页版接口**能做（开放平台的 API 里没有这个动作），所以要在 115 账号的配置里额外粘一份**浏览器 Cookie**：
 
@@ -324,7 +330,7 @@ TMDB 识别 → **生成计划** → **预览** → **应用**。识别出的影
 - 转存**不产生离线下载任务**，所以「下载管理」里看不到它；订阅进度（剧集入库、自动收尾）照常回写。
 - 某些出口 IP 会被 115 直接拒绝（常见于香港机房，返回 403）或触发风控（405）。遇到时报错会说清是哪一种，重试不会好 —— 前者要换出口，后者要等解封。
 
-抓不到但投不出去的类型会以 **「已识别，暂不支持投递」** 出现在匹配历史里 —— 它**不会**进重试队列，也不会占推送额度。同理，如果目标网盘收不了这个协议（例如把 ed2k 推给 123 账号），记录也会是「暂不支持投递」并写明原因，而不是反复失败重试。没配网页 Cookie 的 115 账号收到分享链时也是这一档，原因里会直接写明缺 Cookie。
+抓不到但投不出去的类型会以 **「已识别，暂不支持投递」** 出现在匹配历史里 —— 它**不会**进重试队列，也不会占推送额度。同理，如果目标网盘收不了这个协议（例如把 ed2k 推给 123 账号），记录也会是「暂不支持投递」并写明原因，而不是反复失败重试。没配网页 Cookie 的 115 账号收到分享链、把夸克分享推给 115 账号，都是这一档，原因里会直接写明缺什么。
 
 还有一类是 **「推送失败（不会重试）」**：这次没成，而且重试也不会好（提取码错误、分享已失效/被删、目标目录对不上、同一个分享已接收过）。这类同样不进重试队列——对 115 反复试反而可能触发风控。修好问题后可以在匹配历史里手动再推一次。
 
@@ -375,9 +381,9 @@ TMDB 识别 → **生成计划** → **预览** → **应用**。识别出的影
 
 ```yaml
 services:
-  MyPan:
+  mypan:
     image: desstg/mypan:latest
-    container_name: MyPan
+    container_name: mypan
     restart: unless-stopped
     ports:
       - "5211:5211"
@@ -391,6 +397,9 @@ services:
       # - "42069:42069/udp"
     environment:
       - TZ=Asia/Shanghai
+      # 内置盘搜的地址（见下面「盘搜」一节：compose 里那个 pansou service 的
+      # 容器名与内部端口）。不装内置盘搜就把这行删掉/注释掉。
+      - LITEPAN_PANSOU_BASE_URL=http://pansou:8888
     volumes:
       - ./data:/app/data
       - ./strm:/app/strm
@@ -402,6 +411,31 @@ services:
       - /dev/fuse:/dev/fuse
     pid: "host"
     privileged: true
+
+  # ——————————————————— 可选：内置盘搜 ———————————————————
+  #
+  # 上游项目：https://github.com/fish2018/pansou（镜像直接用官方的，不自建）。
+  # 不装的话把这一整段删掉 —— 但 mypan 那边也要把 LITEPAN_PANSOU_BASE_URL 去掉。
+  pansou:
+    image: ghcr.io/fish2018/pansou:latest
+    container_name: pansou
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=8888
+      - CACHE_ENABLED=true
+      - CACHE_PATH=/app/cache
+      # 必须显式指定启用的插件；改完重启容器即可生效。
+      - ENABLED_PLUGINS=dyyjpro,duoduo,djgou,feikuai,gaoqing888,gying,hdmoli,haitunsou,hunhepan,ikantv,jutoushe,kkv,dy4k,libvio,lingjisp,lou1,melost,meitizy,miosou,nyaa,ouge,panlian,pansearch,qqpd,quark4k,quarksoo,quarktv,qupanshe,sousou,thepiratebay,ting77,wanou,weibo,xb6v,xiaokupan,xiaozhang,xiaoyu,yingso,yulinshufa,yunso,yunsou,zlxapp,zxzj,rrbt,quarkres,diduan,erxiao,huban,labi,muou,shandian,zhizhen,clxiong,cyg,jsnoteclub,duanjuw,dyyj,nsgame,cldi,clmao,susu,u3c3,5266ys,dygang,leso,btbtlb,aipan,sopanya,hjzhencai,pan365,buerchen
+      - AUTH_ENABLED=false
+    volumes:
+      - ./data/pansou-cache:/app/cache
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8888/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 ```
 
 然后：
@@ -422,13 +456,15 @@ NAS 上常用，尤其配合媒体服务器反代时：
 
 ```yaml
 services:
-  MyPan:
+  mypan:
     image: desstg/mypan:latest
-    container_name: MyPan
+    container_name: mypan
     restart: unless-stopped
     network_mode: host        # 用了 host 网络就不要写 ports:
     environment:
       - TZ=Asia/Shanghai
+      # 内置盘搜（见下面「盘搜」一节）。用 host 网络时它也在同一个 compose 里。
+      - LITEPAN_PANSOU_BASE_URL=http://pansou:8888
     volumes:
       - /vol1/1000/docker/MyPan/data:/app/data
       - /vol1/1000/docker/MyPan/strm:/app/strm
@@ -445,7 +481,7 @@ host 网络下端口直接监听在宿主机上，`5211`、`42069` 和反代端�
 
 ```bash
 docker run -d \
-  --name MyPan \
+  --name mypan \
   --restart unless-stopped \
   --pid host \
   --privileged \
@@ -461,16 +497,29 @@ docker run -d \
 
 加 `--network host` 的话去掉所有 `-p`。
 
-### 推荐：自建一个盘搜（可选，但强烈建议）
+### 盘搜（搜索转存 / 搜网盘都靠它）
 
-「TG 影片订阅」除了抓 Telegram 频道，还能拿片名去**外部网盘搜索服务**里搜资源
-（订阅详情里的「搜索网盘」，以及设置里的「自动搜索」都走这条路）。
-两条路是互补的：抓频道是「推」，资源得恰好出现在你订阅的频道里；搜索是「拉」，不依赖你加了哪些频道。
+后台**「搜索转存」页**与「TG 影片订阅」的**搜索网盘 / 自动搜索**都靠一个
+**外部盘搜服务**，MyPan 自己不含搜索能力。抓频道是「推」（资源得恰好出现在你订阅的
+频道里），搜索是「拉」（不依赖你加了哪些频道），两条路互补。
 
-程序内置的默认地址是一个公开演示站（`so.252035.xyz`）—— **pansou 的作者在
-[issue #46](https://github.com/fish2018/pansou/issues/46) 里自己说过，它被薅到返回 mock 数据、
-效果可忽略**。想要真的搜得到，建议自己起一个
-**[PanSou](https://github.com/fish2018/pansou)**。
+**默认已内置**：`docker-compose.yml` 里的 `pansou` service 就是它，起来之后 MyPan
+会自动指过去（`LITEPAN_PANSOU_BASE_URL=http://pansou:8888`），不用任何配置。
+后台**「搜索转存」页**用的也是它 —— 填了自定义地址两处都生效。
+
+```bash
+docker compose up -d
+```
+
+**不想要它**：把 compose 里 `pansou` 那段与 mypan 的 `LITEPAN_PANSOU_BASE_URL`
+一起删掉。那样搜索功能直接不可用，界面上会明确提示你去装或去填 ——
+⚠️ 老版本那个公开演示站（`so.252035.xyz`，pansou 作者在
+[issue #46](https://github.com/fish2018/pansou/issues/46) 里自认「被薅到返回 mock 数据」）
+已实测连不上，**已经删掉**，不再是任何形式的兜底。
+
+**要换成自己的盘搜**：填上就用你的，两处都生效。自己起一个
+**[PanSou](https://github.com/fish2018/pansou)** 是一条 Docker 命令的事，
+**不需要 Telegram 的 api_id / api_hash**：
 
 一条 Docker 命令，**不需要 Telegram 的 api_id / api_hash**（TG 频道那一半靠它自带的公开频道配置）：
 
@@ -498,7 +547,8 @@ docker run -d --name pansou -p 805:80 ghcr.io/fish2018/pansou-web
    | `-p 8888:8888`（纯 API 版） | `http://192.168.31.4:8888` |
 
    把 `192.168.31.4` 换成**跑 pansou 那台机器的局域网 IP**。
-3. **搜索的资源类型**保留默认的 `magnet,115` —— 只填 `magnet` 会把绝大多数结果扔掉（见下面的说明）。
+3. **搜索的资源类型留空即可** —— 每条订阅会自动按它推送到的那个网盘决定搜什么
+   （磁力 + 那个网盘自己的分享链）。想多搜几类再往这里填，填的会追加在后面。
 4. **走全局代理**关掉（内网地址套代理是平白多一个失败点）。
 
 #### 三个容易踩的坑
@@ -506,9 +556,10 @@ docker run -d --name pansou -p 805:80 ghcr.io/fish2018/pansou-web
 - **别写 `127.0.0.1`。** MyPan 跑在容器里，那指的是它自己，不是宿主机。要写宿主机的局域网 IP。
 - **盘搜自己也要能连上 t.me**，否则它只拿得到插件那一半结果。需要的话在**它的容器**里配
   `HTTPS_PROXY`（同样写宿主机的局域网 IP，不能写 `127.0.0.1`）。
-- **`cloud_types` 别退回只搜磁力。** 实测这个站的国产内容里磁力占比只有 0%~4%，
-  加上 `115` 之后候选数会翻好几倍（115 分享链能自动转存，是磁力之外唯一能真推的类型）。
-  夸克/百度/阿里也能填进来，但当前版本只会把它们收进匹配历史供你复制链接，**推不进网盘**。
+- **`cloud_types` 别只搜磁力。** 实测这个站的国产内容里磁力占比只有 0%~4%，
+  加上分享链那一类之后候选数会翻好几倍。现在默认按目标网盘自动决定，不用手填；
+  填的话是**追加**（基础的「磁力 + 目标网盘那一类」永远保留）。
+  百度/阿里/迅雷等仍只会被收进匹配历史供你复制链接，**推不进网盘**。
 
 ### 首次启动
 

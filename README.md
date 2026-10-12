@@ -24,7 +24,7 @@
 
 | 环节 | 干什么 | 关键能力 |
 |---|---|---|
-| **① 发现** | 从 TG 频道、网盘搜索、番号站点把资源找出来 | TG 影片订阅 · 番号（JAV）订阅 · 盘搜 |
+| **① 发现** | 从 TG 频道、网盘搜索、番号站点把资源找出来 | TG 影片订阅 · 番号（JAV）订阅 · **搜索转存** · 盘搜 |
 | **② 落盘** | 把链接交给网盘自己去下，或让 MyPan 自己下 | 网盘原生离线 · 内置 BT 下载器 · **分享链转存** |
 | **③ 整理** | 把乱七八糟的目录变成规规矩矩的作品文件夹 | **删广告小文件** · **批量改名** · **移进目标文件夹** · 先预览后应用 |
 | **④ STRM** | 给每个视频生成一个 `.strm` 文本文件，播放器当它是本地片 | STRM 任务 · 播放网关 · 302 直链 / 本机代理 |
@@ -83,11 +83,12 @@
 ## ▎ 订阅：让资源自己找上门
 
 - **TG 影片订阅** —— 订阅电影 / 剧集，程序去 Telegram 频道里搜资源并自动推送
-  （磁力 / ed2k / 115 分享链 / 直链都能认）
+  （磁力 / ed2k / 直链都能认，115 / 123 / 夸克 / 光鸭分享链还能自动转存）
 - **番号（JAV）订阅** —— 按影片、演员、清单订阅，自动抓 JAVDB / JAVBUS 的磁链并推送；
   评论区里用户分享的链接也能一并纳入候选
 - **推送通道自动判定** —— 按链接协议与目标网盘的实际能力挑「网盘原生离线」还是「内置下载器」，
-  推不动的会告诉你为什么
+  推不动的会告诉你为什么；**夸克没有原生离线，它的磁力 / 直链会自动落到内置下载器**
+  （本机下完再上传）
 
 ## ▎ 挂载与更多功能
 
@@ -102,7 +103,7 @@
 
 ## ▎ 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.8.1`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.8.2`
 
 ### 一、先确认共享挂载已开启（用到 FUSE 挂载才需要）
 
@@ -159,7 +160,7 @@ sudo mount --make-shared /volume1
 
 ```yaml
 services:
-  litepan:
+  mypan:
     image: desstg/mypan:latest
     container_name: mypan
     restart: unless-stopped
@@ -175,6 +176,10 @@ services:
       # - "42069:42069/udp"
     environment:
       - TZ=Asia/Shanghai
+      # 内置盘搜的地址。指到下面那个 pansou service 的**容器名与内部端口**
+      # （不是宿主机端口）。不装内置盘搜就把这行删掉/注释掉，
+      # 让「搜索服务地址」回落到用户自己填的值。
+      - LITEPAN_PANSOU_BASE_URL=http://pansou:8888
     volumes:
       - ./data:/app/data
       - ./strm:/app/strm
@@ -191,6 +196,42 @@ services:
       # - "api.themoviedb.org:这里填写对应的ip"
       # - "image.tmdb.org:这里填写对应的ip"
     # 注意：也可以在程序内「目录整理 → TMDB 设置」填写反代主域名（自动补 /3 与 /t/p），与 hosts 二选一即可
+
+  # ——————————————————— 可选：内置盘搜 ———————————————————
+  #
+  # 上游项目：https://github.com/fish2018/pansou（镜像直接用官方的，不自建）。
+  # 不装的话把这一整段删掉 —— 但 mypan 那边也要把 LITEPAN_PANSOU_BASE_URL 去掉，
+  # 否则会一直去连一个不存在的容器名。
+  #
+  # ⚠️ 盘搜要靠 TG 频道才有一半结果，而 t.me 在部分网络下连不上：
+  # 那种情况给下面加 `HTTPS_PROXY`（地址写**宿主机的局域网 IP**，
+  # 不能写 127.0.0.1 —— 那指的是容器自己）。
+  pansou:
+    image: ghcr.io/fish2018/pansou:latest
+    container_name: pansou
+    restart: unless-stopped
+    # 只在内部网络暴露，不发布到宿主机。要在浏览器里单独用它的话，
+    # 取消下面两行的注释（注意别和 mypan 的端口撞）。
+    # ports:
+    #   - "8888:8888"
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=8888
+      - CACHE_ENABLED=true
+      - CACHE_PATH=/app/cache
+      # 必须显式指定启用的插件；改完重启容器即可生效。
+      - ENABLED_PLUGINS=dyyjpro,duoduo,djgou,feikuai,gaoqing888,gying,hdmoli,haitunsou,hunhepan,ikantv,jutoushe,kkv,dy4k,libvio,lingjisp,lou1,melost,meitizy,miosou,nyaa,ouge,panlian,pansearch,qqpd,quark4k,quarksoo,quarktv,qupanshe,sousou,thepiratebay,ting77,wanou,weibo,xb6v,xiaokupan,xiaozhang,xiaoyu,yingso,yulinshufa,yunso,yunsou,zlxapp,zxzj,rrbt,quarkres,diduan,erxiao,huban,labi,muou,shandian,zhizhen,clxiong,cyg,jsnoteclub,duanjuw,dyyj,nsgame,cldi,clmao,susu,u3c3,5266ys,dygang,leso,btbtlb,aipan,sopanya,hjzhencai,pan365,buerchen
+      # 认证默认关闭。开了的话，把用户名密码写进 AUTH_USERS，
+      # 并在 MyPan 的「搜索服务地址」旁边那个 Token 里填上登录拿到的令牌。
+      - AUTH_ENABLED=false
+    volumes:
+      - ./data/pansou-cache:/app/cache
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8888/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 ```
 
 ### 三、打开界面
@@ -199,28 +240,34 @@ services:
 
 需要 FUSE 时请确保宿主机具备 `/dev/fuse` 权限。
 
-### 四、推荐：自建一个盘搜，搜索能力会强很多
+### 四、盘搜（搜索转存 / 影视订阅的「搜网盘」都靠它）
 
-「TG 影片订阅」除了抓 Telegram 频道，还能拿片名去**外部网盘搜索服务**里搜资源
-（订阅详情里的「搜索网盘」、以及设置里的「自动搜索」都走这条路）。
-程序内置的默认地址是一个公开演示站，**作者自己说过它被薅到返回 mock 数据、效果可忽略** ——
-想要真正搜得到，建议自己起一个 **[PanSou](https://github.com/fish2018/pansou)**。
+盘搜是「拿片名去全网搜资源」的那条腿，后台**「搜索转存」页**与「影视订阅」的
+**搜网盘 / 自动搜索**都走它。它是个独立的第三方服务，**MyPan 自己不含搜索能力**。
 
-它是一条 Docker 命令的事，**不需要 Telegram 的 api_id / api_hash**：
+**默认已内置**：`docker-compose.yml` 里的 `pansou` service 就是它，
+起来之后 MyPan 会自动指过去（`LITEPAN_PANSOU_BASE_URL=http://pansou:8888`），
+**不用任何配置**。
 
 ```bash
-docker run -d --name pansou -p 805:80 ghcr.io/fish2018/pansou-web
+docker compose up -d          # mypan + pansou 一起起
 ```
 
-> 前后端一体版，起完 `http://你的IP:805` 就能打开搜索页。
-> 想只要后端 API（MyPan 用到的就是 API）用 `ghcr.io/fish2018/pansou:latest`，
-> 那个镜像默认监听 `8888`。两种都行，下面填地址时端口跟着改。
+**不想装内置盘搜**：把 compose 里 `pansou` 那段和 `mypan` 的
+`LITEPAN_PANSOU_BASE_URL` 一起删掉。那样「搜索转存」页会明确提示
+「还没有可用的盘搜」，搜索与「搜网盘」都用不了 —— 除非你到
+「影视订阅 → 推送设置 → 网盘搜索 → 搜索服务地址」填一个自己的盘搜地址（见下）。
 
-**然后把它填进 MyPan**：打开「影视订阅」页 → 右上角齿轮 → **推送设置** →
-**网盘搜索** → 把「搜索服务地址」填成你刚起的那个地址：
+> ⚠️ **不存在「默认公网站」这种东西了。** 老版本的默认地址是一个公开演示站
+> （`so.252035.xyz`），该站**已实测连不上**（pansou 作者自认「被薅到摆烂、
+> 返回 mock 数据」），所以已经删掉。现在「哪都没配」就是明确报错并告诉你
+> 去哪装 —— 而不是拿着一个连不上的地址去打、让你以为是网络问题。
 
-| 你起的容器 | 搜索服务地址填 |
+**想换成自己的盘搜**：填上就用你的，**同一项对「搜索转存」页与订阅的搜网盘都生效**。
+
+| 你的盘搜 | 搜索服务地址填 |
 |---|---|
+| compose 内置的 | 不用填（自动） |
 | `-p 805:80`（前后端一体版） | `http://192.168.31.4:805` |
 | `-p 8888:8888`（纯 API 版） | `http://192.168.31.4:8888` |
 

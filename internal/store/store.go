@@ -42,6 +42,9 @@ type Store struct {
 	JavMediaServers  domain.JavMediaServerRepository
 	JavLibrary       domain.JavLibraryRepository
 	JavPushRecords   domain.JavPushRecordRepository
+
+	// TransferRecords 是「搜索转存」页的转存记录（搜索页与转存页共用一张表）。
+	TransferRecords domain.TransferRecordRepository
 }
 
 // New 基于已打开的 DB 构造仓储集合。
@@ -85,5 +88,7 @@ func New(db *DB) *Store {
 		JavMediaServers:  &javMediaServerRepo{db: db},
 		JavLibrary:       &javLibraryRepo{db: db},
 		JavPushRecords:   &javPushRecordRepo{db: db},
+
+		TransferRecords: &transferRecordRepo{db: db},
 	}
 }

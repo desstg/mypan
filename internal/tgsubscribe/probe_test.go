@@ -86,6 +86,20 @@ func quarkPost(msgID int64, title string) *telegram.Message {
 	}
 }
 
+// 百度分享链：仍然**只识别、不投递**（没有投递器），
+// 是「识别到了但推不出去」这一类现在的样本。
+const probeBaiduURL = "https://pan.baidu.com/s/1abcdefghijk"
+
+func baiduPost(msgID int64, title string) *telegram.Message {
+	return &telegram.Message{
+		MessageID: msgID,
+		Text:      title + "\n💾 大小： 1.18 GB\n🔗 链接： 点击跳转",
+		Entities: []telegram.MessageEntity{{
+			Type: "text_link", Offset: 0, Length: 4, URL: probeBaiduURL,
+		}},
+	}
+}
+
 func TestProbeWarningBotDeepLinks(t *testing.T) {
 	s := newProbeService()
 	scan := s.scanPage(pageWith(botDeepLinkPost()))
@@ -208,23 +222,57 @@ func TestProbeWarningOnlyShares(t *testing.T) {
 //
 // 实测 QukanMovie 就是这样：16 条资源里 15 条是分享链，只有 1 条 ed2k 能推。
 // 只报「有能推的」会让用户以为自己没漏东西 —— 那恰恰是这次改造要解决的困惑。
+//
+// ⚠️ 样本从「夸克分享」换成了「百度分享」：夸克分享 2026-10-12 起**已经有投递器**
+// 了，不再是「识别得到但投不出去」的样本。百度/阿里/迅雷那几个仍然只识别不投递。
 func TestProbeWarnsAboutUndeliverableEvenWhenSomethingIsDeliverable(t *testing.T) {
 	s := newProbeService()
 	magnet := &telegram.Message{
 		MessageID: 1,
 		Text:      "生逢其时 (2026) S01E15 4K WEB-DL\nmagnet:?xt=urn:btih:" + strings.Repeat("a", 40),
 	}
-	scan := s.scanPage(pageWith(magnet, quarkPost(2, "绿灯军团 (2026) S01E05 4K WEB-DL")))
+	scan := s.scanPage(pageWith(magnet, baiduPost(2, "绿灯军团 (2026) S01E05 4K WEB-DL")))
 
 	warnings := s.probeWarnings(scan, 0)
 	if len(warnings) != 1 {
 		t.Fatalf("应给出「有投不了的资源」这一条，实际 %v", warnings)
 	}
-	if !strings.Contains(warnings[0], "夸克分享") {
+	if !strings.Contains(warnings[0], "百度网盘分享") {
 		t.Errorf("结论应点名投不了的类型：%s", warnings[0])
 	}
 	if strings.Contains(warnings[0], "没有可投递的资源") {
 		t.Errorf("有磁力可推，不该说「没有可投递的资源」：%s", warnings[0])
+	}
+}
+
+// 夸克分享**不再是**「只识别不投递」的那一类。
+//
+// 钉的是 2026-10-12 这次改动：夸克驱动的 ShareReceiver 补上之后，
+// 夸克分享链应该被判成「可投递」，与 115 一视同仁。它没有出现在任何
+// 「暂不支持投递」的结论里，才算真的接上了。
+func TestProbeQuarkSharesAreNowDeliverable(t *testing.T) {
+	s := newProbeService()
+	scan := s.scanPage(pageWith(
+		quarkPost(1, "绿灯军团 (2026) S01E05 4K WEB-DL"),
+		quarkPost(2, "生逢其时 (2026) S01E15 4K WEB-DL"),
+	))
+	if scan.counts[KindShareQuark] != 2 {
+		t.Fatalf("应抽到 2 条夸克分享，实际 %d", scan.counts[KindShareQuark])
+	}
+
+	counts := s.probeResourceCounts(scan)
+	for _, item := range counts {
+		if item.Kind == KindShareQuark && !item.Deliverable {
+			t.Errorf("夸克分享现在应当可投递，实际 Deliverable=false")
+		}
+	}
+	// 「只能识别、不能投递」那条结论里不能出现夸克分享 —— 它现在能投了。
+	// （另一条讲账号前提的提示里会提到夸克分享与「暂不支持投递」，那是另一回事，
+	// 说的是「推到不匹配的账号上」会怎样。）
+	for _, w := range s.probeWarnings(scan, 0) {
+		if strings.Contains(w, "只能识别、不能投递") && strings.Contains(w, "夸克分享") {
+			t.Errorf("不该再把夸克分享列进「只能识别、不能投递」：%s", w)
+		}
 	}
 }
 

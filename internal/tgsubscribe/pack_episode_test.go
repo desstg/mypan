@@ -8,10 +8,10 @@ import "testing"
 // 错记会让详情页把没有的集标成绿的，而且再也纠正不回来。
 func TestParseEpisodeFromFileName(t *testing.T) {
 	cases := []struct {
-		name          string
-		season        int
-		episode       int
-		ok            bool
+		name    string
+		season  int
+		episode int
+		ok      bool
 	}{
 		{"Show.S01E05.1080p.mkv", 1, 5, true},
 		{"Show.s01e05.mkv", 1, 5, true},

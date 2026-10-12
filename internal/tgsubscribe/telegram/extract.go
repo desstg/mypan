@@ -21,7 +21,10 @@ const (
 	ResourceKindED2K       = "ed2k"
 	ResourceKindShare115   = "share_115"
 	ResourceKindShareQuark = "share_quark"
-	ResourceKindHTTP       = "http"
+	// 123 与光鸭也都已经有转存实现（ShareSaveDeliverer + 各自的驱动）。
+	ResourceKindShare123     = "share_123"
+	ResourceKindShareGuangya = "share_guangya"
+	ResourceKindHTTP         = "http"
 
 	// 以下这些**只识别、不投递**（没有对应的 Deliverer）。
 	//
@@ -37,7 +40,6 @@ const (
 	ResourceKindShareBaidu    = "share_baidu"    // 百度网盘
 	ResourceKindShareXunlei   = "share_xunlei"   // 迅雷云盘
 	ResourceKindShareUC       = "share_uc"       // UC 网盘
-	ResourceKindShare123      = "share_123"      // 123 网盘
 	ResourceKindShare189      = "share_189"      // 天翼云盘
 	ResourceKindSharePikPak   = "share_pikpak"   // PikPak
 	ResourceKindShareLanzou   = "share_lanzou"   // 蓝奏云

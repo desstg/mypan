@@ -149,9 +149,14 @@ func TestExistingShareDeliverabilityUnchanged(t *testing.T) {
 		t.Error("115 分享必须仍然有投递器")
 	}
 
-	// 夸克没有投递器，也不该被判成「可投递」。
-	if _, reason, ok := s.deliverabilityFor(context.Background(), 7, newActiveSub(7), KindShareQuark); ok {
-		t.Errorf("夸克不该被判成可投递（原因 %q）", reason)
+	// ⚠️ 这条断言的语义 2026-10-12 变了：夸克分享**现在有投递器了**，
+	// 「可投递」与否取决于**目标账号的驱动认不认这一种分享**。
+	// 测试脚手架里没有 exec（探测不到驱动），所以按保守规则放行 ——
+	// 这也正是 partitionByDeliverable 的既定行为：探测不到不拦。
+	// 真正「夸克分享推给 115 账号要被挡住」的用例在 pusher_share_test.go
+	// 的 TestShareSaveDelivererRejectsMismatchedKind（那里有真驱动桩）。
+	if _, reason, ok := s.deliverabilityFor(context.Background(), 7, newActiveSub(7), KindShareQuark); !ok {
+		t.Errorf("探测不到驱动时不该拦下夸克分享（原因 %q）", reason)
 	}
 }
 

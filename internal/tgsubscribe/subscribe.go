@@ -150,11 +150,15 @@ type ConfigView struct {
 	BackfillPages   int `json:"backfill_pages"`
 	// 网盘搜索（拿片名去外部搜索站点搜磁力）。地址留空即用内置默认值 ——
 	// 前端展示的是**生效值**，用户清空它就该看到回落到默认，而不是一个空框。
-	WebSearchEnabled    bool   `json:"web_search_enabled"`
-	WebSearchBaseURL    string `json:"web_search_base_url"`
-	WebSearchCloudTypes string `json:"web_search_cloud_types"`
-	WebSearchToken      string `json:"web_search_token"`
-	WebSearchUseProxy   bool   `json:"web_search_use_proxy"`
+	WebSearchEnabled bool   `json:"web_search_enabled"`
+	WebSearchBaseURL string `json:"web_search_base_url"`
+	// WebSearchBaseURLIsDefault 报告上面那个地址是**内置默认**（用户没填过）。
+	// 前端据此把「搜索服务地址」输入框自动填上它、并标一句「内置」——
+	// 用户一改就变成显式值，从此以用户的为准。
+	WebSearchBaseURLIsDefault bool   `json:"web_search_base_url_is_default"`
+	WebSearchCloudTypes       string `json:"web_search_cloud_types"`
+	WebSearchToken            string `json:"web_search_token"`
+	WebSearchUseProxy         bool   `json:"web_search_use_proxy"`
 	// 自动搜索：按固定间隔替「还没收齐」的订阅主动搜。间隔与频道抓取间隔分开，
 	// 理由见 settings.KeyTGWebSearchAuto 的注释（两者成本差着量级）。
 	WebSearchAuto        bool `json:"web_search_auto"`
@@ -219,9 +223,18 @@ func (s *Service) ConfigView(ctx context.Context) ConfigView {
 		WebSearchAuto:        s.webSearchAuto(),
 		WebSearchIntervalSec: int(s.webSearchInterval() / time.Second),
 	}
-	// 地址与类型走同一个读取点拿**生效值**：留空回落内置默认。展示的和实际发请求
+	// 地址走同一个读取点拿**生效值**：留空回落内置盘搜。展示的和实际发请求
 	// 用的必须是同一个值，两边各写一份必然漂移（见 webSearchSettings 的注释）。
-	view.WebSearchBaseURL, view.WebSearchCloudTypes, view.WebSearchToken = s.webSearchSettings()
+	//
+	// ⚠️ 类型**不在这里回显成生效值** —— 它现在是按「每条订阅的目标账号」推导的
+	// （见 effectiveCloudTypes），一份全局值代表不了它。所以这里回显的是**用户存的那个值**
+	// 本身（可能是空串 = 用默认），界面上的说明文案也据此写成「不填则按目标网盘自动决定」。
+	view.WebSearchBaseURL, view.WebSearchToken = s.webSearchSettings()
+	view.WebSearchCloudTypes = strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGWebSearchCloudTypes))
+	// 「内置」角标只在**真有内置地址**时打：用户没填、也没装内置盘搜时地址是空串，
+	// 那时候标一个「内置」会让用户以为配好了，实际搜索必然失败。
+	view.WebSearchBaseURLIsDefault = view.WebSearchBaseURL != "" &&
+		strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGWebSearchBaseURL)) == ""
 	if raw := strings.TrimSpace(s.settings.String(settings.KeyTGBotDefaultAccountID)); raw != "" {
 		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			view.DefaultAccountID = v
@@ -248,10 +261,21 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 		settings.KeyTGBotMaxPushPerHour:   strconv.Itoa(maxInt(in.MaxPushPerHour, 1)),
 		settings.KeyTGWebSearchEnabled:    boolString(in.WebSearchEnabled),
 		settings.KeyTGWebSearchBaseURL:    strings.TrimSpace(in.WebSearchBaseURL),
-		settings.KeyTGWebSearchCloudTypes: strings.TrimSpace(in.WebSearchCloudTypes),
 		settings.KeyTGWebSearchToken:      strings.TrimSpace(in.WebSearchToken),
 		settings.KeyTGWebSearchUseProxy:   boolString(in.WebSearchUseProxy),
 		settings.KeyTGWebSearchAuto:       boolString(in.WebSearchAuto),
+	}
+	// ⚠️ 搜索类型**只在旧库里已经有值时**才写。
+	//
+	// 这个键现在的语义是「用户额外想追加的类型」，主类型由推送目标账号推导
+	// （见 effectiveCloudTypes）。而老版本的默认值就是 `magnet,115`，它会随着
+	// 历史配置一路存下来 —— 于是「指向夸克的订阅」会被追加一个它根本存不了的 115，
+	// 搜出来一屏灰按钮。用户从没填过这一栏，却要为此去清空一个他没碰过的输入框。
+	//
+	// 判据用「库里有没有这个键」而不是「值等不等于默认值」：后者会把用户**主动**
+	// 填成 `magnet,115` 的意图也当成默认值抹掉。
+	if _, exists := s.settings.Stored(settings.KeyTGWebSearchCloudTypes); exists {
+		patch[settings.KeyTGWebSearchCloudTypes] = strings.TrimSpace(in.WebSearchCloudTypes)
 	}
 	// 抓取间隔与回填页数只在用户真的传了值时才写 —— 0 是合法的「不回填」，
 	// 但把它当成「没填」会让关闭回填这个操作失效。所以用 >0 判断间隔，

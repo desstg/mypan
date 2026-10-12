@@ -24,6 +24,7 @@ const adminPageLoaders = {
   "cross-transfer": () => import("@/components/admin/CrossDriveTransferPage.vue"),
   share: () => import("@/components/admin/FileShareManagement.vue"),
   subscribe: () => import("@/components/admin/TGSubscribePage.vue"),
+  "search-transfer": () => import("@/components/admin/SearchTransferPage.vue"),
 };
 const DashboardManagement = defineAsyncComponent(adminPageLoaders.dashboard);
 const AccountManagement = defineAsyncComponent(adminPageLoaders.accounts);
@@ -33,6 +34,7 @@ const AuxToolsManagement = defineAsyncComponent(adminPageLoaders.tools);
 const CrossDriveTransferPage = defineAsyncComponent(adminPageLoaders["cross-transfer"]);
 const FileShareManagement = defineAsyncComponent(adminPageLoaders.share);
 const TGSubscribePage = defineAsyncComponent(adminPageLoaders.subscribe);
+const SearchTransferPage = defineAsyncComponent(adminPageLoaders["search-transfer"]);
 import { logout, fetchSystemConfig } from "@/api/auth";
 import { useAuthStore } from "@/stores/auth";
 import { provideAdminPageContext } from "@/composables/useAdminLoadingBar";
@@ -54,6 +56,7 @@ const nav = [
   // 「影视订阅」是 subscribe 那一页的显示名（用户要求改的，功能不变）——
   // key 仍是 subscribe：路由 ?page=subscribe、图标、各 tab 一律不动。
   { key: "subscribe", label: "影视订阅", icon: "fire" },
+  { key: "search-transfer", label: "搜索转存", icon: "search" },
 ];
 const navKeys = nav.map((n) => n.key);
 
@@ -82,6 +85,10 @@ const PAGE_TABS: Record<string, { defaultTab: string; tabs: Record<string, strin
   subscribe: {
     defaultTab: "subscribed",
     tabs: { subscribed: "已订阅", movie: "电影", tv: "剧集", jav: "番号" },
+  },
+  "search-transfer": {
+    defaultTab: "search",
+    tabs: { search: "搜索", transfer: "转存", records: "转存记录" },
   },
 };
 
@@ -304,7 +311,7 @@ onMounted(async () => {
     />
 
     <AdminEmptyState
-      v-if="!cachedPageComponent && !['settings', 'cross-transfer', 'share', 'subscribe'].includes(page)"
+      v-if="!cachedPageComponent && !['settings', 'cross-transfer', 'share', 'subscribe', 'search-transfer'].includes(page)"
       icon="🚧"
       :title="`「${nav.find((n) => n.key === page)?.label}」功能开发中`"
     />
@@ -319,6 +326,7 @@ onMounted(async () => {
       <CrossDriveTransferPage v-else-if="page === 'cross-transfer'" />
       <FileShareManagement v-else-if="page === 'share'" />
       <TGSubscribePage v-else-if="page === 'subscribe'" />
+      <SearchTransferPage v-else-if="page === 'search-transfer'" />
       <component :is="cachedPageComponent" v-else-if="cachedPageComponent" :key="page" />
     </KeepAlive>
   </AdminShell>

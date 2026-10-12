@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"litepan/internal/domain"
+	"litepan/internal/pansou"
 	"litepan/internal/settings"
 	"litepan/internal/tgsubscribe/telegram"
 )
@@ -32,8 +33,12 @@ import (
 //     「只落库、不 MarkPost、不进聚合窗口」的路径。
 //  3. **绝不自动推送**。搜到的结果一律标 ambiguous，等用户点「立即推送」。
 type webSearchClient interface {
-	// searchHits 搜一个关键词。方法名不导出：实现它的 pansouClient 也在本包内，
-	// 而这个接口唯一的存在理由是让测试能注入桩（同 PageFetcher，见 preview_fetch.go）。
+	// searchHits 搜一个关键词。方法名不导出：订阅侧用的是一个**适配器**
+	// （pansouAdapter，把 pansou.Hit 转成 webHit），而真正实现搜索的
+	// pansou.Client 住在 internal/pansou —— 那边要给后台「搜索转存」页共用。
+	//
+	// 保持这个私有接口而不是直接用 pansou.Client，是为了让测试能注入桩
+	// （同 PageFetcher，见 preview_fetch.go）：桩只需实现这一个方法。
 	searchHits(ctx context.Context, keyword string) ([]webHit, error)
 }
 
@@ -48,23 +53,14 @@ type webHit struct {
 
 // 默认值。settings 注册表里这几项都注册成空串（语义是「未设置」），由这里兜底 ——
 // 保持**单一真相源**，别改成两处各写一份（base_url 曾经就是这么漂移的）。
+//
+// 地址与网盘类型这两个默认值住在 internal/pansou（后台「搜索转存」页也要用），
+// 这里只引用它们，不再另立一份。
 const (
-	defaultWebBaseURL     = "https://so.252035.xyz"
 	defaultWebSearchLabel = "网盘搜索"
 
-	// defaultWebCloudTypes 是默认搜索的网盘类型，**不能退回只搜磁力**。
-	//
-	// 实测（2026-09-18）拆开类型看才知道：这个站的国产内容里磁力几乎为零 ——
-	// 搜「生逢其时」共 204 条结果，磁力 **0** 条（夸克49/百度46/迅雷30/UC22/115:20/123:20/阿里17）；
-	// 搜「侠探杰克」共 148 条，磁力只有 6 条（**4.1%**），其余是夸克71/百度20/迅雷15/阿里12/115:9…
-	//
-	// 也就是说 `magnet` 这一个词会把 96%~100% 的结果直接扔掉，用户看到的就是
-	// 「几乎永远搜不到」。加上 115 之后，上面两部片子的候选从 0/6 条变成 20/15 条。
-	//
-	// 为什么是 115 而不是「全部类型」：115 是用户**除磁力外唯一能真推**的类型
-	// （ShareSaveDeliverer 转存）；夸克/百度/阿里/天翼/123/UC/迅雷既没有投递器，
-	// 用户也没有对应账号，收进来只会堆一屏「已识别，暂不支持投递」。
-	defaultWebCloudTypes    = "magnet,115"
+	// defaultWebCloudTypes 的说明见 pansou.DefaultCloudTypes —— 「不能退回只搜磁力」
+	// 那条实测结论与订阅侧的取舍都在那边。后台搜索转存页会显式传更宽的类型列表。
 	defaultWebSearchTimeout = 30 * time.Second
 
 	// defaultWebSearchInterval 是自动搜索的默认间隔。
@@ -75,11 +71,17 @@ const (
 	defaultWebSearchInterval = 6 * time.Hour
 )
 
-// webSearcher 按当前设置构造搜索客户端。设置变了就重建 —— 地址、超时、代理都可能改。
+// webSearcher 按当前设置 + **这条订阅的推送目标账号**构造搜索客户端。
+// 设置或目标账号变了就重建 —— 地址、超时、代理、搜索类型都可能改。
 //
 // 与 previewFor 同一套模式：测试注入口优先（生产代码从不设置 webSearch），
 // 否则按 baseURL + token + cloudTypes + 代理 + 超时算一个 key 缓存住。
-func (s *Service) webSearcher() webSearchClient {
+//
+// ⚠️ sub 参与搜索类型的推导（见 effectiveCloudTypes）：TG 订阅的搜索是**为某条订阅
+// 找可投递的资源**，所以「搜哪些网盘类型」要跟着那条订阅的推送目标走 ——
+// 目标账号是夸克就搜「磁力 + 夸克」，是光鸭就搜「磁力 + 光鸭」。
+// sub 为 nil（没有订阅上下文）时回落到设置里的那份列表。
+func (s *Service) webSearcher(sub *domain.TGSubscription) webSearchClient {
 	if s == nil {
 		return nil
 	}
@@ -89,7 +91,14 @@ func (s *Service) webSearcher() webSearchClient {
 	if s.settings == nil || !s.webSearchEnabled() {
 		return nil
 	}
-	baseURL, cloudTypes, token := s.webSearchSettings()
+	baseURL, token := s.webSearchSettings()
+	cloudTypes := s.effectiveCloudTypes(sub)
+	// ⚠️ 地址是空串说明「既没装内置盘搜、用户也没填」。这时候**不构造客户端** ——
+	// 构造出来也是拿着空串去打，错误文案是 pansou 那句「没有配置网盘搜索服务地址」，
+	// 它看不出「该去哪装」。返回 nil，由 searchWebOnce 给出一句可执行的提示。
+	if strings.TrimSpace(baseURL) == "" {
+		return nil
+	}
 	timeout := time.Duration(s.webSearchTimeoutSec()) * time.Second
 	proxy := ""
 	if s.webSearchUseProxy() {
@@ -102,9 +111,52 @@ func (s *Service) webSearcher() webSearchClient {
 	if s.pansou != nil && s.pansouKey == key {
 		return s.pansou
 	}
-	s.pansou = newPansouClient(baseURL, token, cloudTypes, proxy, timeout)
+	s.pansou = newPansouAdapter(pansou.New(pansou.Options{
+		BaseURL:    baseURL,
+		Token:      token,
+		CloudTypes: cloudTypes,
+		ProxyURL:   proxy,
+		Timeout:    timeout,
+	}))
 	s.pansouKey = key
 	return s.pansou
+}
+
+// effectiveCloudTypes 决定这条订阅该搜哪些网盘类型。
+//
+// **「按用户选择保存的网盘，推送相应支持的类型」**——就是这一句：
+//
+//  1. 解析这条订阅的推送目标账号（订阅覆盖 → 全局默认），和真正推送时用的是
+//     同一个 resolveTarget，所以两边不会分叉；
+//  2. 基础类型 = pansou.CloudTypesForDriver，即「磁力 + 该网盘自己那一类」
+//     （115 / 123 / 夸克 / 光鸭 各有自己的分享链，只有把那一类搜出来才推得动）；
+//  3. 用户额外填的类型**追加**在后（见 pansou.MergeCloudTypes）——
+//     想多搜几类时不必牺牲基础的「磁力 + 目标网盘」；
+//  4. **拿不到账号就只用用户填的那份** —— 不从这里下「只搜磁力」这种结论。
+//     目标没配、账号被删、解析报错时静默降级，用户会看到候选凭空变少而找不到原因。
+func (s *Service) effectiveCloudTypes(sub *domain.TGSubscription) string {
+	extra := ""
+	if s != nil && s.settings != nil {
+		extra = strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGWebSearchCloudTypes))
+	}
+	base := ""
+	if s != nil && s.accounts != nil && sub != nil {
+		if accountID, _, _, err := s.resolveTarget(context.Background(), sub); err == nil && accountID > 0 {
+			if acct, err := s.accounts.Get(context.Background(), accountID); err == nil && acct != nil {
+				if t := pansou.CloudTypesForDriver(acct.DriverType); t != "" {
+					base = t
+				}
+			}
+		}
+	}
+	if base == "" {
+		// 解析不到账号：用户填了就只用用户填的，没填才回落内置默认。
+		if extra != "" {
+			return extra
+		}
+		return pansou.DefaultCloudTypes
+	}
+	return pansou.MergeCloudTypes(base, extra)
 }
 
 // resetWebSearcher 丢弃缓存的客户端，下次 webSearcher 会按新设置重建。
@@ -124,9 +176,16 @@ func (s *Service) resetWebSearcher() {
 // 必须是同一个值 —— 之前两处各写一份，结果就是界面上显示着默认地址、客户端却
 // 拿着空串去发请求，用户看到「没有配置网盘搜索服务地址」而界面上明明有地址。
 //
-// 「空 = 用默认」而不是「空 = 报错」是刻意的：用户清空地址就该回到开箱可用的状态，
-// 而不是把一个必填项留给一个本来就是可选的设置。
-func (s *Service) webSearchSettings() (baseURL, cloudTypes, token string) {
+// 「空 = 用内置」而不是「空 = 报错」是刻意的：用户清空地址就该回到装完即可用的状态
+// （compose 里的 pansou sidecar），而不是把一个必填项留给一个本来就是可选的设置。
+//
+// ⚠️ baseURL 可能回落成**空串**：既没装内置盘搜、用户也没填。调用方必须判空 ——
+// 拿空串去打会得到「没有配置网盘搜索服务地址」（pansou.Client 的第一道校验）。
+//
+// ⚠️ 这里**只返回地址与令牌**，不返回搜索类型：类型要按订阅的推送目标账号推导
+// （见 effectiveCloudTypes）。早先这里连类型一起返回，于是「搜索类型」和
+// 「真正发请求用的类型」是两份可能不一致的值 —— 那正是下面注释里说的那个坑。
+func (s *Service) webSearchSettings() (baseURL, token string) {
 	read := func(key, fallback string) string {
 		if s == nil || s.settings == nil {
 			return fallback
@@ -137,9 +196,7 @@ func (s *Service) webSearchSettings() (baseURL, cloudTypes, token string) {
 	if s != nil && s.settings != nil {
 		token = strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyTGWebSearchToken))
 	}
-	return read(settings.KeyTGWebSearchBaseURL, defaultWebBaseURL),
-		read(settings.KeyTGWebSearchCloudTypes, defaultWebCloudTypes),
-		token
+	return read(settings.KeyTGWebSearchBaseURL, pansou.DefaultBaseURL()), token
 }
 
 func (s *Service) webSearchEnabled() bool {
@@ -239,8 +296,16 @@ func (s *Service) searchWebOnce(
 	sub *domain.TGSubscription,
 	ingest func(context.Context, webHit, []*domain.TGSubscription, int64) bool,
 ) (*WebSearchResult, error) {
-	searcher := s.webSearcher()
+	searcher := s.webSearcher(sub)
 	if searcher == nil {
+		// 分两种情况，文案必须不一样：开关没开是「去设置里打开」，
+		// 开关开着但地址是空串则是「去装内置盘搜或填地址」——
+		// 后者糊成前者的文案，用户会一直去设置页里找一个早就打开的开关。
+		if s.webSearchEnabled() {
+			return nil, domain.Errorf(domain.CodeValidation,
+				"没有可用的盘搜服务：请在 docker-compose.yml 里启用内置盘搜（pansou），"+
+					"或到「TG 订阅设置 → 网盘搜索 → 搜索服务地址」填一个自己的盘搜地址")
+		}
 		return nil, domain.Errorf(domain.CodeValidation,
 			"网盘搜索未启用，请先到 TG 订阅设置里打开「网盘搜索」")
 	}
@@ -275,7 +340,7 @@ func (s *Service) searchWebOnce(
 			// 单个关键词失败不终止整轮：站点不稳定是常态，已经搜到的结果不该白费。
 			s.log.Warn("tg subscribe web search failed", "sub", sub.ID, "keyword", kw, "err", err)
 			res.FailedRequests++
-			failures[searchFailureReason(err)]++
+			failures[pansou.FailureReason(err)]++
 			s.sleepRequestGap(ctx)
 			continue
 		}

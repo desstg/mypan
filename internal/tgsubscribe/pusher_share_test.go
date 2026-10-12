@@ -22,6 +22,9 @@ type stubShareDriver struct {
 	err    error
 	got    driver.ShareReceiveRequest
 	calls  int
+	// kinds 是 ShareKinds() 的返回值；留空时按「只认 115」处理
+	// （与 internal/driver/share.go 的接口契约一致）。
+	kinds string
 }
 
 func (d *stubShareDriver) Config() driver.Config      { return driver.Config{Name: "stub"} }
@@ -32,6 +35,13 @@ func (d *stubShareDriver) Ping(context.Context) error { return nil }
 
 func (d *stubShareDriver) ListFiles(context.Context, string) ([]domain.FileItem, error) {
 	return nil, nil
+}
+
+func (d *stubShareDriver) ShareKinds() string {
+	if d.kinds == "" {
+		return driver.ShareKind115
+	}
+	return d.kinds
 }
 
 func (d *stubShareDriver) ShareReceiveCapabilities() driver.ShareReceiveCapabilities { return d.caps }
@@ -143,13 +153,84 @@ func TestParseShareResource(t *testing.T) {
 
 func TestShareSaveDelivererSupports(t *testing.T) {
 	d := &ShareSaveDeliverer{}
-	if !d.Supports(KindShare115) {
-		t.Error("应支持 115 分享")
+	// 三种分享链都归它管。「这个驱动能不能转这一种」是另一回事 ——
+	// 由驱动报的 ShareKinds() 在 Deliver/Deliverability 里判（见下一条）。
+	for _, kind := range []string{KindShare115, KindShare123, KindShareQuark} {
+		if !d.Supports(kind) {
+			t.Errorf("应支持 %s 分享", kind)
+		}
 	}
-	for _, kind := range []string{KindShareQuark, KindMagnet, KindED2K, KindHTTP} {
+	for _, kind := range []string{KindMagnet, KindED2K, KindHTTP} {
 		if d.Supports(kind) {
 			t.Errorf("不该接管 %s", kind)
 		}
+	}
+}
+
+// shareKindMatches 是 tgsubscribe 的 Kind* 与 driver.ShareKind* 两套词表之间的
+// **唯一**转换点。判错的后果很具体：要么把夸克分享推给 115 账号（拿夸克分享码
+// 去打 115 接口，回来一句与真实原因无关的错误），要么把本来能推的挡住。
+func TestShareKindMatches(t *testing.T) {
+	cases := []struct {
+		reported string
+		kind     string
+		want     bool
+	}{
+		{driver.ShareKind115, KindShare115, true},
+		{driver.ShareKind123, KindShare123, true},
+		{driver.ShareKindQuark, KindShareQuark, true},
+		// 错配：这才是这条闸门存在的理由。
+		{driver.ShareKind115, KindShareQuark, false},
+		{driver.ShareKindQuark, KindShare115, false},
+		{driver.ShareKind115, KindShare123, false},
+		// 多值形态（接口允许逗号分隔）。
+		{"115,123", KindShare123, true},
+		{"115,123", KindShareQuark, false},
+		// 非分享类型一律不认。
+		{driver.ShareKind115, KindMagnet, false},
+	}
+	for _, tc := range cases {
+		if got := shareKindMatches(tc.reported, tc.kind); got != tc.want {
+			t.Errorf("shareKindMatches(%q, %q) = %v，期望 %v", tc.reported, tc.kind, got, tc.want)
+		}
+	}
+}
+
+// 驱动的 ShareKinds() 与请求的类型对不上时必须被明确挡住，
+// 而不是把分享码丢给驱动去撞一个看不懂的错误。
+func TestShareSaveDelivererRejectsMismatchedKind(t *testing.T) {
+	drv := &stubShareDriver{
+		kinds: driver.ShareKindQuark,
+		caps:  driver.ShareReceiveCapabilities{Ready: true},
+	}
+	s := newShareServiceForTest(t, drv, nil)
+
+	ctx := context.Background()
+	sub := &domain.TGSubscription{
+		TMDBID: "999", MediaType: domain.TGMediaTypeTV,
+		Title: "测试剧", Year: 2026, Status: domain.TGSubStatusActive,
+		TargetAccountID: 1, TargetParentID: "349", TargetDisplayPath: "/tv/测试剧 (2026)",
+		PushProvider: domain.TGPushProviderAuto, CollectWindowMin: 5,
+	}
+	subID, err := s.subs.Create(ctx, sub)
+	if err != nil {
+		t.Fatalf("create sub: %v", err)
+	}
+	sub.ID = subID
+
+	_, err = s.shareSaver.Deliver(ctx, DeliverRequest{
+		AccountID:      1,
+		TargetParentID: "349",
+		Resource: Resource{
+			Raw:  "https://115.com/s/swsa2t23zrk?password=t58d",
+			Kind: KindShare115,
+		},
+	})
+	if err == nil {
+		t.Fatal("夸克驱动转 115 分享应当报错")
+	}
+	if drv.calls != 0 {
+		t.Errorf("被挡住时不该真的去转存，实际调了 %d 次", drv.calls)
 	}
 }
 
@@ -536,8 +617,15 @@ func TestDelivererRouting(t *testing.T) {
 	if got := s.delivererFor(KindMagnet); got != Deliverer(s.pusher) {
 		t.Errorf("磁力该路由给 Pusher，实际 %T", got)
 	}
-	if got := s.delivererFor(KindShareQuark); got != nil {
-		t.Errorf("夸克分享当前没有投递器，实际 %T", got)
+	// 夸克分享现在也有了投递器（三种分享链共用一个）。
+	if got := s.delivererFor(KindShareQuark); got != Deliverer(s.shareSaver) {
+		t.Errorf("夸克分享该路由给 ShareSaveDeliverer，实际 %T", got)
+	}
+	// 仍然只识别不投递的那些：一个投递器都不该接。
+	for _, kind := range []string{KindShareBaidu, KindShareXunlei, KindShareAliyun} {
+		if got := s.delivererFor(kind); got != nil {
+			t.Errorf("%s 仍然没有投递器，实际 %T", kind, got)
+		}
 	}
 }
 
