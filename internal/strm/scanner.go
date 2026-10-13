@@ -617,10 +617,21 @@ func dirRelPath(relDirs []string) string {
 	return strings.Join(relDirs, "/")
 }
 
-// listDirWithNotFoundRetry 三段式列目录：正常列 → not found 强刷一次 → 仍 not found 记录失败并跳过。
+// listDirWithNotFoundRetry 列一次目录：正常列 → not found 强刷一次 → 仍 not found 记录失败并跳过。
 // 返回 err 非 nil 表示非 not found 的致命错误，由上层中止扫描。
+//
+// ⚠️ **第一次列目录必须 `forceRefresh=true`**（2026-10-13 修，用户报「网盘新加的目录
+// 不会同步到本地」）。原因：`file.Service.List` 是**先看缓存**的（TTL = 账号的
+// `cache_ttl`，用户那边 30 分钟），而扫描是**对账**动作 —— 它读的必须是网盘当下的
+// 真实目录树，不是「谁刚才读过一遍」的副本。走缓存时，用户在网盘里新建的目录在
+// TTL 内怎么扫都看不见：父目录那份缓存的列表里压根没有这个子项，`walkScope` 也就
+// 永远不会走进它。表现正是「第一次扫描正常，之后新加的目录一直不出现」。
+//
+// 只强刷**这一层**（不是整个账号）：往下每层各自强刷一次，代价是每目录一次列表请求，
+// 与「逐目录递归」这条路本来就有的请求量同量级；换来的判据是自明的 ——
+// 扫描看到的永远是网盘现状。
 func listDirWithNotFoundRetry(ctx context.Context, task *domain.StrmTask, deps ScanDeps, parentID string, relDirs []string) (items []domain.FileItem, skip bool, err error) {
-	items, err = deps.Files.List(ctx, task.AccountID, parentID, false)
+	items, err = deps.Files.List(ctx, task.AccountID, parentID, true)
 	if err != nil && looksLikeNotFound(err) {
 		items, err = deps.Files.List(ctx, task.AccountID, parentID, true)
 	}

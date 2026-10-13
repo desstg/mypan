@@ -299,3 +299,68 @@ func TestResolveJavItemSafety(t *testing.T) {
 	}
 	_ = s
 }
+
+// writeForeignImageLibrary 只摆「外部媒体库那三种形态」，供图挑选的用例用。
+//
+// 与 writeJavLibrary 分开：那个 helper 被几个计数的用例共用（卡片数、统计数），
+// 往里加东西会让那些断言跟着变 —— 而它们验的是布局语义，不该被图片格式的
+// 用例牵连。
+func writeForeignImageLibrary(t *testing.T, root string) {
+	t.Helper()
+	write := func(rel string, body []byte) {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A) 独占目录，图是 png（另一个项目 / Emby 刮的）—— 只认 .jpg 会整批没图
+	write("有码/PNGONLY-001/PNGONLY-001.strm", []byte("url"))
+	write("有码/PNGONLY-001/poster.png", []byte("p"))
+	write("有码/PNGONLY-001/thumb.png", []byte("t"))
+	write("有码/PNGONLY-001/fanart.png", []byte("f"))
+	// B) 平铺目录（同层多个 .strm），图却是**裸名**的 poster.jpg
+	write("有码/FLATBARE-001/FLATBARE-001-a.strm", []byte("url"))
+	write("有码/FLATBARE-001/FLATBARE-001-b.strm", []byte("url"))
+	write("有码/FLATBARE-001/poster.jpg", []byte("p"))
+	write("有码/FLATBARE-001/thumb.jpg", []byte("t"))
+	// C) 独占目录，图是 webp
+	write("有码/WEBPONLY-001/WEBPONLY-001.strm", []byte("url"))
+	write("有码/WEBPONLY-001/poster.webp", []byte("p"))
+}
+
+// 外部媒体库的图有四种扩展名、两种布局，卡片必须都能显示。
+//
+// 用户 2026-10-13 报的场景：同一棵树在 Emby 里全部正常，在我们的海报墙上
+// 「有些显示、有些不显示」。实测那棵树里 207 份 poster.jpg + 101 份 poster.png
+// + 9 份 poster.webp，而当时只认 `.jpg` 与「本布局自己的名字」——
+// 于是 png/webp 那批、以及平铺目录里放裸名图的那些整批成了空壳。
+func TestJavWallPicksForeignImageVariants(t *testing.T) {
+	root := t.TempDir()
+	writeForeignImageLibrary(t, root)
+	snap := javWallSnapshotForTest(t, root, nil)
+
+	byStem := map[string]JavWallItem{}
+	for _, row := range snap.rows {
+		byStem[row.item.Stem] = row.item
+	}
+	cases := []struct {
+		stem, why string
+	}{
+		{"PNGONLY-001", "图是 png"},
+		{"WEBPONLY-001", "图是 webp"},
+		{"FLATBARE-001-a", "平铺目录里放裸名 poster.jpg"},
+	}
+	for _, tc := range cases {
+		it, ok := byStem[tc.stem]
+		if !ok {
+			t.Errorf("%s 没进快照（%s）", tc.stem, tc.why)
+			continue
+		}
+		if !it.HasPoster || it.PosterURL == "" {
+			t.Errorf("%s 应当有海报（%s），实际 has_poster=%v url=%q", tc.stem, tc.why, it.HasPoster, it.PosterURL)
+		}
+	}
+}

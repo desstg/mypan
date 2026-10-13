@@ -1372,6 +1372,20 @@ watch(activeTab, (tab) => {
             </FormField>
           </div>
 
+          <!--
+            ⚠️ 这一条在界面上**必须说清**（2026-10-13 用户连问两次同一件事）：
+            「刮削元数据」不只是「生成 nfo 与图片」，它还决定了**同步时会不会删**
+            本程序认得的那些产物。用户想「只换 .strm、其它一个都不动」时，
+            真正要关的是它 —— 只关「同步元数据」不够。
+          -->
+          <p class="strm-form__hint">
+            只想换掉 .strm、<b>其它文件一个都不动</b>（nfo / 海报 / 缩略图 / 剧照都保留）：
+            把「刮削元数据」设成<b>关闭</b>、扫描方式用<b>更新</b>。
+            关掉之后本程序既不生成也不清理这些产物，只会写 .strm。
+            开着「刮削元数据」时，过期 .strm 会连带删掉同名的 nfo 与图片（这是有意的，
+            不然重刮会留下一堆孤儿文件）。
+          </p>
+
           <div class="strm-form__row">
             <FormField label="刮削元数据">
               <AppSelect
@@ -1890,6 +1904,18 @@ watch(activeTab, (tab) => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+/* 表单里的一段说明文字。用弱化色 + 小字号，别抢字段本身的注意力。 */
+.strm-form__hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.strm-form__hint b {
+  color: var(--text);
+  font-weight: 600;
 }
 
 .strm-advanced-toggle {

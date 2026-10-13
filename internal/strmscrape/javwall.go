@@ -340,19 +340,19 @@ func javWallRowsForDir(taskID int64, absDir, relDir, cat string, files map[strin
 			Flat:     flat,
 		}
 
-		// 四个产物：先按本布局的名字找，找不到再退到"同目录里同后缀的任意一个"——
-		// 多分片那批（`91CM-109-cd2` 什么产物都没有）靠这条显示 cd1 的图。
-		if name, ok := pickJavArtifact(files, names.Poster, "-poster.jpg"); ok {
+		// 四个产物。`pickJavImage` 负责「独占 / 平铺 × 四种扩展名 × 裸名兜底」的
+		// 全部组合 —— 详见它的注释（2026-10-13 扩过：以前只认本布局的 .jpg）。
+		if name, ok := pickJavImage(files, names.Poster, "poster"); ok {
 			item.HasPoster = true
 			item.PosterRev = javWallRev(files[name])
 			item.PosterURL = javWallImageURL(taskID, relDir, name, item.PosterRev, "poster")
 		}
-		if name, ok := pickJavArtifact(files, names.Thumb, "-thumb.jpg"); ok {
+		if name, ok := pickJavImage(files, names.Thumb, "thumb"); ok {
 			item.HasThumb = true
 			item.ThumbRev = javWallRev(files[name])
 			item.ThumbURL = javWallImageURL(taskID, relDir, name, item.ThumbRev, "thumb")
 		}
-		if name, ok := pickJavArtifact(files, names.Fanart, "-fanart.jpg"); ok {
+		if name, ok := pickJavImage(files, names.Fanart, "fanart"); ok {
 			item.HasFanart = true
 			_ = name
 		}
@@ -367,12 +367,32 @@ func javWallRowsForDir(taskID int64, absDir, relDir, cat string, files map[strin
 	return rows
 }
 
-// pickJavArtifact 在一组文件里找一个产物：先按自己布局的名字，再退到**同后缀的任意一个**
-// （`-poster.jpg` / `poster.jpg`）。
+// imageExtensions 是旁路图**所有**认得出来的扩展名。
 //
-// 回退那一步是给多分片用的：`91CM-109` 那个目录里只有 cd1 有图，cd2/cd3 的卡片要显示
+// ⚠️ 这是显示端唯一一份判据：`ResolvePosterFile`（端点白名单）、`markers.go`
+// 与 `wall_detail.go` 各有一份同样的列表 —— 加格式时四处一起改，
+// 否则会出现「能显示这种图、但下载不了 / 认不出」这种半通不通的状态。
+var imageExtensions = []string{"jpg", "jpeg", "png", "webp"}
+
+// pickJavArtifact 在一组文件里找一个产物。
+//
+// 找的顺序（2026-10-13 扩过，之前只认前三步里的前两步）：
+//
+//  1. **本布局自己的名字**（`names.Poster`：独占是 `poster.jpg`、平铺是
+//     `<主干>-poster.jpg`）；
+//  2. **裸名兜底**（`poster.jpg` / `thumb.jpg` / `fanart.jpg`）—— 平铺目录里
+//     别的工具（或 Emby 自己）往往只放一份裸名的图，而这时我们按平铺规则找的是
+//     `<主干>-poster.jpg`，一份都找不到，卡片就成了空壳；
+//  3. **同后缀的任意一个**（`-poster.jpg` / `poster.jpg` 结尾）。
+//
+// ⚠️ `suffixes` 是**后缀列表**而不是单个后缀：磁盘上的图有 `.jpg` / `.jpeg` /
+// `.png` / `.webp` 四种形态（实测某库里 207 份 `poster.jpg` + 101 份 `poster.png`
+// + 9 份 `poster.webp`），只认 `.jpg` 会让用了 png 的那批整批没图 ——
+// 而它们在 Emby 里显示得好好的，用户看到的就是「有些显示、有些不显示」。
+//
+// 回退那两步是给多分片用的：`91CM-109` 那个目录里只有 cd1 有图，cd2/cd3 的卡片要显示
 // cd1 的图（用户明确要求「多分片就显示 cd1 的图」）。
-func pickJavArtifact(files map[string]os.DirEntry, own, suffix string) (string, bool) {
+func pickJavArtifact(files map[string]os.DirEntry, own string, suffixes ...string) (string, bool) {
 	if own != "" {
 		if _, ok := files[own]; ok {
 			return own, true
@@ -381,8 +401,12 @@ func pickJavArtifact(files map[string]os.DirEntry, own, suffix string) (string, 
 	// 回退时要有稳定顺序，否则同一棵树两次列出来的图可能不一样。
 	candidates := make([]string, 0, 4)
 	for name := range files {
-		if strings.HasSuffix(strings.ToLower(name), suffix) {
-			candidates = append(candidates, name)
+		low := strings.ToLower(name)
+		for _, suffix := range suffixes {
+			if strings.HasSuffix(low, strings.ToLower(suffix)) {
+				candidates = append(candidates, name)
+				break
+			}
 		}
 	}
 	if len(candidates) == 0 {
@@ -390,6 +414,40 @@ func pickJavArtifact(files map[string]os.DirEntry, own, suffix string) (string, 
 	}
 	sort.Strings(candidates)
 	return candidates[0], true
+}
+
+// javImageSuffixes 给一个主干列出四种扩展各自的后缀（`poster` → `poster.jpg` …）。
+//
+// 与 imageExtensions 同源；两边各写一份的话，哪天补一个新格式就会出现
+// 「生成端认、显示端不认」。
+func javImageSuffixes(base string) []string {
+	out := make([]string, 0, len(imageExtensions))
+	for _, ext := range imageExtensions {
+		out = append(out, base+"."+ext)
+	}
+	return out
+}
+
+// pickJavImage 找一张同类图，覆盖「独占 / 平铺」两种布局与四种扩展名。
+//
+// `base` 是裸名主干（`poster` / `thumb` / `fanart`），查找顺序体现优先级：
+//
+//  1. 本布局自己的名字（`own`：独占是 `poster.jpg`、平铺是 `<主干>-poster.jpg`）；
+//  2. 裸名的任何一种扩展名 —— 平铺目录里别的工具（或 Emby 自己）常只放一份
+//     裸名的图，而我们按平铺规则找的是 `<主干>-poster.jpg`，一份都找不到，
+//     卡片就成了空壳；
+//  3. 以 `-<base>.<ext>` 结尾的任意一个 —— 多分片目录靠这条显示 cd1 的图。
+//
+// ⚠️ 第 3 步只按 `-poster.jpg` 这个**后缀**匹配，不带主干：`91CM-109-cd2`
+// 要找的是 `91CM-109-cd1-poster.jpg`，带上自己的主干就永远匹配不到。
+func pickJavImage(files map[string]os.DirEntry, own, base string) (string, bool) {
+	if name, ok := pickJavArtifact(files, own); ok {
+		return name, true
+	}
+	if name, ok := pickJavArtifact(files, "", javImageSuffixes(base)...); ok {
+		return name, true
+	}
+	return pickJavArtifact(files, "", javImageSuffixes("-"+base)...)
 }
 
 // javWallRev 取一个文件用于缓存击穿的版本号（mtime，纳秒）。取不到就空串。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"litepan/internal/core/driverexec"
@@ -256,5 +257,89 @@ func TestScanFixtureActuallyRunsCleanup(t *testing.T) {
 	if _, err := os.Stat(stray); err == nil {
 		t.Fatal("夹具坏了：远端没有的 stray.jpg 没被删 —— 说明清理链没跑，" +
 			"那前面几条「产物还在」的断言全是假绿")
+	}
+}
+
+// 「只换 .strm、其它一个都不动」这个诉求（2026-10-13 用户连问两次）钉成两条断言。
+//
+// 它的判据**不是**「同步元数据」关没关，而是**「刮削元数据」**：
+//
+//	刮削元数据 = 关 → scrapedArtifactsGuarded 为 false 之外，还会让
+//	                  `metaExts` 为空（TMDB 任务），整块元数据同步都不跑，
+//	                  连带删除计划也不存在 —— 一个 .nfo / 图片都不会动。
+//	刮削元数据 = 开 → 守卫为真，但**过期 .strm 的连带清理**（同主干 nfo / 图 / 字幕）
+//	                  仍会执行 —— 那是「重刮不留孤儿」的有意行为。
+//
+// 两条都写在这里，是因为用户真正会踩的坑是**只关了「同步元数据」**：
+// 那一项管的是「要不要把网盘上的小文件下到本地」，与「会不会删」无关。
+func TestJavSyncMetadataOffOnlyWritesStrm(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "任务", "DYBC005")
+	if err := os.MkdirAll(filepath.Join(dir, "extrafanart"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟「另一个项目刮好的库」：nfo / 海报 / 缩略图 / 剧照 / 字幕都在，
+	// 只有 .strm 是旧的（内容指向另一个播放网关）。
+	sidecars := map[string]string{
+		"DYBC005.nfo":             "<movie><num>DYBC005</num></movie>",
+		"poster.jpg":              "poster",
+		"thumb.jpg":               "thumb",
+		"fanart.jpg":              "fanart",
+		"DYBC005.zh-CN.srt":       "subtitle",
+		"extrafanart/fanart1.jpg": "still1",
+	}
+	for name, body := range sidecars {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldStrm := filepath.Join(dir, "DYBC005.strm")
+	if err := os.WriteFile(oldStrm, []byte("http://old-gateway/stream/abc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	drv := &metadataTestDriver{items: map[string][]domain.FileItem{
+		"lib": {{ID: "d1", Name: "DYBC005", IsDir: true}},
+		"d1":  {{ID: "f1", Name: "DYBC005.mp4", Size: 3 << 20}},
+	}}
+	files := file.NewService(driverexec.New(metadataTestProvider{drv: drv}, nil), nil, nil, nil, nil, nil)
+	task := &domain.StrmTask{
+		ID: 1, AccountID: 1, ParentID: "lib", Path: "/库", Recursive: true,
+		ScanMode:     domain.StrmScanModeIncrementalUpdate,
+		Extensions:   "mp4",
+		OutputFolder: "任务",
+		MediaKind:    domain.StrmMediaKindJav,
+		// 用户要的那套：刮削元数据 **关**，同步元数据 **关**。
+		SyncMetadata: false,
+		SyncFiles:    false,
+	}
+	// ⚠️ 必须用**手动全量**之外的普通模式跑一次，才走得到「过期 .strm 连带清理」
+	// 那条路；这里刻意用 auto + 不设 ManualCleanupConfirm，把安全阈值也一并覆盖。
+	res, err := ScanTask(context.Background(), task, ScanDeps{
+		Files:    files,
+		StrmDir:  root,
+		Settings: ScanSettings{MetadataExtensions: "nfo;jpg;srt"},
+	}, domain.StrmRunModeAuto)
+	if err != nil {
+		t.Fatalf("扫描失败: %v", err)
+	}
+	if res.StrmUpdated == 0 && res.StrmCreated == 0 {
+		t.Fatalf("应当重写了 .strm，实际 %+v", res)
+	}
+	// .strm 换成我们自己的地址。
+	body, err := os.ReadFile(oldStrm)
+	if err != nil {
+		t.Fatalf("读 .strm: %v", err)
+	}
+	if !strings.Contains(string(body), "/api/strm/play/") {
+		t.Errorf(".strm 没被换成我们的地址：%q", string(body))
+	}
+	// 其它文件一个都不能少。
+	for name := range sidecars {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("「刮削元数据」关着时不该动这个文件：%s（%v）", name, err)
+		}
 	}
 }
