@@ -14,7 +14,7 @@
 |---|---|---|---|
 | `115_open` | 115网盘Open | OAuth + **网页 Cookie**（转存用） | 官方授权 · OAuth · 网页Cookie · 支持302 · SHA1 |
 | `123_open` | 123云盘 Open | OAuth | 官方授权 · OAuth · 支持302 · 支持秒传 |
-| `139_cloud` | 移动云盘 | 扫码 / Authorization | 扫码登录 · Authorization · 支持302 |
+| `139_cloud` | 移动云盘 | 扫码 / Authorization | 扫码登录 · Authorization · 支持302 · 分享转存 |
 | `189_cloud` | 天翼云盘 | 扫码 | 个人云 · 家庭云 · 扫码登录 · 支持302 · 支持秒传 |
 | `baidu_open` | 百度网盘Open | OAuth | 官方授权 · OAuth · MD5分享 |
 | `guangya` | 光鸭云盘 | 扫码 | 扫码登录 · 支持302 · 支持秒传 |
@@ -41,9 +41,9 @@
 | **光鸭云盘** | ✅ | **✅** | **✅** | ✅ | ✅ | — | **✅** | ✅ | ✅ | md5 → md5 |
 | **123 云盘 Open** | ✅（需网页账号密码） | — | — | ✅ | — | — | ✅ | ✅ | ✅ | md5 → sha1+md5 |
 | 夸克 | — | — | — | `http(s)` 走内置下载器 | — | — | ✅ | ✅ | **❌** | — |
-| 百度 Open | — | — | — | — | — | — | — | ✅ | ✅ | md5 → — |
-| 天翼云盘 | — | — | — | — | — | — | — | ✅ | ✅ | md5 → md5 |
-| 移动云盘 | — | — | — | — | — | — | — | ✅ | ✅ | — |
+| 百度 Open | ✅（需网页 Cookie） | ✅ | ✅ | ✅ | ✅ | — | **✅** | ✅ | ✅ | md5 → — |
+| 天翼云盘 | — | — | — | — | — | — | **✅** | ✅ | ✅ | md5 → md5 |
+| 移动云盘 | — | — | — | — | — | — | **✅** | ✅ | ✅ | — |
 | OneDrive | — | — | — | — | — | — | — | ✅ | ✅ | — |
 | OpenList | — | — | — | — | — | — | — | ✅ | ✅ | — |
 | WebDAV | — | — | — | — | — | — | — | ✅ | ✅ | — |
@@ -57,24 +57,31 @@
 
 ## 三、离线下载详解
 
-只有 **3 个驱动**声明了原生离线下载（`OfflineDownloadProvider`），其余 8 个（含 `localfs` / `webdav` / `onedrive`）
-连这个接口都没实现。
+只有 **4 个驱动**声明了原生离线下载（`OfflineDownloadProvider`）：
+`115_open` / `guangya` / `123_open` / `baidu_open`。其余驱动（含天翼、移动、
+`localfs` / `webdav` / `onedrive`）连这个接口都没实现 —— 它们的磁力/直链由
+**内置下载器**在本机下载后自动上传（天翼与移动没有可用的原生离线接口）。
 
-| | `115_open` | `guangya` | `123_open` | 内置下载器 |
-|---|---|---|---|---|
-| `http` | ✅ | ✅ | ✅ | ✅ |
-| `https` | ✅ | ✅ | ✅ | ✅ |
-| `ftp` | ✅ | ✅ | — | — |
-| `magnet` | ✅ | ✅ | — | ✅ |
-| `ed2k` | ✅ | — | — | — |
-| `thunder` | — | ✅ | — | — |
-| **批量提交** | ✅ | ✅（上限 50） | ❌ 一次一条 | ✅ |
-| **指定根目录为目标** | ✅ | ✅ | ⚠️ 见下 | — |
-| **删除远程任务** | ✅ | ✅ | ❌ | — |
-| **`.torrent` 种子上传** | ✅ | — | — | —（只吃磁力 URI） |
+| | `115_open` | `guangya` | `123_open` | `baidu_open` | 内置下载器 |
+|---|---|---|---|---|---|
+| `http` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `https` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ftp` | ✅ | ✅ | — | ✅ | — |
+| `magnet` | ✅ | ✅ | ⚠️ 需网页凭据 | ✅ | ✅ |
+| `ed2k` | ✅ | — | — | ✅ | — |
+| `thunder` | — | ✅ | — | ✅ | — |
+| **批量提交** | ✅ | ✅（上限 50） | ❌ 一次一条 | ❌ 一次一条 | ✅ |
+| **指定根目录为目标** | ✅ | ✅ | ⚠️ 见下 | ✅ | — |
+| **删除远程任务** | ✅ | ✅ | ❌ | ✅ | — |
+| **`.torrent` 种子上传** | ✅ | — | — | — | —（只吃磁力 URI） |
 
 依据：`drivers/115_Open/offline_download.go:88-97`、`drivers/Guangya/offline_download.go:95-104`、
-`drivers/123_Open/offline_download.go:37-46`、`internal/offlinedownload/builtin_magnet.go:70-72`。
+`drivers/123_Open/offline_download.go:37-46`、`drivers/Baidu_Open/offline_download.go`、
+`internal/offlinedownload/builtin_magnet.go:70-72`。
+
+⚠️ **百度整条离线通道都要网页 Cookie**（bdstoken），不只是磁力 —— 这是它与 123
+的区别（123 只有磁力要）。判据集中在 `internal/offlinedownload/types.go` 的
+`NativeSchemeUsable`：按驱动类型列出「声明了但要用网页凭据」的那几个 scheme。
 
 ### 几个不那么直观的点
 
@@ -84,7 +91,7 @@
 （`web/src/components/file/OfflineDownloadModal.vue:111-123`）。
 
 **`RemoteDelete` 是双重门**：驱动声明了还要实现 `OfflineTaskDeleter` 接口才为真
-（`internal/offlinedownload/service.go:164-165`）。所以「能删远程任务」的只有 115 和光鸭。
+（`internal/offlinedownload/service.go:164-165`）。所以「能删远程任务」的是 115、光鸭与百度。
 
 **提交一个不支持的协议会得到什么**（`internal/offlinedownload/service.go:794-809`）：
 
@@ -97,9 +104,9 @@
 
 ## 四、分享链转存
 
-**115 / 123 / 夸克 / 光鸭 四家都能转存**。前三家各自要该账号**额外配一份凭据**
-（分享转存只有网页版/客户端接口能做，开放平台 API 里没有这个动作）；
-光鸭用的是**官方开放接口**，就是本驱动本来就有的登录令牌，不用再配什么：
+**115 / 123 / 夸克 / 光鸭 / 百度 / 天翼 / 移动 七家都能转存**。其中四家要该账号
+**额外配一份凭据**（分享转存只有网页版/客户端接口能做，开放平台 API 里没有这个动作）；
+光鸭、移动云盘用的是**登录时就拿到的令牌**，不用再配什么：
 
 | 网盘驱动 | 认得的分享链 | 要配什么 | **能转存** |
 |---|:-:|---|:-:|
@@ -107,6 +114,9 @@
 | `123_open` | 123 | 网页账号 / 密码（`drivers/123_Open/share.go`） | **✅** |
 | `quark` | 夸克 | 它自己的 Cookie（`drivers/Quark/share.go`） | **✅** |
 | `guangya` | 光鸭 | 无（用登录令牌，`drivers/Guangya/share.go`） | **✅** |
+| `baidu_open` | 百度 | 网页 Cookie（`drivers/Baidu_Open/share.go`） | **✅** |
+| `189_cloud` | 天翼 | 网页 Cookie（`drivers/189Cloud/share.go`） | **✅** |
+| `139_cloud` | 移动 | 无（用登录令牌，`drivers/139Cloud/share.go`） | **✅** |
 | 其余驱动 | — | — | ❌（推给它们会被明确拒绝，见下） |
 
 ⚠️ **分享链与账号必须对得上**：夸克分享推给 115 账号会被明确挡下
@@ -123,9 +133,12 @@
 `internal/tgsubscribe/telegram/share.go:21-40`：
 
 - **域名**：`115.com`、`115cdn.com`、`anxia.com`（含任意层级子域）、`quark.cn`（覆盖 `pan.quark.cn`）、
-  `123pan.com` 系列、`guangyapan.com`
-- **路径**：必须是 `/s/<2-64 位 [A-Za-z0-9_-]>`（**光鸭更宽**：`/s/<2-128 位>`，
-  它的分享码是 `<数字id>_<token>` 形态，单独一条 `shareGuangyaPathRe`）
+  `123pan.com` 系列、`guangyapan.com`、`pan.baidu.com`/`yun.baidu.com`/`eyun.baidu.com`、
+  `cloud.189.cn`、`yun.139.com`/`caiyun.139.com`
+- **路径**：必须是 `/s/<2-64 位 [A-Za-z0-9_-]>`。各家更宽的另有：
+  **光鸭** `/s/<2-128 位>`（`<数字id>_<token>` 形态）、**天翼** `/(t|s)/<6-32 位>`
+  （主形态是 `/t/`）、**移动** 末段任意 `<4-64 位>`（形态不稳，`/w/i/<id>` 那种，
+  分享码还可能藏在 `#` 片段里）
 
 接受、与被拒的边界在 `internal/tgsubscribe/telegram/share_test.go:52-172` 里有完整用例
 （`?pwd=` 别名、`115cdn` 归一化接受；`/s/a` 太短、`/s/abcd1234/file` 多一层、
@@ -144,7 +157,20 @@
 > 百度/阿里/迅雷等也可以填进来，但当前版本只会把它们收进匹配历史供你复制链接，**推不进网盘**
 > —— `web/src/components/admin/TGSettingsPanel.vue:405-406`
 
-（夸克原本在这句话里，2026-10-12 补上转存之后就不适用了。）
+（夸克 2026-10-12 补上转存、百度/天翼/移动 2026-10-13 补上之后就都不适用了 ——
+这句话现在只剩阿里/迅雷/UC/PikPak/蓝奏/网盘盘几家。）
+
+### 三家新补的转存各自的坑
+
+- **百度**：分享页 HTML 里的 `locals.mset({...})` 是**最脆的一环**（页面改过两版），
+  解析走「候选正则列表」，失败时报「分享页结构可能已变」而不是含糊的解析错误。
+  转存撞同名（errno 12 + `info[0].errno=-30`）报成确定性的 VALIDATION，**不重试**。
+- **天翼**：目录 id 与开放平台是同一套，但**凭据不通用** —— 分享转存要网页 Cookie
+  换 AccessToken（`open/oauth2/ssoH5.action`），开放平台令牌做不了。
+  转存任务要轮询到落定（`taskStatus==3`）才算成功，不等会把失败记成成功。
+- **移动**：转存接口收的是**分享内的路径**（`contentInfoList`/`catalogInfoList`），
+  不是 id；请求体里的 `msisdn` 是手机号，从 Authorization 里解析出来。
+  列目录走 `share-kd-njs`（**不带签名**），查任务走 `personal-kd-njs`（**要 mcloud-sign**）。
 
 ---
 
@@ -248,7 +274,8 @@ Emby 代理（`internal/embyproxy/`）、飞牛反代（`internal/fnosproxy/`）
 4. **协议白名单散落在各模块里，是第二处真相**。改驱动的能力声明**不会**同步它们：
    - `internal/jav/pusher.go:22-28` 的 `javSchemes` 只放行 `magnet` / `ed2k`
    - `internal/tgsubscribe/pusher.go:28-38` 的 `kindSchemes` 按 kind 映射到 `{magnet}` / `{ed2k}` / `{http,https}`
-   - `internal/tgsubscribe/telegram/share.go:21-40` 的分享域名白名单
+   - `internal/tgsubscribe/telegram/share.go` 的 `shareSpecs`（分享域名白名单，七家 + 只识别的那几家）
+   - `internal/searchtransfer/save_links.go` 的 `shareHosts*` / `share*PathRe`（与上面那份**同源**，改一处要核对另一处）
 
 5. **文档里的能力表可能落后于代码**。`docs/GUIDE.md:66` 那张表只列了 5 项，
    且「能提供秒传哈希」一栏漏了 115 与 123（见第六节）。
@@ -264,7 +291,7 @@ Emby 代理（`internal/embyproxy/`）、飞牛反代（`internal/fnosproxy/`）
 | 驱动增删 | `drivers/all.go:8-18` | 一、二 |
 | 离线下载协议 | `drivers/*/offline_download.go` 的 `OfflineDownloadCapabilities()` | 二、三 |
 | 卡片标签 / 秒传声明 | `drivers/*/driver.go` 的 `Config`（`CardTags` / `ProvideHashes` / `RapidUploadHashes`） | 一、二、六 |
-| 分享转存 | `internal/driver/share.go` + `Drivers/115_Open/share.go` | 四 |
+| 分享转存 | `internal/driver/share.go` + `drivers/*/share.go` | 四 |
 | 直链 / 代理模式 | `drivers/*/ops.go` 的 `ResolveDownload` | 五 |
 | 内置下载器协议 | `internal/offlinedownload/builtin_magnet.go:70-72` | 八 |
 
