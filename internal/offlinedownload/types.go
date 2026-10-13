@@ -139,8 +139,13 @@ type BatchDeleteResult struct {
 // NativeSchemeUsable 报告「网盘原生离线通道」在**这个账号**上能不能用这个 scheme。
 //
 // 只看 URLSchemes 是不够的：有的驱动声明支持某个 scheme，而实现那条路要一份
-// 额外的网页登录态（123 的磁力就是这样）。两个调用方（tgsubscribe 的推送决策、
-// searchtransfer 的界面能力表）都靠这个函数，判据只此一份。
+// 额外的网页登录态。两个调用方（tgsubscribe 的推送决策、searchtransfer 的
+// 界面能力表）都靠这个函数，判据只此一份。
+//
+// ⚠️ 这张表是**按驱动类型**列的，每加一个「声明了但要用网页凭据」的驱动就得加一条。
+// 判据写在公共层而不是驱动里，是因为 `WebLoginReady` 只是一个 bool ——
+// 它不说明「哪几个 scheme 依赖它」。将来第三个这样的驱动出现时，值得把它换成
+// 驱动自报的 `WebLoginSchemes() []string`，那时这张表就能删掉。
 func (c Capabilities) NativeSchemeUsable(scheme string) bool {
 	scheme = strings.ToLower(strings.TrimSpace(scheme))
 	ok := false
@@ -153,8 +158,16 @@ func (c Capabilities) NativeSchemeUsable(scheme string) bool {
 	if !ok || !c.SupportsURLs {
 		return false
 	}
+	if c.WebLoginReady {
+		return true
+	}
 	// 需要网页登录态、而这个账号没配凭据：声明了也用不了。
-	if c.DriverType == "123_open" && scheme == "magnet" && !c.WebLoginReady {
+	switch c.DriverType {
+	case "123_open":
+		// 123 只有磁力走网页接口，直链走开放平台（见 123_Open/offline_download.go）。
+		return scheme != "magnet"
+	case "baidu_open":
+		// 百度的**整条**离线通道都要 bdstoken（网页 Cookie），不只是磁力。
 		return false
 	}
 	return true

@@ -21,9 +21,13 @@ const (
 	ResourceKindED2K       = "ed2k"
 	ResourceKindShare115   = "share_115"
 	ResourceKindShareQuark = "share_quark"
-	// 123 与光鸭也都已经有转存实现（ShareSaveDeliverer + 各自的驱动）。
+	// 123 / 光鸭 / 百度 / 天翼 也都已经有转存实现（ShareSaveDeliverer + 各自的驱动）。
+	// 百度与天翼的转存走网页接口，要各自账号再配一份网页 Cookie（见 drivers/*/share.go）。
 	ResourceKindShare123     = "share_123"
 	ResourceKindShareGuangya = "share_guangya"
+	ResourceKindShareBaidu   = "share_baidu"
+	ResourceKindShare189     = "share_189"
+	ResourceKindShare139     = "share_139"
 	ResourceKindHTTP         = "http"
 
 	// 以下这些**只识别、不投递**（没有对应的 Deliverer）。
@@ -37,10 +41,8 @@ const (
 	// 安全性由投递链自己保证：delivererFor 对新 kind 返回 nil →
 	// partitionByDeliverable 标成 unsupported → **不误推、不报错、界面上看得见**。
 	ResourceKindShareAliyun   = "share_aliyun"   // 阿里云盘
-	ResourceKindShareBaidu    = "share_baidu"    // 百度网盘
 	ResourceKindShareXunlei   = "share_xunlei"   // 迅雷云盘
 	ResourceKindShareUC       = "share_uc"       // UC 网盘
-	ResourceKindShare189      = "share_189"      // 天翼云盘
 	ResourceKindSharePikPak   = "share_pikpak"   // PikPak
 	ResourceKindShareLanzou   = "share_lanzou"   // 蓝奏云
 	ResourceKindShareGDrive   = "share_gdrive"   // Google Drive

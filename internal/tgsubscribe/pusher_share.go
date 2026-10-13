@@ -23,12 +23,13 @@ import (
 type ShareSaveDeliverer struct{ svc *Service }
 
 func (p *ShareSaveDeliverer) Supports(kind string) bool {
-	// 四种分享链都走这里。**但「这个驱动能不能转这种分享」是另一回事** ——
-	// 那由驱动自己报的 ShareKinds() 决定，见 Deliver / Deliverability 里的
-	// shareKindMatches 闸门：把夸克分享推给 115 账号必须被明确挡住，
+	// 七种分享链都走这里（115/123/夸克/光鸭/百度/天翼/移动）。**但「这个驱动能不能转
+	// 这种分享」是另一回事** —— 那由驱动自己报的 ShareKinds() 决定，见 Deliver /
+	// Deliverability 里的 shareKindMatches 闸门：把夸克分享推给 115 账号必须被明确挡住，
 	// 否则会拿夸克的分享码去打 115 的接口，回来一句与真实原因无关的错误。
 	return kind == KindShare115 || kind == KindShare123 ||
-		kind == KindShareQuark || kind == KindShareGuangya
+		kind == KindShareQuark || kind == KindShareGuangya ||
+		kind == KindShareBaidu || kind == KindShare189 || kind == KindShare139
 }
 
 // Deliver 执行一次分享转存。
@@ -170,6 +171,12 @@ func shareKindMatches(reported, kind string) bool {
 		want = driver.ShareKindQuark
 	case KindShareGuangya:
 		want = driver.ShareKindGuangya
+	case KindShareBaidu:
+		want = driver.ShareKindBaidu
+	case KindShare189:
+		want = driver.ShareKind189
+	case KindShare139:
+		want = driver.ShareKind139
 	default:
 		return false
 	}

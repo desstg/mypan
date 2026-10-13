@@ -222,8 +222,9 @@ func TestShareKinds(t *testing.T) {
 	for _, want := range []string{
 		ResourceKindShareQuark, ResourceKindShareBaidu, ResourceKindShareXunlei,
 		ResourceKindShareAliyun, ResourceKindShareUC, ResourceKindShare123,
-		ResourceKindShare189, ResourceKindSharePikPak, ResourceKindShareLanzou,
-		ResourceKindShareGDrive, ResourceKindShareOneDrive, ResourceKindShareMega,
+		ResourceKindShare189, ResourceKindShare139, ResourceKindSharePikPak,
+		ResourceKindShareLanzou, ResourceKindShareGDrive, ResourceKindShareOneDrive,
+		ResourceKindShareMega,
 	} {
 		if !seen[want] {
 			t.Errorf("Kinds() 里没有 %s：%v", want, kinds)

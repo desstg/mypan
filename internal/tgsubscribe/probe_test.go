@@ -86,8 +86,8 @@ func quarkPost(msgID int64, title string) *telegram.Message {
 	}
 }
 
-// 百度分享链：仍然**只识别、不投递**（没有投递器），
-// 是「识别到了但推不出去」这一类现在的样本。
+// 百度分享链 2026-10-13 起**已有投递器**（转存走网页接口），不再是「投不出去」的样本；
+// 留在这里给「能投递」那一档的用例用。
 const probeBaiduURL = "https://pan.baidu.com/s/1abcdefghijk"
 
 func baiduPost(msgID int64, title string) *telegram.Message {
@@ -96,6 +96,23 @@ func baiduPost(msgID int64, title string) *telegram.Message {
 		Text:      title + "\n💾 大小： 1.18 GB\n🔗 链接： 点击跳转",
 		Entities: []telegram.MessageEntity{{
 			Type: "text_link", Offset: 0, Length: 4, URL: probeBaiduURL,
+		}},
+	}
+}
+
+// 阿里云盘分享链：仍然**只识别、不投递**（没有投递器），
+// 是「识别到了但推不出去」这一类现在的样本。
+//
+// ⚠️ 样本换过三次：夸克（2026-10-12 起能投）、百度（2026-10-13 起能投）、
+// 移动云盘（2026-10-13 起能投）。阿里/迅雷/UC 那几个仍然只识别不投递。
+const probeAliyunURL = "https://www.alipan.com/s/abc123XYZ"
+
+func aliyunPost(msgID int64, title string) *telegram.Message {
+	return &telegram.Message{
+		MessageID: msgID,
+		Text:      title + "\n💾 大小： 1.18 GB\n🔗 链接： 点击跳转",
+		Entities: []telegram.MessageEntity{{
+			Type: "text_link", Offset: 0, Length: 4, URL: probeAliyunURL,
 		}},
 	}
 }
@@ -223,21 +240,22 @@ func TestProbeWarningOnlyShares(t *testing.T) {
 // 实测 QukanMovie 就是这样：16 条资源里 15 条是分享链，只有 1 条 ed2k 能推。
 // 只报「有能推的」会让用户以为自己没漏东西 —— 那恰恰是这次改造要解决的困惑。
 //
-// ⚠️ 样本从「夸克分享」换成了「百度分享」：夸克分享 2026-10-12 起**已经有投递器**
-// 了，不再是「识别得到但投不出去」的样本。百度/阿里/迅雷那几个仍然只识别不投递。
+// ⚠️ 样本换过两次：夸克分享 2026-10-12 起有投递器，百度分享 2026-10-13 起也有；
+// 现在用**移动云盘分享**（`share_139`）作「识别得到但投不出去」的样本 ——
+// 它暂无可用的转存接口。
 func TestProbeWarnsAboutUndeliverableEvenWhenSomethingIsDeliverable(t *testing.T) {
 	s := newProbeService()
 	magnet := &telegram.Message{
 		MessageID: 1,
 		Text:      "生逢其时 (2026) S01E15 4K WEB-DL\nmagnet:?xt=urn:btih:" + strings.Repeat("a", 40),
 	}
-	scan := s.scanPage(pageWith(magnet, baiduPost(2, "绿灯军团 (2026) S01E05 4K WEB-DL")))
+	scan := s.scanPage(pageWith(magnet, aliyunPost(2, "绿灯军团 (2026) S01E05 4K WEB-DL")))
 
 	warnings := s.probeWarnings(scan, 0)
 	if len(warnings) != 1 {
 		t.Fatalf("应给出「有投不了的资源」这一条，实际 %v", warnings)
 	}
-	if !strings.Contains(warnings[0], "百度网盘分享") {
+	if !strings.Contains(warnings[0], "阿里云盘分享") {
 		t.Errorf("结论应点名投不了的类型：%s", warnings[0])
 	}
 	if strings.Contains(warnings[0], "没有可投递的资源") {

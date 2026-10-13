@@ -50,16 +50,16 @@ export interface SaveCapabilities {
    */
   pansou_cloud_type: string;
   schemes: Record<string, SchemeCapability>;
-  /** 各家分享链在这个账号上能不能转存（115 要网页 Cookie、123 要网页账号密码、夸克要 Cookie、光鸭用登录令牌）。 */
-  share_115: SchemeCapability;
-  share_123: SchemeCapability;
-  share_quark: SchemeCapability;
-  share_guangya: SchemeCapability;
-  /** 驱动**类型上**支不支持该种分享（与 ok 的区别：后者还要看账号当下的配置）。 */
-  share_115_driver: boolean;
-  share_123_driver: boolean;
-  share_quark_driver: boolean;
-  share_guangya_driver: boolean;
+  /**
+   * 按**分享种类**给的转存可用性：键是驱动侧短名
+   * （115 / 123 / quark / guangya / baidu / 189 / 139），值里的 provider 恒为 "share"。
+   *
+   * 各家要的凭据不一样（115 网页 Cookie、123 网页账号密码、夸克 Cookie、
+   * 光鸭登录令牌、百度 / 天翼网页 Cookie），差异体现在 reason 里。
+   */
+  shares: Record<string, SchemeCapability>;
+  /** 驱动**类型上**支不支持该种分享（与 shares 里的 ok 的区别：后者还要看账号当下的配置）。 */
+  share_driver: Record<string, boolean>;
 }
 
 export interface SaveShareResult {
@@ -71,7 +71,7 @@ export interface SaveShareResult {
 /** 转存记录的一条。搜索页与转存页写进同一张表。 */
 export interface TransferRecord {
   id: number;
-  /** 资源类型：magnet / ed2k / http / ftp / thunder / share_115 / share_123 / share_quark。 */
+  /** 资源类型：magnet / ed2k / http / ftp / thunder / share_115 / share_123 / share_quark / share_baidu / share_189 / share_139。 */
   kind: string;
   link: string;
   password: string;

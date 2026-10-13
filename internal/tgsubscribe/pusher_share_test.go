@@ -153,14 +153,17 @@ func TestParseShareResource(t *testing.T) {
 
 func TestShareSaveDelivererSupports(t *testing.T) {
 	d := &ShareSaveDeliverer{}
-	// 三种分享链都归它管。「这个驱动能不能转这一种」是另一回事 ——
+	// 七种分享链都归它管。「这个驱动能不能转这一种」是另一回事 ——
 	// 由驱动报的 ShareKinds() 在 Deliver/Deliverability 里判（见下一条）。
-	for _, kind := range []string{KindShare115, KindShare123, KindShareQuark} {
+	for _, kind := range []string{
+		KindShare115, KindShare123, KindShareQuark, KindShareGuangya,
+		KindShareBaidu, KindShare189, KindShare139,
+	} {
 		if !d.Supports(kind) {
 			t.Errorf("应支持 %s 分享", kind)
 		}
 	}
-	for _, kind := range []string{KindMagnet, KindED2K, KindHTTP} {
+	for _, kind := range []string{KindMagnet, KindED2K, KindHTTP, KindShareAliyun} {
 		if d.Supports(kind) {
 			t.Errorf("不该接管 %s", kind)
 		}
@@ -179,6 +182,9 @@ func TestShareKindMatches(t *testing.T) {
 		{driver.ShareKind115, KindShare115, true},
 		{driver.ShareKind123, KindShare123, true},
 		{driver.ShareKindQuark, KindShareQuark, true},
+		{driver.ShareKindBaidu, KindShareBaidu, true},
+		{driver.ShareKind189, KindShare189, true},
+		{driver.ShareKind139, KindShare139, true},
 		// 错配：这才是这条闸门存在的理由。
 		{driver.ShareKind115, KindShareQuark, false},
 		{driver.ShareKindQuark, KindShare115, false},
@@ -617,12 +623,22 @@ func TestDelivererRouting(t *testing.T) {
 	if got := s.delivererFor(KindMagnet); got != Deliverer(s.pusher) {
 		t.Errorf("磁力该路由给 Pusher，实际 %T", got)
 	}
-	// 夸克分享现在也有了投递器（三种分享链共用一个）。
+	// 夸克分享现在也有了投递器（多种分享链共用一个）。
 	if got := s.delivererFor(KindShareQuark); got != Deliverer(s.shareSaver) {
 		t.Errorf("夸克分享该路由给 ShareSaveDeliverer，实际 %T", got)
 	}
+	// 百度 / 天翼 / 移动也接上了（转存走各自网页接口或登录令牌）。
+	if got := s.delivererFor(KindShareBaidu); got != Deliverer(s.shareSaver) {
+		t.Errorf("百度分享该路由给 ShareSaveDeliverer，实际 %T", got)
+	}
+	if got := s.delivererFor(KindShare189); got != Deliverer(s.shareSaver) {
+		t.Errorf("天翼分享该路由给 ShareSaveDeliverer，实际 %T", got)
+	}
+	if got := s.delivererFor(KindShare139); got != Deliverer(s.shareSaver) {
+		t.Errorf("移动云盘分享该路由给 ShareSaveDeliverer，实际 %T", got)
+	}
 	// 仍然只识别不投递的那些：一个投递器都不该接。
-	for _, kind := range []string{KindShareBaidu, KindShareXunlei, KindShareAliyun} {
+	for _, kind := range []string{KindShareAliyun, KindShareXunlei, KindShareUC} {
 		if got := s.delivererFor(kind); got != nil {
 			t.Errorf("%s 仍然没有投递器，实际 %T", kind, got)
 		}

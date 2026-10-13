@@ -210,7 +210,7 @@ function applyTarget(payload: { parentId: string; path: string }) {
 
 // ——————————————————— 逐条转存 ———————————————————
 
-/** 分享域名白名单 —— 与后端 shareHosts115 / shareHosts123 / shareHostsQuark 同源，改一处要核对另一处。 */
+/** 分享域名白名单 —— 与后端 shareHosts* 同源，改一处要核对另一处。 */
 const SHARE_115_HOSTS = ["115.com", "115cdn.com", "anxia.com"];
 const SHARE_123_HOSTS = [
   "123pan.com",
@@ -223,24 +223,43 @@ const SHARE_123_HOSTS = [
 ];
 const SHARE_QUARK_HOSTS = ["quark.cn"];
 const SHARE_GUANGYA_HOSTS = ["guangyapan.com"];
+const SHARE_BAIDU_HOSTS = ["pan.baidu.com", "yun.baidu.com", "eyun.baidu.com"];
+const SHARE_189_HOSTS = ["cloud.189.cn"];
+const SHARE_139_HOSTS = ["yun.139.com", "caiyun.139.com", "139.com"];
 
 /** 分享页的路径形状：`/s/<2-64 位码>` —— 光看域名不够（`115.com/download/x` 不是分享）。 */
 const SHARE_PATH_RE = /^\/s\/[A-Za-z0-9_-]{2,64}\/?$/;
 /** 光鸭的分享码更长（`<数字id>_<token>`，实测 33 位），单独一条更宽的规则。 */
 const SHARE_GUANGYA_PATH_RE = /^\/s\/[A-Za-z0-9_-]{2,128}\/?$/;
+/** 天翼：主形态 `/t/<码>`，少数 `/s/<码>`。 */
+const SHARE_189_PATH_RE = /^\/(?:t|s)\/[A-Za-z0-9]{6,32}\/?$/;
+/** 移动：形态不稳定（`/w/i/<id>`、`/m/i/<id>`…），只要求末段是一串标识。 */
+const SHARE_139_PATH_RE = /^\/(?:[^/]+\/)*[A-Za-z0-9_-]{4,64}\/?$/;
 
 function shareHost(raw: string, allowed: string[], pathRe = SHARE_PATH_RE): boolean {
   try {
     const u = new URL(raw);
     const h = u.hostname.toLowerCase();
     if (!allowed.some((a) => h === a || h.endsWith("." + a))) return false;
-    return pathRe.test(u.pathname);
+    if (pathRe.test(u.pathname)) return true;
+    // 139 的分享码常藏在 fragment 里（`/shareweb/#/w/i/<id>`），补判一次。
+    const frag = (u.hash || "").replace(/^#/, "").split("?")[0];
+    return frag !== "" && pathRe.test(frag);
   } catch {
     return false;
   }
 }
 
-type LinkKind = "offline" | "share115" | "share123" | "shareQuark" | "shareGuangya" | "unsupported";
+type LinkKind =
+  | "offline"
+  | "share115"
+  | "share123"
+  | "shareQuark"
+  | "shareGuangya"
+  | "shareBaidu"
+  | "share189"
+  | "share139"
+  | "unsupported";
 
 function classify(raw: string): { kind: LinkKind; scheme: string } {
   const lower = raw.toLowerCase();
@@ -253,10 +272,24 @@ function classify(raw: string): { kind: LinkKind; scheme: string } {
     if (shareHost(raw, SHARE_123_HOSTS)) return { kind: "share123", scheme: "share_123" };
     if (shareHost(raw, SHARE_QUARK_HOSTS)) return { kind: "shareQuark", scheme: "share_quark" };
     if (shareHost(raw, SHARE_GUANGYA_HOSTS, SHARE_GUANGYA_PATH_RE)) return { kind: "shareGuangya", scheme: "share_guangya" };
+    if (shareHost(raw, SHARE_BAIDU_HOSTS)) return { kind: "shareBaidu", scheme: "share_baidu" };
+    if (shareHost(raw, SHARE_189_HOSTS, SHARE_189_PATH_RE)) return { kind: "share189", scheme: "share_189" };
+    if (shareHost(raw, SHARE_139_HOSTS, SHARE_139_PATH_RE)) return { kind: "share139", scheme: "share_139" };
     return { kind: "offline", scheme: "http" };
   }
   return { kind: "unsupported", scheme: "" };
 }
+
+/** 分享种类 → 驱动侧短名（后端 shares 能力表的键）。 */
+const SHARE_KIND_KEYS: Partial<Record<LinkKind, string>> = {
+  share115: "115",
+  share123: "123",
+  shareQuark: "quark",
+  shareGuangya: "guangya",
+  shareBaidu: "baidu",
+  share189: "189",
+  share139: "139",
+};
 
 /** 一条结果能不能转存；不能的话给出置灰理由。 */
 function verdict(hit: SearchHit): { ok: boolean; reason: string; kind: LinkKind } {
@@ -264,16 +297,9 @@ function verdict(hit: SearchHit): { ok: boolean; reason: string; kind: LinkKind 
   if (kind === "unsupported") {
     return { ok: false, reason: "认不出链接类型，可复制链接手动处理", kind };
   }
-  if (kind === "share115" || kind === "share123" || kind === "shareQuark" || kind === "shareGuangya") {
-    const caps = capabilities.value;
-    const cap =
-      kind === "share123"
-        ? caps?.share_123
-        : kind === "shareQuark"
-          ? caps?.share_quark
-          : kind === "shareGuangya"
-            ? caps?.share_guangya
-            : caps?.share_115;
+  const shareKey = SHARE_KIND_KEYS[kind];
+  if (shareKey) {
+    const cap = capabilities.value?.shares?.[shareKey];
     if (cap && !cap.ok) {
       return { ok: false, reason: cap.reason || "该账号当前不能转存这种分享", kind };
     }

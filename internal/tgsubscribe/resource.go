@@ -24,16 +24,17 @@ const (
 	KindShareQuark   = telegram.ResourceKindShareQuark
 	KindShare123     = telegram.ResourceKindShare123
 	KindShareGuangya = telegram.ResourceKindShareGuangya
+	KindShareBaidu   = telegram.ResourceKindShareBaidu
+	KindShare189     = telegram.ResourceKindShare189
+	KindShare139     = telegram.ResourceKindShare139
 	KindHTTP         = telegram.ResourceKindHTTP
 
 	// 以下这些**只识别、不投递**（没有对应的 Deliverer）。详见 telegram/share.go
 	// 的 shareSpecs：加它们的目的是「看得见」，实测频道里百度/迅雷/阿里的分享链
 	// 占了不少，过去连记录都不产生。
 	KindShareAliyun   = telegram.ResourceKindShareAliyun
-	KindShareBaidu    = telegram.ResourceKindShareBaidu
 	KindShareXunlei   = telegram.ResourceKindShareXunlei
 	KindShareUC       = telegram.ResourceKindShareUC
-	KindShare189      = telegram.ResourceKindShare189
 	KindSharePikPak   = telegram.ResourceKindSharePikPak
 	KindShareLanzou   = telegram.ResourceKindShareLanzou
 	KindShareGDrive   = telegram.ResourceKindShareGDrive
@@ -240,6 +241,12 @@ func labelKind(kind string) string {
 		return "夸克分享"
 	case KindShareGuangya:
 		return "光鸭分享"
+	case KindShareBaidu:
+		return "百度网盘分享"
+	case KindShare189:
+		return "天翼云盘分享"
+	case KindShare139:
+		return "移动云盘分享"
 	case KindED2K:
 		return "ed2k 链接"
 	case KindHTTP:
@@ -249,14 +256,10 @@ func labelKind(kind string) string {
 	// 「已识别到 X，当前版本只记录、不支持投递」，用户要能一眼看出是哪个盘。
 	case KindShareAliyun:
 		return "阿里云盘分享"
-	case KindShareBaidu:
-		return "百度网盘分享"
 	case KindShareXunlei:
 		return "迅雷云盘分享"
 	case KindShareUC:
 		return "UC 网盘分享"
-	case KindShare189:
-		return "天翼云盘分享"
 	case KindSharePikPak:
 		return "PikPak 分享"
 	case KindShareLanzou:

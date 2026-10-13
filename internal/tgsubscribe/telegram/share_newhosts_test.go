@@ -64,6 +64,13 @@ func TestNormalizeShareNewHosts(t *testing.T) {
 			wantRaw:  "https://cloud.189.cn/t/AbCdEf123",
 		},
 		{
+			name:     "移动云盘（只识别不投递）",
+			raw:      "https://yun.139.com/w/i/abc12345",
+			wantKind: ResourceKindShare139,
+			wantHash: "139:abc12345",
+			wantRaw:  "https://yun.139.com/w/i/abc12345",
+		},
+		{
 			name:     "蓝奏云（按主机分配，且没有 /s/ 段）",
 			raw:      "https://www.lanzoui.com/iAbCdEf",
 			wantKind: ResourceKindShareLanzou,
@@ -168,7 +175,8 @@ func TestShareFingerprintNamespacesDisjoint(t *testing.T) {
 func TestIsShareHostCoversNewDomains(t *testing.T) {
 	yes := []string{
 		"pan.baidu.com", "pan.xunlei.com", "www.alipan.com", "drive.uc.cn",
-		"www.123pan.com", "cloud.189.cn", "mypikpak.com", "www.lanzou.com",
+		"www.123pan.com", "cloud.189.cn", "yun.139.com", "caiyun.139.com",
+		"mypikpak.com", "www.lanzou.com",
 		"drive.google.com", "1drv.ms", "mega.nz",
 	}
 	for _, host := range yes {

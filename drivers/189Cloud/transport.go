@@ -27,7 +27,6 @@ import (
 const (
 	webURL    = "https://cloud.189.cn"
 	authURL   = "https://open.e.189.cn"
-	apiURL    = "https://api.cloud.189.cn"
 	uploadURL = "https://upload.cloud.189.cn"
 
 	appID      = "8025431004"
@@ -45,6 +44,10 @@ const (
 	defaultUploadPartSize   = 10 * 1024 * 1024
 	qrCodeTimeoutSec        = 300
 )
+
+// apiURL 是开放平台接口的宿主。是 var 而不是 const，只为让测试指向 httptest；
+// 生产代码里不要改它（与 drivers/115_Open/web_transport.go 的 webBaseURL 同一个套路）。
+var apiURL = "https://api.cloud.189.cn"
 
 func (d *Driver) rootID() string {
 	id := strings.TrimSpace(d.add.RootFolderID)

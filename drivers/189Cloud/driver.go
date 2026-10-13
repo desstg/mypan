@@ -33,6 +33,15 @@ type Driver struct {
 	itemCache     map[string]domain.FileItem
 	itemOrder     []string
 
+	// cookie 是网页版 Cookie，**只用于分享转存**（见 share.go）。
+	// 与 115 那份网页 Cookie 一样，它是与开放平台令牌并列的另一份凭据。
+	cookie string
+	// 网页接口 AccessToken 的进程内缓存（用 Cookie 换来的，见 share.go）。
+	shareMu          sync.Mutex
+	shareToken       string
+	shareTokenCookie string
+	shareTokenExpiry time.Time
+
 	transferMD5Mu    sync.Mutex
 	transferMD5Cache map[string]string
 }
@@ -41,7 +50,7 @@ var config = driver.Config{
 	Name:                   "189_cloud",
 	DisplayName:            "天翼云盘",
 	Description:            "天翼云盘 PC 接口接入，支持个人云、家庭云和文件管理",
-	CardTags:               []string{"个人云", "家庭云", "扫码登录", "支持302", "支持秒传"},
+	CardTags:               []string{"个人云", "家庭云", "扫码登录", "支持302", "支持秒传", "分享转存"},
 	SortOrder:              8,
 	AuthLabel:              "扫码登录",
 	CardColor:              "#FEC52C",
@@ -69,6 +78,10 @@ func (d *Driver) SetAuthCredentials(creds domain.AuthCredentials) {
 	defer d.mu.Unlock()
 	d.accessToken = strings.TrimSpace(creds.AccessToken)
 	d.refreshToken = strings.TrimSpace(creds.RefreshToken)
+	// 网页 Cookie 是**分享转存**专用的一份附加凭据（见 share.go）：平时那套
+	// SessionKey 签名接口用不上它，它换的是网页接口的 AccessToken。
+	// 存储位置与 115 那份网页 Cookie 一致 —— account_auth_states.cookie。
+	d.cookie = strings.TrimSpace(creds.Cookie)
 }
 
 func (d *Driver) SetAuthPersister(fn driver.AuthPersistFunc) { d.persist = fn }
@@ -378,4 +391,7 @@ var (
 	_ driver.QRLoginProvider          = (*Driver)(nil)
 	_ driver.RapidUploader            = (*Driver)(nil)
 	_ driver.TransferHashResolver     = (*Driver)(nil)
+	_ driver.ShareReceiver            = (*Driver)(nil)
+	_ driver.ShareKindReporter        = (*Driver)(nil)
+	_ driver.ShareMetaPeeker          = (*Driver)(nil)
 )

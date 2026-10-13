@@ -52,7 +52,10 @@ func (s *Service) enrichShareRecords(ctx context.Context, accountID int64, recor
 			break
 		}
 		switch recordKind(rec) {
-		case KindShare115, KindShare123, KindShareQuark, KindShareGuangya:
+		// 能偷看的分享种类：115（公开接口，不需要凭据）、123/夸克/光鸭/天翼/百度/移动
+		// （各自的 PeekShare 要该账号的凭据，没配就静默跳过 —— peekShare 里处理）。
+		case KindShare115, KindShare123, KindShareQuark, KindShareGuangya,
+			KindShareBaidu, KindShare189, KindShare139:
 		default:
 			continue
 		}

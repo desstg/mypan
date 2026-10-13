@@ -9,6 +9,7 @@ package searchtransfer
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -259,19 +260,37 @@ type SaveCapabilities struct {
 	PansouCloudType string `json:"pansou_cloud_type"`
 	// Schemes 按 scheme 给出离线下载通道的可用性。
 	Schemes map[string]SchemeCapability `json:"schemes"`
-	// Share115 / Share123 / ShareQuark / ShareGuangya 报告各家分享链在这个账号上
-	// 能不能转存。115 要网页 Cookie、123 要网页账号密码、夸克要它自己的 Cookie、
-	// 光鸭用它本来就有的 Bearer token。
-	Share115     SchemeCapability `json:"share_115"`
-	Share123     SchemeCapability `json:"share_123"`
-	ShareQuark   SchemeCapability `json:"share_quark"`
-	ShareGuangya SchemeCapability `json:"share_guangya"`
-	// ShareXxxDriver 报告驱动**类型上**支不支持 —— 与 OK 的区别是后者还要看
-	// 账号当下的配置。
-	Share115Driver     bool `json:"share_115_driver"`
-	Share123Driver     bool `json:"share_123_driver"`
-	ShareQuarkDriver   bool `json:"share_quark_driver"`
-	ShareGuangyaDriver bool `json:"share_guangya_driver"`
+	// Shares 按**分享种类**（driver.ShareKind*）给出这家分享链在这个账号上能不能转存。
+	//
+	// 键是共享的种类短名（115 / 123 / quark / guangya / baidu / 189 / 139），
+	// 值里的 Provider 恒为 "share"。各家要的凭据不一样：115 要网页 Cookie、
+	// 123 要网页账号密码、夸克要它自己的 Cookie、光鸭用它本来就有的 Bearer token、
+	// 百度与天翼要各自的网页 Cookie —— 那些差异体现在 Reason 里。
+	//
+	// ⚠️ 这里**刻意用 map 而不是一字排开的 Share115/Share123/… 字段**：
+	// 早先每加一家分享链都要在结构体、赋值、判空、前端 chip 五处各抄一段，
+	// 加第四家时就漏过一处。map 让「加一种分享链」只需在 shareKinds 表里加一行。
+	Shares map[string]SchemeCapability `json:"shares"`
+	// ShareDriver 报告驱动**类型上**支不支持某种分享 —— 与 Shares 里的 OK 的区别是
+	// 后者还要看账号当下的配置（比如配没配网页 Cookie）。
+	ShareDriver map[string]bool `json:"share_driver"`
+}
+
+// shareMatrix 是**分享链种类 → 中文名**的登记表，驱动侧短名与展示名都在这里。
+//
+// 顺序即前端能力 chip 的显示顺序。加一种分享链只改这一处 ——
+// Capabilities() 与前端都按它遍历，不再有「加一家要改五个地方」的重复。
+var shareMatrix = []struct {
+	Kind  string
+	Label string
+}{
+	{driver.ShareKind115, "115"},
+	{driver.ShareKind123, "123"},
+	{driver.ShareKindQuark, "夸克"},
+	{driver.ShareKindGuangya, "光鸭"},
+	{driver.ShareKindBaidu, "百度"},
+	{driver.ShareKind189, "天翼"},
+	{driver.ShareKind139, "移动"},
 }
 
 // offlineSchemes 是要逐个判可用性的 scheme 集合。
@@ -294,6 +313,8 @@ func (s *Service) Capabilities(ctx context.Context, accountID int64) (*SaveCapab
 	out := &SaveCapabilities{
 		AccountID:       accountID,
 		Schemes:         map[string]SchemeCapability{},
+		Shares:          map[string]SchemeCapability{},
+		ShareDriver:     map[string]bool{},
 		PansouCloudType: s.pansouCloudType(ctx, accountID),
 	}
 	for _, scheme := range offlineSchemes {
@@ -319,47 +340,20 @@ func (s *Service) Capabilities(ctx context.Context, accountID int64) (*SaveCapab
 	if runErr != nil {
 		return nil, runErr
 	}
-	ready := SchemeCapability{Provider: "share", OK: true}
-	notReady := SchemeCapability{Provider: "share"}
-	if reason != "" {
-		notReady.Reason = reason
-	}
 
-	out.Share115Driver = hasShareKind(shareKinds, driver.ShareKind115)
-	out.Share123Driver = hasShareKind(shareKinds, driver.ShareKind123)
-	out.ShareQuarkDriver = hasShareKind(shareKinds, driver.ShareKindQuark)
-	out.ShareGuangyaDriver = hasShareKind(shareKinds, driver.ShareKindGuangya)
-
-	if !out.Share115Driver {
-		out.Share115 = SchemeCapability{Reason: "该网盘驱动不支持 115 分享转存"}
-	} else if reason == "" {
-		out.Share115 = ready
-	} else {
-		out.Share115 = notReady
-	}
-
-	if !out.Share123Driver {
-		out.Share123 = SchemeCapability{Reason: "该网盘驱动不支持 123 分享转存"}
-	} else if reason == "" {
-		out.Share123 = ready
-	} else {
-		out.Share123 = notReady
-	}
-
-	if !out.ShareQuarkDriver {
-		out.ShareQuark = SchemeCapability{Reason: "该网盘驱动不支持夸克分享转存"}
-	} else if reason == "" {
-		out.ShareQuark = ready
-	} else {
-		out.ShareQuark = notReady
-	}
-
-	if !out.ShareGuangyaDriver {
-		out.ShareGuangya = SchemeCapability{Reason: "该网盘驱动不支持光鸭分享转存"}
-	} else if reason == "" {
-		out.ShareGuangya = ready
-	} else {
-		out.ShareGuangya = notReady
+	for _, entry := range shareMatrix {
+		supported := hasShareKind(shareKinds, entry.Kind)
+		out.ShareDriver[entry.Kind] = supported
+		switch {
+		case !supported:
+			out.Shares[entry.Kind] = SchemeCapability{
+				Reason: fmt.Sprintf("该网盘驱动不支持 %s 分享转存", entry.Label),
+			}
+		case reason != "":
+			out.Shares[entry.Kind] = SchemeCapability{Provider: "share", Reason: reason}
+		default:
+			out.Shares[entry.Kind] = SchemeCapability{Provider: "share", OK: true}
+		}
 	}
 	return out, nil
 }
@@ -548,6 +542,12 @@ func kindLabelOfShare(kind string) string {
 		return driver.ShareKindQuark
 	case kindShareGuangya:
 		return driver.ShareKindGuangya
+	case kindShareBaidu:
+		return driver.ShareKindBaidu
+	case kindShare189:
+		return driver.ShareKind189
+	case kindShare139:
+		return driver.ShareKind139
 	default:
 		return driver.ShareKind115
 	}
@@ -579,6 +579,12 @@ func kindLabelZh(kind string) string {
 		return "夸克"
 	case kindShareGuangya:
 		return "光鸭"
+	case kindShareBaidu:
+		return "百度"
+	case kindShare189:
+		return "天翼"
+	case kindShare139:
+		return "移动"
 	default:
 		return "115"
 	}

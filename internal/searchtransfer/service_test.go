@@ -33,10 +33,23 @@ func TestParseShareLink(t *testing.T) {
 		{name: "尾部斜杠", raw: "https://115.com/s/abcd1234/", wantCode: "abcd1234"},
 		{name: "显式提取码覆盖", raw: "https://115.com/s/abcd1234?password=old1", explicit: "new2", wantCode: "abcd1234", wantPwd: "new2"},
 		{name: "没有提取码", raw: "https://115.com/s/abcd1234", wantCode: "abcd1234"},
-		{name: "多一层路径", raw: "https://115.com/s/abcd1234/file", wantErr: true},
-		{name: "码太短", raw: "https://115.com/s/a", wantCode: "a"},
+		// ⚠️ 下面两条**改了期望**（2026-10-13）：ParseShareLink 现在要同时服务
+		// 七家分享链，形态各不相同（天翼 `/t/<码>`、139 的码在 `#` 片段里、
+		// 蓝奏没有 `/s/` 段），所以它**不能再用「必须是 /s/<码>」当判据** ——
+		// 那会把 139 那种一条都认不出。现在的判据是「末段像分享码」，于是：
+		//   - `/s/abcd1234/file` 取末段（"file" 也像码）—— 这是认宽的代价；
+		//   - `/download` 取末段（"download" 也像码）。
+		// 真正的形态判定在 classifyLink（按域名 + 各自路径正则），
+		// 这里只管「把码抠出来」这一步，别在这里再加形状规则。
+		{name: "多一层路径仍认 /s/ 那一段", raw: "https://115.com/s/abcd1234/file", wantCode: "abcd1234"},
+		{name: "码太短", raw: "https://115.com/s/a", wantErr: true},
 		{name: "空", raw: "", wantErr: true},
-		{name: "非分享路径", raw: "https://115.com/download", wantErr: true},
+		{name: "非分享路径（取末段）", raw: "https://115.com/download", wantCode: "download"},
+		// 三家新形态。
+		{name: "天翼 /t/", raw: "https://cloud.189.cn/t/AbCdEf123", wantCode: "AbCdEf123"},
+		{name: "移动 /w/i/", raw: "https://yun.139.com/w/i/abc12345", wantCode: "abc12345"},
+		{name: "移动 fragment", raw: "https://yun.139.com/shareweb/#/w/i/abc12345", wantCode: "abc12345"},
+		{name: "移动 accessCode 别名", raw: "https://yun.139.com/w/i/abc12345?accessCode=xy9z", wantCode: "abc12345", wantPwd: "xy9z"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

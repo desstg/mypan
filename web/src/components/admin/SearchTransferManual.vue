@@ -30,6 +30,31 @@ const rawText = ref("");
 const submitting = ref(false);
 const capabilities = ref<SaveCapabilities | null>(null);
 
+/**
+ * 分享链种类 → 中文名。顺序即 chip 显示顺序。
+ *
+ * ⚠️ 与后端 internal/searchtransfer/service.go 的 shareMatrix **同源**，加一种分享链
+ * 要一起改。这里只负责显示名，可用性一律由后端的能力表给（不在前端判）。
+ */
+const SHARE_LABELS: Record<string, string> = {
+  "115": "115 分享",
+  "123": "123 分享",
+  quark: "夸克分享",
+  guangya: "光鸭分享",
+  baidu: "百度分享",
+  "189": "天翼分享",
+  "139": "移动分享",
+};
+
+/** 后端给的分享能力表，按 SHARE_LABELS 的顺序摊平成 chip 列表。 */
+const shareChips = computed(() => {
+  const shares = capabilities.value?.shares;
+  if (!shares) return [];
+  return Object.keys(SHARE_LABELS)
+    .filter((kind) => kind in shares)
+    .map((kind) => ({ kind, label: SHARE_LABELS[kind], cap: shares[kind] }));
+});
+
 const accountOptions = computed(() =>
   props.accounts.map((a) => ({ value: a.id, label: a.name })),
 );
@@ -139,9 +164,9 @@ const okCount = computed(() => outcomes.value.filter((o) => o.ok).length);
         <h3>保存到</h3>
         <p class="st-hint">
           选好网盘与目录后，粘贴的链接会按类型自动分流：磁力 / ed2k / 直链走离线下载，
-          115、123、夸克、光鸭分享链走转存。
+          115、123、夸克、光鸭、百度、天翼分享链走转存。
           <span class="st-steps__note">
-            夸克没有离线下载能力，所以夸克账号下的磁力 / 直链会走**内置下载器**
+            没有原生离线下载能力的网盘（夸克、天翼、移动等），磁力 / 直链会走**内置下载器**
             （本机下载完自动上传），网盘上要等它下完才看得见。
           </span>
         </p>
@@ -172,7 +197,7 @@ const okCount = computed(() => outcomes.value.filter((o) => o.ok).length);
           v-model="rawText"
           class="st-textarea"
           rows="6"
-          placeholder="magnet:?xt=urn:btih:…&#10;ed2k://|file|…&#10;https://115.com/s/xxxx?password=abcd&#10;https://123865.com/s/xxxx?pwd=abcd&#10;https://pan.quark.cn/s/xxxx&#10;https://example.com/movie.mkv"
+          placeholder="magnet:?xt=urn:btih:…&#10;ed2k://|file|…&#10;https://115.com/s/xxxx?password=abcd&#10;https://123865.com/s/xxxx?pwd=abcd&#10;https://pan.quark.cn/s/xxxx&#10;https://pan.baidu.com/s/1xxxx?pwd=abcd&#10;https://cloud.189.cn/t/xxxx&#10;https://example.com/movie.mkv"
         ></textarea>
       </label>
 
@@ -188,32 +213,13 @@ const okCount = computed(() => outcomes.value.filter((o) => o.ok).length);
           {{ scheme }}
         </span>
         <span
+          v-for="chip in shareChips"
+          :key="chip.kind"
           class="st-chip"
-          :class="{ 'st-chip--off': !capabilities.share_115.ok }"
-          :title="capabilities.share_115.ok ? '走分享转存' : capabilities.share_115.reason"
+          :class="{ 'st-chip--off': !chip.cap.ok }"
+          :title="chip.cap.ok ? '走分享转存' : chip.cap.reason"
         >
-          115 分享
-        </span>
-        <span
-          class="st-chip"
-          :class="{ 'st-chip--off': !capabilities.share_123.ok }"
-          :title="capabilities.share_123.ok ? '走分享转存' : capabilities.share_123.reason"
-        >
-          123 分享
-        </span>
-        <span
-          class="st-chip"
-          :class="{ 'st-chip--off': !capabilities.share_quark.ok }"
-          :title="capabilities.share_quark.ok ? '走分享转存' : capabilities.share_quark.reason"
-        >
-          夸克分享
-        </span>
-        <span
-          class="st-chip"
-          :class="{ 'st-chip--off': !capabilities.share_guangya.ok }"
-          :title="capabilities.share_guangya.ok ? '走分享转存' : capabilities.share_guangya.reason"
-        >
-          光鸭分享
+          {{ chip.label }}
         </span>
       </div>
 

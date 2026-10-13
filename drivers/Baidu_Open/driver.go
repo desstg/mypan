@@ -3,6 +3,7 @@ package baiduopen
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,16 @@ type Driver struct {
 	mu      sync.Mutex
 	token   string
 	refresh string
+
+	// cookie 是网页版 Cookie，用于**分享转存**与**原生离线下载**（见 web_transport.go）。
+	// 与 115 那份网页 Cookie 一样，它是与开放平台令牌并列的另一份凭据。
+	cookie string
+	// cookieJar 是**会话里新拿到的**网页 cookie（Set-Cookie 的回写），
+	// 与配置里那份 d.cookie 合并着发，见 cookieHeaderLocked 的说明。
+	cookieJar map[string]string
+	// 网页接口的 bdstoken 缓存（绑在 Cookie 上，见 web_transport.go）。
+	bdstoken       string
+	bdstokenCookie string
 
 	transferMD5Mu    sync.Mutex
 	transferMD5Cache map[string]string
@@ -59,11 +70,92 @@ func (d *Driver) GetAddition() any { return &d.add }
 
 func (d *Driver) SetOAuthServer(baseURL string) { d.oauthBase = strings.TrimSpace(baseURL) }
 
+// currentCookie 读网页 Cookie。
+//
+// ⚠️ 与 115 同一条路：值来自 account_auth_states（经 SetAuthCredentials 注入到
+// d.cookie），而不是 Addition.Cookie 字段 —— 那个字段只是写入/展示用的入口。
+func (d *Driver) currentCookie() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cookieHeaderLocked()
+}
+
+// cookieHeaderLocked 拼出要发出去的 Cookie 头，**调用方必须已持有 d.mu**。
+//
+// ⚠️ 这里必须把**会话里新拿到的** cookie 拼在配置那份后面，2026-10-13 真机踩到：
+//
+//   - `/share/verify` 校验提取码成功时，百度会 `Set-Cookie: BDCLND=...`
+//     （提取码派生的访问凭证）与 `PANPSC=...`（新的会话票据，且会让旧的失效）。
+//   - 不接住它们，下一步 `/share/list` 就回 **errno -9**（拿不到分享内容），
+//     再下一步 `/share/transfer` 必然一起失败 —— 报错完全看不出是「少了两个 cookie」。
+//
+// 放在驱动上（而不是 `http.Client` 的 `Jar`）是因为我们的 client 是**共享池**里的，
+// 塞一个 jar 进去会把别的账号的 cookie 串到一起。
+func (d *Driver) cookieHeaderLocked() string {
+	base := strings.TrimSpace(d.cookie)
+	if base == "" {
+		return ""
+	}
+	if len(d.cookieJar) == 0 {
+		return base
+	}
+	keys := make([]string, 0, len(d.cookieJar))
+	for k := range d.cookieJar {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys)+1)
+	parts = append(parts, base)
+	for _, k := range keys {
+		parts = append(parts, k+"="+d.cookieJar[k])
+	}
+	return strings.Join(parts, "; ")
+}
+
+// absorbCookieJar 收下响应里的 Set-Cookie，合并进会话。
+//
+// `deleteme` 是百度清 cookie 的哨兵（删除该键）。
+func (d *Driver) absorbCookieJar(setCookies []string) {
+	if len(setCookies) == 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cookieJar == nil {
+		d.cookieJar = map[string]string{}
+	}
+	for _, raw := range setCookies {
+		name, value, ok := splitSetCookie(raw)
+		if !ok {
+			continue
+		}
+		if value == "" || value == "deleteme" {
+			delete(d.cookieJar, name)
+			continue
+		}
+		d.cookieJar[name] = value
+	}
+}
+
+// splitSetCookie 取一条 Set-Cookie 的键与值（只要第一段，属性全部丢掉）。
+func splitSetCookie(raw string) (name, value string, ok bool) {
+	first := strings.TrimSpace(strings.SplitN(raw, ";", 2)[0])
+	idx := strings.IndexByte(first, '=')
+	if idx <= 0 {
+		return "", "", false
+	}
+	return strings.TrimSpace(first[:idx]), strings.TrimSpace(first[idx+1:]), true
+}
+
 func (d *Driver) SetAuthCredentials(creds domain.AuthCredentials) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.token = strings.TrimSpace(creds.AccessToken)
 	d.refresh = strings.TrimSpace(creds.RefreshToken)
+	// 网页 Cookie 是**分享转存 / 原生离线下载**专用的一份附加凭据（见 web_transport.go）：
+	// 开放平台令牌做不了这两个动作。存储位置与 115 那份网页 Cookie 一致 ——
+	// account_auth_states.cookie。
+	d.cookie = strings.TrimSpace(creds.Cookie)
 }
 
 func (d *Driver) SetAuthPersister(fn driver.AuthPersistFunc) { d.persist = fn }
@@ -90,8 +182,12 @@ func (d *Driver) Init(ctx context.Context) error {
 	d.mu.Lock()
 	d.token = token
 	d.refresh = refresh
+	// 网页 Cookie 与开放平台令牌是两份独立凭据：前者只在配置里填、不参与 OAuth 刷新，
+	// 所以这里只是「配置里有就拿来用」，缺了不算初始化失败（不转存分享的账号不必填）。
+	if cookie := strings.TrimSpace(d.add.Cookie); cookie != "" && d.cookie == "" {
+		d.cookie = cookie
+	}
 	d.mu.Unlock()
-
 	if strings.TrimSpace(token) == "" {
 		if _, err := d.doRefresh(ctx); err != nil {
 			return err
@@ -255,4 +351,12 @@ var (
 	_ driver.ConnectionErrorExplainer = (*Driver)(nil)
 	_ driver.RequestIntervalConsumer  = (*Driver)(nil)
 	_ driver.TransferHashResolver     = (*Driver)(nil)
+	_ driver.ShareReceiver            = (*Driver)(nil)
+	_ driver.ShareKindReporter        = (*Driver)(nil)
+	_ driver.ShareMetaPeeker          = (*Driver)(nil)
+	_ driver.OfflineDownloadProvider  = (*Driver)(nil)
+	_ driver.OfflineURLDownloader     = (*Driver)(nil)
+	_ driver.OfflineTaskRefresher     = (*Driver)(nil)
+	_ driver.OfflineTaskDeleter       = (*Driver)(nil)
+	_ driver.WebLoginChecker          = (*Driver)(nil)
 )

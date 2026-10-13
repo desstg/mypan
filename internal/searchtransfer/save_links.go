@@ -98,6 +98,35 @@ var shareHostsGuangya = []string{"guangyapan.com"}
 // 实测盘搜给的链接长这样：`https://www.guangyapan.com/s/1950788535291969602_aeWYeSwV3ZOZlzEy`
 var shareGuangyaPathRe = regexp.MustCompile(`^/s/[A-Za-z0-9_-]{2,128}$`)
 
+// shareHostsBaidu 是百度网盘分享链的域名白名单。
+//
+// ⚠️ 与 telegram/share.go 的 shareSpecs **同源**，改一处要核对另一处。
+var shareHostsBaidu = []string{"pan.baidu.com", "yun.baidu.com", "eyun.baidu.com"}
+
+// shareBaiduPathRe 与 115/123 同一条规则：`/s/<码>`。
+var shareBaiduPathRe = regexp.MustCompile(`^/s/[A-Za-z0-9_-]{2,64}$`)
+
+// shareHosts189 是天翼云盘分享链的域名白名单。
+var shareHosts189 = []string{"cloud.189.cn"}
+
+// share189PathRe 是天翼云盘的分享页形状：主形态 `/t/<码>`，少数用 `/s/<码>`。
+//
+// ⚠️ 与 telegram/share.go 的 yun189PathRe 同源，改一处要核对另一处。
+var share189PathRe = regexp.MustCompile(`^/(?:t|s)/[A-Za-z0-9]{6,32}$`)
+
+// shareHosts139 是移动云盘（139）分享链的域名白名单。
+//
+// ⚠️ 139 当前**只识别、不转存**（无可用的转存接口），但链接仍要在这一页认得出来，
+// 以便进转存记录、让用户看到「识别到了什么」。域名按社区常见形态列上。
+var shareHosts139 = []string{"yun.139.com", "caiyun.139.com", "139.com"}
+
+// share139PathRe 是移动云盘分享页的路径形状。
+//
+// ⚠️ **有意写得宽**：139 的分享链接形态没有权威文档，且前端改版频繁。这里只要求
+// 「末尾有一段 [A-Za-z0-9_-] 的标识」就把最后一段当分享码 —— 认宽一点在只识别不转存
+// 的当下代价很小。将来补上转存时，要用一条真实分享链把它收紧。
+var share139PathRe = regexp.MustCompile(`^/(?:[^/]+/)*[A-Za-z0-9_-]{4,64}$`)
+
 // classifyLink 判定一条链接走哪条通道。
 //
 // 不认识的 scheme 一律算 unsupported —— 宁可让用户看到「不支持」，
@@ -128,6 +157,15 @@ func classifyLink(raw string) (kind string, scheme string) {
 			if isGuangyaShareURL(parsed) {
 				return kindShareGuangya, "share_guangya"
 			}
+			if isBaiduShareURL(parsed) {
+				return kindShareBaidu, "share_baidu"
+			}
+			if is189ShareURL(parsed) {
+				return kindShare189, "share_189"
+			}
+			if is139ShareURL(parsed) {
+				return kindShare139, "share_139"
+			}
 		}
 		return "http", "http"
 	}
@@ -143,6 +181,11 @@ const (
 	kindShare123     = "share_123"
 	kindShareQuark   = "share_quark"
 	kindShareGuangya = "share_guangya"
+	kindShareBaidu   = "share_baidu"
+	kindShare189     = "share_189"
+	// kindShare139 是移动云盘分享 —— **只识别、不转存**（无可用的转存接口），
+	// 但仍然要在这一页认得出来，好让用户看到「识别到了什么」，而不是一句「认不出链接类型」。
+	kindShare139 = "share_139"
 )
 
 // isQuarkShareURL 与另几家同一条规则：域名与路径都要对上。
@@ -159,6 +202,40 @@ func isGuangyaShareURL(u *url.URL) bool {
 		return false
 	}
 	return shareGuangyaPathRe.MatchString(strings.TrimRight(u.Path, "/"))
+}
+
+// isBaiduShareURL 与另几家同一条规则：域名与路径都要对上。
+func isBaiduShareURL(u *url.URL) bool {
+	if u == nil || !hostMatchesAny(u.Hostname(), shareHostsBaidu) {
+		return false
+	}
+	return shareBaiduPathRe.MatchString(strings.TrimRight(u.Path, "/"))
+}
+
+// is189ShareURL 与另几家同一条规则：域名与路径都要对上。
+func is189ShareURL(u *url.URL) bool {
+	if u == nil || !hostMatchesAny(u.Hostname(), shareHosts189) {
+		return false
+	}
+	return share189PathRe.MatchString(strings.TrimRight(u.Path, "/"))
+}
+
+// is139ShareURL 与另几家同一条规则：域名与路径都要对上。
+//
+// ⚠️ 139 的分享码常藏在 **fragment** 里（`https://yun.139.com/shareweb/#/w/i/<id>`），
+// 不在 Path —— 所以这里把 Fragment 也拿来匹配一遍，否则那种形态一条都认不出。
+func is139ShareURL(u *url.URL) bool {
+	if u == nil || !hostMatchesAny(u.Hostname(), shareHosts139) {
+		return false
+	}
+	if share139PathRe.MatchString(strings.TrimRight(u.Path, "/")) {
+		return true
+	}
+	frag := strings.TrimSpace(u.Fragment)
+	if i := strings.IndexAny(frag, "?"); i >= 0 {
+		frag = frag[:i]
+	}
+	return frag != "" && share139PathRe.MatchString(strings.TrimRight(frag, "/"))
 }
 
 // is123ShareURL 与 is115ShareURL 同一条规则：域名与路径都要对上。
@@ -348,11 +425,11 @@ func (s *Service) SaveLinks(ctx context.Context, reqs []SaveLinkRequest, source 
 		if kind == "" {
 			res.Failed++
 			res.Items = append(res.Items, SaveLinkItem{
-				URL: req.URL, OK: false, Message: "认不出链接类型（支持磁力 / ed2k / 迅雷 / ftp / http(s) 直链 / 115、123、夸克、光鸭分享）",
+				URL: req.URL, OK: false, Message: "认不出链接类型（支持磁力 / ed2k / 迅雷 / ftp / http(s) 直链 / 115、123、夸克、光鸭、百度、天翼、移动分享）",
 			})
 			continue
 		}
-		// ⚠️ 三条分享链（115/123/夸克）**都要在这里摘出去**：漏一条它就会掉进
+		// ⚠️ 所有分享链都要在这里摘出去：漏一条它就会掉进
 		// 下面那条离线判定，拿着 scheme="share_xxx" 去问能力表 —— 网盘与内置
 		// 下载器当然都不认它，于是回一句「该网盘与内置下载器都不支持这种链接」，
 		// 而真实原因是**它压根不该走离线通道**（真机踩到过）。
@@ -471,7 +548,8 @@ func finalizeOfflineMessage(msg, providerKind string) string {
 // isShareKind 报告一个资源类型是不是「分享链」（走分享转存通道）。
 func isShareKind(kind string) bool {
 	switch kind {
-	case kindShare115, kindShare123, kindShareQuark, kindShareGuangya:
+	case kindShare115, kindShare123, kindShareQuark, kindShareGuangya,
+		kindShareBaidu, kindShare189, kindShare139:
 		return true
 	}
 	return false

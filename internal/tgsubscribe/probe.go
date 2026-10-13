@@ -45,13 +45,15 @@ type ProbeResourceCount struct {
 // 能投递的排前面，只识别不投递的按实测出现频率排 —— 频道的「体检」报告
 // 是要给人看的，顺序本身就在回答「这个频道的资源主要是什么形态」。
 //
-// 115 / 123 / 夸克 / 光鸭 都属于「类型支持、账号配置另说」（各自的分享接口都要那份
-// 网盘侧的凭据），所以排在同一档；它们的账号前提由 probeWarnings 用文字交代。
+// 115 / 123 / 夸克 / 光鸭 / 百度 / 天翼 / 移动 都属于「类型支持、账号配置另说」
+// （各自的分享接口都要那份网盘侧的凭据），所以排在同一档；它们的账号前提由
+// probeWarnings 用文字交代。
 var probeKindOrder = []string{
 	KindMagnet, KindED2K, KindHTTP, KindShare115, KindShare123, KindShareQuark, KindShareGuangya,
+	KindShareBaidu, KindShare189, KindShare139,
 	// 以下只识别、不投递。实测频率：百度最多，其次迅雷、阿里。
-	KindShareBaidu, KindShareXunlei, KindShareAliyun, KindShareUC,
-	KindShare189, KindSharePikPak, KindShareLanzou,
+	KindShareXunlei, KindShareAliyun, KindShareUC,
+	KindSharePikPak, KindShareLanzou,
 	KindShareGDrive, KindShareOneDrive, KindShareMega,
 }
 
@@ -141,7 +143,10 @@ func (s probeScan) total() int {
 // shares 是分享类资源的命中数（各类分享链之和）。
 func (s probeScan) shares() int {
 	n := 0
-	for _, kind := range []string{KindShare115, KindShare123, KindShareQuark, KindShareGuangya} {
+	for _, kind := range []string{
+		KindShare115, KindShare123, KindShareQuark, KindShareGuangya,
+		KindShareBaidu, KindShare189, KindShare139,
+	} {
 		n += s.counts[kind]
 	}
 	return n
@@ -245,6 +250,18 @@ func (s *Service) probeWarnings(scan probeScan, urlButtonCount int) []string {
 	if scan.counts[KindShareGuangya] > 0 {
 		warnings = append(warnings, "其中光鸭分享链需要目标账号是**光鸭账号**才能自动转存"+
 			"（光鸭用的是它自己的登录令牌，别的网盘账号转不了）。")
+	}
+	if scan.counts[KindShareBaidu] > 0 {
+		warnings = append(warnings, "其中百度分享链需要目标账号配「网页 Cookie」才能自动转存"+
+			"（百度转存只有网页接口能做，开放平台令牌不认）；没配的账号上这些记录会以「暂不支持投递」出现。")
+	}
+	if scan.counts[KindShare189] > 0 {
+		warnings = append(warnings, "其中天翼云盘分享链需要目标账号配「网页 Cookie」才能自动转存"+
+			"（天翼转存走网页接口，开放平台令牌不认）；没配的账号上这些记录会以「暂不支持投递」出现。")
+	}
+	if scan.counts[KindShare139] > 0 {
+		warnings = append(warnings, "其中移动云盘分享链需要目标账号是**移动云盘账号**（并且它已登录）才能自动转存"+
+			"（139 的转存用的是它自己的登录令牌，别的网盘账号转不了）。")
 	}
 	if scan.discarded > 0 {
 		warnings = append(warnings, "另有 "+strconv.Itoa(scan.discarded)+

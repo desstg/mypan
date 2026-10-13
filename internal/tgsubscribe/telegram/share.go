@@ -64,6 +64,15 @@ var megaPathRe = regexp.MustCompile(`^/(?:file|folder)/([A-Za-z0-9_-]{6,16})$`)
 // 与 internal/searchtransfer 的 shareGuangyaPathRe 同源，改一处要核对另一处。
 var shareGuangyaPathRe = regexp.MustCompile(`^/s/([A-Za-z0-9_-]{2,128})$`)
 
+// share139PathRe 匹配移动云盘（139）分享页。
+//
+// ⚠️ **有意写得宽**：139 的分享链接形态没有权威文档，社区里 `/s/<id>`、`/m/i/<id>`、
+// `/w/i/<id>` 等说法都有，且它的分享页前端改版频繁。这里只要求「末尾有一段
+// [A-Za-z0-9_-] 的标识」就把最后一段当分享码 —— 反正 139 当前**只识别、不投递**，
+// 认宽一点的代价只是多几条「已识别到移动云盘分享」的记录，比认窄了漏链好得多。
+// 将来补上 139 的转存时，要用一条真实分享链把这条正则收紧到确定形态。
+var share139PathRe = regexp.MustCompile(`^/(?:[^/]+/)*([A-Za-z0-9_-]{4,64})$`)
+
 // shareSpecs 是**全部**认得的分享域名。
 //
 // ⚠️ 115 / 123 / 夸克 三种有投递器（转存）；其余十种当前版本**只识别、不投递** ——
@@ -90,10 +99,12 @@ var shareSpecs = []shareSpec{
 		prefix: "quark:",
 	},
 	{
-		kind:   ResourceKindShareBaidu,
-		hosts:  []string{"pan.baidu.com", "yun.baidu.com", "eyun.baidu.com"},
-		canon:  "https://pan.baidu.com",
-		prefix: "baidu:",
+		// 百度网盘。转存走网页接口（/share/transfer），要账号配一份网页 Cookie（BDUSS）。
+		kind:        ResourceKindShareBaidu,
+		hosts:       []string{"pan.baidu.com", "yun.baidu.com", "eyun.baidu.com"},
+		canon:       "https://pan.baidu.com",
+		prefix:      "baidu:",
+		deliverable: true,
 	},
 	{
 		// 阿里云盘 2023 年从 aliyundrive.com 迁到 alipan.com，两个都要认。
@@ -133,11 +144,25 @@ var shareSpecs = []shareSpec{
 		pathRe: shareGuangyaPathRe,
 	},
 	{
-		kind:   ResourceKindShare189,
-		hosts:  []string{"cloud.189.cn"},
-		canon:  "https://cloud.189.cn",
-		prefix: "189:",
-		pathRe: yun189PathRe,
+		// 天翼云盘（189）。转存走网页开放接口（share/listShareDir + batch/createBatchTask
+		// 的 SHARE_SAVE），要账号配一份网页 Cookie 换 AccessToken。
+		kind:        ResourceKindShare189,
+		hosts:       []string{"cloud.189.cn"},
+		canon:       "https://cloud.189.cn",
+		prefix:      "189:",
+		pathRe:      yun189PathRe,
+		deliverable: true,
+	},
+	{
+		// 移动云盘（139）。转存走**分享侧**接口（getOutLinkInfoV6 +
+		// createOuterLinkBatchOprTask），用的是本驱动本来就有的登录令牌，
+		// 不需要额外配凭据 —— 与光鸭同一档。
+		kind:        ResourceKindShare139,
+		hosts:       []string{"yun.139.com", "caiyun.139.com", "139.com"},
+		canon:       "https://yun.139.com",
+		prefix:      "139:",
+		pathRe:      share139PathRe,
+		deliverable: true,
 	},
 	{
 		kind:   ResourceKindSharePikPak,

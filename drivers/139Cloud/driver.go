@@ -32,7 +32,7 @@ var config = driver.Config{
 	Name:                   "139_cloud",
 	DisplayName:            "移动云盘",
 	Description:            "移动云盘新版个人云接口，使用网页 Authorization 令牌",
-	CardTags:               []string{"扫码登录", "Authorization", "支持302"},
+	CardTags:               []string{"扫码登录", "Authorization", "支持302", "分享转存"},
 	SortOrder:              9,
 	AuthLabel:              "Authorization",
 	CardColor:              "#3B82F6",
@@ -178,4 +178,7 @@ var (
 	_ driver.ConnectionErrorExplainer = (*Driver)(nil)
 	_ driver.RequestIntervalConsumer  = (*Driver)(nil)
 	_ driver.QRLoginProvider          = (*Driver)(nil)
+	_ driver.ShareReceiver            = (*Driver)(nil)
+	_ driver.ShareKindReporter        = (*Driver)(nil)
+	_ driver.ShareMetaPeeker          = (*Driver)(nil)
 )

@@ -36,6 +36,16 @@ func TestClassifyLink(t *testing.T) {
 		{"光鸭分享", "https://www.guangyapan.com/s/1950788535291969602_aeWYeSwV3ZOZlzEy", kindShareGuangya, "share_guangya"},
 		{"光鸭主域", "https://guangyapan.com/s/123_abcdef", kindShareGuangya, "share_guangya"},
 		{"光鸭非分享路径仍是直链", "https://www.guangyapan.com/list/abc", "http", "http"},
+		{"百度分享", "https://pan.baidu.com/s/1abcd1234", kindShareBaidu, "share_baidu"},
+		{"百度带提取码", "https://pan.baidu.com/s/1abcd1234?pwd=xy9z", kindShareBaidu, "share_baidu"},
+		{"百度 eyun 子域", "https://eyun.baidu.com/s/1abcd1234", kindShareBaidu, "share_baidu"},
+		{"百度非分享路径仍是直链", "https://pan.baidu.com/disk/home", "http", "http"},
+		{"天翼分享 /t/", "https://cloud.189.cn/t/AbCdEf123", kindShare189, "share_189"},
+		{"天翼分享 /s/", "https://cloud.189.cn/s/AbCdEf123", kindShare189, "share_189"},
+		{"天翼非分享路径仍是直链", "https://cloud.189.cn/web/main", "http", "http"},
+		{"移动分享 /w/i/", "https://yun.139.com/w/i/abc12345", kindShare139, "share_139"},
+		{"移动分享 caiyun", "https://caiyun.139.com/w/i/abc12345", kindShare139, "share_139"},
+		{"移动分享 fragment 形态", "https://yun.139.com/shareweb/#/w/i/abc12345", kindShare139, "share_139"},
 		{"伪造域不算 115", "https://115.com.evil.com/s/abcd1234", "http", "http"},
 		{"认不出", "javascript:alert(1)", "", ""},
 		{"裸字符串", "不是链接", "", ""},
@@ -120,6 +130,11 @@ func TestShareKindsNeverFallIntoOfflineChannel(t *testing.T) {
 		"https://www.quark.cn/s/abcdef123456?pwd=xy9z",
 		// 光鸭（2026-10-12 接上转存）—— 分享码是 `<id>_<token>` 形态。
 		"https://www.guangyapan.com/s/1950788535291969602_aeWYeSwV3ZOZlzEy",
+		// 百度 / 天翼（转存走各自网页接口，要网页 Cookie）。
+		"https://pan.baidu.com/s/1abcd1234?pwd=xy9z",
+		"https://cloud.189.cn/t/AbCdEf123",
+		// 移动（只识别、不转存）—— 但仍然不能掉进离线通道。
+		"https://yun.139.com/w/i/abc12345",
 	}
 	for _, raw := range shareLinks {
 		kind, scheme := classifyLink(raw)
@@ -147,6 +162,9 @@ func TestKindLabelOfShareRoundTrips(t *testing.T) {
 		{kindShare123, driver.ShareKind123},
 		{kindShareQuark, driver.ShareKindQuark},
 		{kindShareGuangya, driver.ShareKindGuangya},
+		{kindShareBaidu, driver.ShareKindBaidu},
+		{kindShare189, driver.ShareKind189},
+		{kindShare139, driver.ShareKind139},
 	}
 	for _, tc := range cases {
 		if got := kindLabelOfShare(tc.kind); got != tc.want {
@@ -159,6 +177,7 @@ func TestKindLabelOfShareRoundTrips(t *testing.T) {
 	zh := map[string]string{
 		kindShare115: "115", kindShare123: "123",
 		kindShareQuark: "夸克", kindShareGuangya: "光鸭",
+		kindShareBaidu: "百度", kindShare189: "天翼", kindShare139: "移动",
 	}
 	for kind, want := range zh {
 		if got := kindLabelZh(kind); got != want {
