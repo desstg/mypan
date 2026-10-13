@@ -698,7 +698,16 @@ func (s *Service) setJavOnlineProgress(taskID int64, done, total int, message st
 	}
 }
 
-// JavOnlineScrapeProgressOf 取当前进度（没在跑时 running=false）。
+// JavOnlineScrapeProgressOf 取当前进度（如实返回，没在跑时 running=false）。
+//
+// ⚠️ **不要在这里把 Running 置回 true**（原来那版就是 `out.Running = true`）。
+// 前端的收尾判据就是「running 从 true 变 false」—— 置回 true 等于让那条判据
+// 永远不成立：任务其实早就跑完了，按钮却一直显示「刮削中…」，直到刷新页面
+// （本地状态归零）才好。2026-10-12 用户实测报的就是这个。
+//
+// 以前之所以能这么写，是因为**收工时整块进度被置成 nil**（没在跑 = 读不到），
+// 所以「读到了」与「在跑」是同一件事。改成「跑完保留 Result 让前端读」之后，
+// 这个假设就不成立了 —— 读到了完全可能是一份**已经跑完**的进度。
 func (s *Service) JavOnlineScrapeProgressOf(taskID int64) JavOnlineScrapeProgress {
 	s.javOnlineMu.Lock()
 	defer s.javOnlineMu.Unlock()
@@ -706,7 +715,5 @@ func (s *Service) JavOnlineScrapeProgressOf(taskID int64) JavOnlineScrapeProgres
 	if p == nil || p.TaskID != taskID {
 		return JavOnlineScrapeProgress{TaskID: taskID}
 	}
-	out := *p
-	out.Running = true
-	return out
+	return *p
 }

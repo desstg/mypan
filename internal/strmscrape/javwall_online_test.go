@@ -314,3 +314,43 @@ func TestJavOnlineProgressKeepsResultUntilRead(t *testing.T) {
 		t.Fatalf("任务 8 读到了任务 7 的进度 = %+v", p)
 	}
 }
+
+// TestJavOnlineProgressReportsFinishedState 钉住「跑完之后读到的是 running=false」。
+//
+// 这条是 2026-10-12 用户实测报的回归：取进度那个函数原来无条件 `out.Running = true`。
+// 改「保留 Result 让前端读」之前，收工是把整块进度置成 nil（没在跑 = 读不到），
+// 所以「读到了」与「在跑」是同一件事，写死 true 也无害；改成保留 Result 之后这个
+// 假设就不成立了 —— 前端唯一那条收尾判据就是「running 从 true 变 false」，
+// 被强行置回 true 的话它**永远不成立**：任务早跑完了，按钮却一直「刮削中…」，
+// 刷新页面（本地状态归零）才好。
+func TestJavOnlineProgressReportsFinishedState(t *testing.T) {
+	svc := &Service{}
+	svc.setJavOnlineProgress(7, 0, 10, "在线刮削中…")
+
+	// 模拟收尾那个 goroutine 干的事（带锁一次写完）。
+	svc.javOnlineMu.Lock()
+	svc.javOnline.Running = false
+	svc.javOnline.Message = "在线刮削完成"
+	svc.javOnline.Result = &JavWallOnlineScrapeResult{Total: 10, Scraped: 8}
+	svc.javOnlineMu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		p := svc.JavOnlineScrapeProgressOf(7)
+		if p.Running {
+			t.Fatalf("第 %d 次读：收尾之后还说自己在跑 = %+v（前端就是被这个卡在「刮削中…」）", i+1, p)
+		}
+		if p.Result == nil || p.Result.Scraped != 8 {
+			t.Fatalf("第 %d 次读：结果丢了 = %+v", i+1, p)
+		}
+		if p.Done != 0 || p.Total != 10 {
+			t.Fatalf("第 %d 次读：数字被改了 = %+v", i+1, p)
+		}
+	}
+
+	// 正在跑的时候必须如实说在跑（别修过头，反过来把 running 写死 false）。
+	svc2 := &Service{}
+	svc2.setJavOnlineProgress(7, 3, 10, "在线刮削：A")
+	if p := svc2.JavOnlineScrapeProgressOf(7); !p.Running {
+		t.Fatalf("跑着的时候读成没在跑 = %+v", p)
+	}
+}

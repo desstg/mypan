@@ -9,6 +9,7 @@ import {
   refreshJavWall,
   type JavWallItem,
   type JavWallListResult,
+  type JavWallOnlineScrapeProgress,
 } from "@/api/strmJavWall";
 import AppButton from "@/components/base/AppButton.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
@@ -169,16 +170,41 @@ async function onlineScrape() {
   } catch {
     return;
   }
+  // 先读一次**当前进度**，把「已经在跑」这种情况分开处理。
+  //
+  // 两个理由：
+  //   1. **认领**：后端同一任务不能并发（已在跑就直接返回当前进度）。上次跑完
+  //      没来得及收尾、或者换了页面回来而服务端还在跑，这时点按钮该做的是
+  //      「接上那条轮询」，不是再发一次注定被拒的起任务请求。
+  //   2. **对表**：把这一次读到的「跑之前」的进度状态（含收没收到 result）交给
+  //      轮询，让它知道手上这份是不是**上一轮**留下的残影（收尾状态没带 result
+  //      时，下一轮的 `(0,0)` 才不会当下当成新任务的结论 —— 那是这个键第一次
+  //      被点就弹「在线刮削失败」的来源）。
+  let baseline: JavWallOnlineScrapeProgress | null = null;
+  let alreadyRunning: JavWallOnlineScrapeProgress | null = null;
+  try {
+    const now = await fetchJavWallOnlineScrapeProgress(props.taskId);
+    if (now.running) alreadyRunning = now;
+    else baseline = now;
+  } catch {
+    // 进度读不到（网络抖一下）：当作没有基线，往下走。
+  }
+  if (alreadyRunning) {
+    // 已经在跑：只接管轮询，不再弹一次确认、也不发那个会被拒的起任务请求。
+    onlineScraping.value = true;
+    startOnlinePoll(alreadyRunning);
+    return;
+  }
   onlineScraping.value = true;
-  startOnlinePoll();
   try {
     // **起任务**（接口立刻返回，活在后头跑）。结果从进度里读 —— 见 startOnlinePoll。
     await onlineScrapeJavWall({ strm_task_id: props.taskId });
     // 不在这里等：轮询那条路会在 running 变 false 时弹结果并收尾。
+    startOnlinePoll(undefined, baseline);
   } catch (error) {
     toast.error(getApiErrorMessage(error, "在线刮削失败"));
-    stopOnlinePoll();
     onlineScraping.value = false;
+    stopOnlinePoll();
   }
 }
 
@@ -190,13 +216,46 @@ async function onlineScrape() {
  * 在线刮削要打上游一百多次、还要下上千张图，整个任务十几分钟。**同步等它**
  * 会被中间那层反代 502（群晖上实测跑到 20 部就断，把图片间隔调大只会更早）。
  * 所以后端改成后台任务，这里轮询到结束为止 —— 期间用户可以照常用墙。
+ *
+ * # 收尾判据就是 `running === false`，但要先排掉「上一轮的残影」
+ *
+ * 服务端把「跑完」写成**一次**带锁的赋值（Running=false + Message + Result 一起落），
+ * 所以轮询读到的 `running=false` 就是结论。
+ *
+ * 唯一的例外是 `baseline` —— **起任务之前**读到的那份进度：那是上一轮跑完（或
+ * 上一轮起任务失败）之后一直留在服务端的状态。起任务那个 POST 与第一次轮询
+ * 是两条并发的请求，轮询完全可能先落地、读到这份残影：
+ *   * 残影是**空状态**（从来没跑过）→ 旧代码会当成「没在跑也没结果」判失败；
+ *   * 残影带着**上一轮的 result** → 不排掉的话会当场弹上一轮的战绩并收尾，
+ *     而这一轮其实正在跑（按钮早早复位、后面再没人轮询）。
+ * 两种都不是结论，所以：**读到与 baseline 一模一样的那一次，跳过，只跳一次。**
+ *
+ * 为什么「只跳一次」是安全的：POST 在返回之前就已经把服务端的进度换成新任务的
+ * 「准备中…」了，所以跳过之后的下一次读数要么是新任务的进度（running=true），
+ * 要么是它跑完的结论（真跑完了就正好该报）。
+ *
+ * ⚠️ 后端那个取进度的函数原来会把 `Running` **强行置回 true**，于是
+ * `running === false` 永远不成立：任务早就跑完了，按钮却一直「刮削中…」，
+ * 刷新页面才好（用户 2026-10-12 报的正是这个）。已修，见 JavOnlineScrapeProgressOf。
  */
-function startOnlinePoll() {
+function startOnlinePoll(
+  initial?: JavWallOnlineScrapeProgress | null,
+  baseline?: JavWallOnlineScrapeProgress | null,
+) {
   stopOnlinePoll();
+  // 接管一个**已经在跑**的任务时，先把当前进度摆上，按钮不会闪一下「在线刮削」。
+  if (initial) onlineProgress.value = initial;
+  // 只认一次残影（见上面）；对上一次之后就一律按真实读数判。
+  let shadow: JavWallOnlineScrapeProgress | null = baseline ?? null;
   const tick = async () => {
     if (!props.taskId) return;
     try {
       const p = await fetchJavWallOnlineScrapeProgress(props.taskId);
+      if (shadow && sameProgress(p, shadow)) {
+        shadow = null;
+        return;
+      }
+      shadow = null;
       onlineProgress.value = p.running ? p : null;
       if (p.running) return;
       // 跑完了（或失败）：弹结果并收尾。
@@ -208,9 +267,14 @@ function startOnlinePoll() {
         if (p.result.skipped) parts.push(`跳过 ${p.result.skipped} 部`);
         if (p.result.failed) parts.push(`失败 ${p.result.failed} 部`);
         toast.success(`在线刮削完成：${parts.join("，")}`);
+      } else if (p.message) {
+        // 没有 result 但有 message = 跑挂了（后端把错误写在 message 里）。
+        toast.error(p.message);
       } else {
-        // 没有 result = 跑挂了（后端的错误落在 message 里）。
-        toast.error(p.message || "在线刮削失败");
+        // **两样都没有** = 服务端手上压根没有这一轮的记录（最可能是中途重启了，
+        // 内存里那份进度跟着没了）。这时如实说一句，别默认成「失败」——
+        // 这条路上正常跑完一定会带 result。
+        toast.error("在线刮削已中断：服务端没有留下这次的记录（可能刚重启过）");
       }
       await load();
     } catch {
@@ -219,6 +283,13 @@ function startOnlinePoll() {
   };
   void tick();
   onlinePollTimer = window.setInterval(tick, 3000);
+}
+
+/** 两份进度是不是同一份（认「残影」用：它没有 result 可对，只能比这几个字段）。 */
+function sameProgress(a: JavWallOnlineScrapeProgress, b: JavWallOnlineScrapeProgress): boolean {
+  return (
+    a.running === b.running && a.done === b.done && a.total === b.total && a.message === b.message
+  );
 }
 
 function stopOnlinePoll() {
