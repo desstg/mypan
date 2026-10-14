@@ -103,7 +103,7 @@
 
 ## ▎ 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.8.4`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.8.5`
 
 ### 一、先确认共享挂载已开启（用到 FUSE 挂载才需要）
 
