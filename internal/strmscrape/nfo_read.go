@@ -88,7 +88,7 @@ func readTMDBWallNFO(g workGroup, mediaType string) *tmdbNFO {
 //
 // 解不出来（用户手改成了远程 URL、或者相对路径越出任务根）就**跳过这一条**：
 // 前端会给它画占位图标，比显示一张破图好。
-func actorPhotoURLs(taskID int64, root string, g workGroup, mediaType string, nfo *tmdbNFO) map[string]string {
+func actorPhotoURLs(ref posterRef, root string, g workGroup, mediaType string, nfo *tmdbNFO) map[string]string {
 	out := map[string]string{}
 	if nfo == nil {
 		return out
@@ -110,7 +110,7 @@ func actorPhotoURLs(taskID int64, root string, g workGroup, mediaType string, nf
 		if !isInside(root, full) || !fileExists(full) {
 			continue
 		}
-		out[name] = posterURLFromRelWidth(taskID, filepath.ToSlash(relUnder(root, full)), tmdbActorThumbWidth)
+		out[name] = posterURLFromRelWidth(ref, filepath.ToSlash(relUnder(root, full)), tmdbActorThumbWidth)
 	}
 	return out
 }
@@ -126,7 +126,7 @@ const (
 )
 
 // stillURLs 列 extrafanart/ 里的剧照，拼成取图地址（带宽度参数）。
-func stillURLs(taskID int64, root, absDir string) []string {
+func stillURLs(ref posterRef, root, absDir string) []string {
 	dir := filepath.Join(absDir, emby.ExtraFanartDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -147,7 +147,7 @@ func stillURLs(taskID int64, root, absDir string) []string {
 	out := make([]string, 0, len(names))
 	for _, name := range names {
 		rel := filepath.ToSlash(relUnder(root, filepath.Join(dir, name)))
-		out = append(out, posterURLFromRelWidth(taskID, rel, tmdbStillWidth))
+		out = append(out, posterURLFromRelWidth(ref, rel, tmdbStillWidth))
 	}
 	return out
 }
@@ -156,7 +156,7 @@ func stillURLs(taskID int64, root, absDir string) []string {
 //
 // ⚠️ **前端不显示它**（用户明确要求不做背景大图）。填上是为了 Emby 之外将来想用时
 // 不必再改后端，成本为零 —— 与 WallDetail.FanartURL 的注释一致。
-func fanartURL(taskID int64, root string, g workGroup) string {
+func fanartURL(ref posterRef, root string, g workGroup) string {
 	if g.flatFile != "" {
 		return ""
 	}
@@ -164,7 +164,7 @@ func fanartURL(taskID int64, root string, g workGroup) string {
 	if !fileExists(path) {
 		return ""
 	}
-	return posterURLFromRelWidth(taskID, filepath.ToSlash(relUnder(root, path)), tmdbStillWidth)
+	return posterURLFromRelWidth(ref, filepath.ToSlash(relUnder(root, path)), tmdbStillWidth)
 }
 
 // findSeasonNFO 读季目录里的 season.nfo（详情抽屉里显示季简介用）。

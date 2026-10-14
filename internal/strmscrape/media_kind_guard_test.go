@@ -42,7 +42,7 @@ func TestTmdbEntriesRejectJavTask(t *testing.T) {
 	}
 
 	assertRejected("RunAsync", svc.RunAsync(ctx, RunRequest{StrmTaskID: 7}))
-	assertRejected("RebuildIndex", svc.RebuildIndex(ctx, 7))
+	assertRejected("RebuildIndex", svc.RebuildIndex(ctx, &wallSrc{Kind: "task", TaskID: 7, Root: "/x", MediaKind: "jav"}))
 	_, err := svc.ListItems(ctx, 7, ItemListQuery{})
 	assertRejected("ListItems", err)
 	_, _, err = svc.Rescrape(ctx, RescrapeRequest{StrmTaskID: 7, ItemID: "x"})

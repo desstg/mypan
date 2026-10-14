@@ -141,34 +141,39 @@ type javWallRow struct {
 	titleSize int64
 }
 
-// javWallRows 返回这个任务的卡片（带快照缓存）。
-func (s *Service) javWallRows(ctx context.Context, taskID int64, force bool) (*javWallSnapshot, error) {
-	task, root, err := s.resolveTask(ctx, taskID)
-	if err != nil {
-		return nil, err
-	}
-	if task.MediaKind != javMediaKind {
+// javWallRows 返回这个数据源的卡片（带快照缓存）。
+//
+// 参数是 `*wallSrc` 而不是 taskID：墙的数据源现在有两种（STRM 任务 / 挂上来的
+// 本地目录），而**扫描这一段本来就只需要 root** —— taskID 只是用来拼图片 URL
+// 与当缓存键，那两件事用 `ScopeKey()` / `PosterRef()` 表达即可。
+func (s *Service) javWallRows(ctx context.Context, src *wallSrc, force bool) (*javWallSnapshot, error) {
+	if src == nil {
 		return nil, errNotJavTask
 	}
+	if !src.isJav() {
+		return nil, errNotJavTask
+	}
+	root := src.Root
 	hidden := javWallHiddenDirs(s.settings)
 	hiddenKey := javWallHiddenKey(hidden)
 	now := time.Now()
+	cacheKey := src.ScopeKey()
 
 	s.javWallMu.Lock()
-	cached := s.javWallCache[taskID]
+	cached := s.javWallCache[cacheKey]
 	s.javWallMu.Unlock()
 	if cached != nil && !force && cached.root == root && cached.hiddenKey == hiddenKey &&
 		now.Sub(cached.builtAt) < javWallSnapshotTTL && sameDirMtime(cached.rootMod, root) {
 		return cached, nil
 	}
 
-	snap, err := buildJavWallSnapshot(ctx, taskID, root, hidden)
+	snap, err := buildJavWallSnapshot(ctx, src.PosterRef(), root, hidden)
 	if err != nil {
 		return nil, err
 	}
 	snap.hiddenKey = hiddenKey
 	s.javWallMu.Lock()
-	s.javWallCache[taskID] = snap
+	s.javWallCache[cacheKey] = snap
 	s.javWallMu.Unlock()
 	return snap, nil
 }
@@ -180,10 +185,10 @@ func javWallHiddenKey(dirs []string) string {
 	return strings.Join(clean, "\x00")
 }
 
-// invalidateJavWall 让某个任务的快照作废（保存/重刮/刷新之后调用）。
-func (s *Service) invalidateJavWall(taskID int64) {
+// invalidateJavWall 让某个数据源的快照作废（保存/重刮/刷新之后调用）。
+func (s *Service) invalidateJavWall(cacheKey string) {
 	s.javWallMu.Lock()
-	delete(s.javWallCache, taskID)
+	delete(s.javWallCache, cacheKey)
 	s.javWallMu.Unlock()
 }
 
@@ -193,7 +198,7 @@ func (s *Service) invalidateJavWall(taskID int64) {
 // （只靠 TTL 的话最长要等一分钟，用户会以为没保存上）。
 func (s *Service) InvalidateJavWallAll() {
 	s.javWallMu.Lock()
-	s.javWallCache = map[int64]*javWallSnapshot{}
+	s.javWallCache = map[string]*javWallSnapshot{}
 	s.javWallMu.Unlock()
 }
 
@@ -213,7 +218,7 @@ func sameDirMtime(recorded time.Time, path string) bool {
 //
 // **被隐藏的一级目录照样扫**（只是在 categories 上打 `Hidden` 标记、卡片由 listJavWall
 // 过滤掉）：勾选界面要显示「未匹配 7 部」，那个数字只有扫过才知道。
-func buildJavWallSnapshot(ctx context.Context, taskID int64, root string, hidden []string) (*javWallSnapshot, error) {
+func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidden []string) (*javWallSnapshot, error) {
 	snap := &javWallSnapshot{root: root, builtAt: time.Now(), hidden: hidden}
 	if info, err := os.Stat(root); err == nil {
 		snap.rootMod = info.ModTime()
@@ -236,6 +241,15 @@ func buildJavWallSnapshot(ctx context.Context, taskID int64, root string, hidden
 		return nil, err
 	}
 
+	// 先扫出「一级目录」的清单与每个的卡片，再决定它们该当**分类**还是当**作品**。
+	type topEntry struct {
+		name string
+		rows []javWallRow
+		// hasOwnStrm 表示这一层**直接**躺着 `.strm`（不递归）。
+		hasOwnStrm bool
+	}
+	tops := make([]topEntry, 0, len(top))
+	anyOwnStrm := false
 	for _, entry := range top {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -244,11 +258,43 @@ func buildJavWallSnapshot(ctx context.Context, taskID int64, root string, hidden
 			continue
 		}
 		catDir := filepath.Join(root, entry.Name())
-		snap.cats = append(snap.cats, JavWallCategory{Name: entry.Name(), Hidden: isHidden(entry.Name())})
+		own := hasStrmInDir(catDir)
+		if own {
+			anyOwnStrm = true
+		}
 		// 一级目录下可能还有一层（分类目录 → 影片目录），也可能直接躺着 .strm。
 		// 隐藏**只按一级目录名判**：同一个名字出现在更深处（作品目录恰好与某个一级目录同名）
 		// 不该被连坐，所以这里不把 hiddenSet 传下去。
-		snap.rows = append(snap.rows, collectJavRows(ctx, taskID, catDir, entry.Name(), entry.Name(), 1, nil)...)
+		tops = append(tops, topEntry{
+			name:       entry.Name(),
+			rows:       collectJavRows(ctx, ref, catDir, entry.Name(), entry.Name(), 1, nil),
+			hasOwnStrm: own,
+		})
+	}
+
+	// ⚠️ **「分类」还是「作品」要判一下**（2026-10-14，挂本地目录时踩到）。
+	//
+	// 番号墙的模型是「分类目录 → 作品目录」（`国产/NIMA-086`），每个一级目录是一个 tab。
+	// 但用户手上那批**别的工具产出的**库常常**没有分类层**（`国产AV/MDSR-0003-3/`）——
+	// 250 个作品目录直接躺在根下。照原样摊就是 250 个 tab 把网格顶到屏幕外
+	// （实测 grid top = 1384px，一屏连一张海报都看不到）。
+	//
+	// 判据是「这一层**直接**有没有 `.strm`」（`hasStrmInDir`，**不递归**）：
+	//   - 有 → 这一层就是**作品目录**（两层结构）→ **不建 tab**，卡直接摊在「全部」里；
+	//   - 一个都没有 → 保留原行为（它是分类，卡在下一层）→ 建 tab。
+	//
+	// ⚠️ 判据**必须是不递归**的：`collectJavRows` 会把整棵子树收进来，两边都非空，
+	// 拿它的结果判会让这条分支永远走不到（第一版就是这么写错的）。
+	flatLayout := anyOwnStrm
+	if !flatLayout {
+		for _, t := range tops {
+			if len(t.rows) > 0 {
+				snap.cats = append(snap.cats, JavWallCategory{Name: t.name, Hidden: isHidden(t.name)})
+			}
+		}
+	}
+	for _, t := range tops {
+		snap.rows = append(snap.rows, t.rows...)
 	}
 
 	// 根目录下**直接躺着**的 `.strm`（没分类的那种）算一个空名 category。
@@ -257,7 +303,7 @@ func buildJavWallSnapshot(ctx context.Context, taskID int64, root string, hidden
 	// 影片目录再收一遍（它们也挂在 root 下面），卡片成倍冒出来。这个坑实测踩过：
 	// 5 张卡变成 9 张、每个 tab 的计数也跟着涨。
 	if rootFiles := filesInDir(root); len(rootFiles) > 0 {
-		if rootRows := javWallRowsForDir(taskID, root, "", "", rootFiles); len(rootRows) > 0 {
+		if rootRows := javWallRowsForDir(ref, root, "", "", rootFiles); len(rootRows) > 0 {
 			snap.rows = append(snap.rows, rootRows...)
 			snap.cats = append(snap.cats, JavWallCategory{Name: ""})
 		}
@@ -281,7 +327,7 @@ func buildJavWallSnapshot(ctx context.Context, taskID int64, root string, hidden
 }
 
 // collectJavRows 收一个目录里的卡片；子目录递归下去（层数有上限）。
-func collectJavRows(ctx context.Context, taskID int64, absDir, relDir, cat string, depth int, hidden map[string]struct{}) []javWallRow {
+func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat string, depth int, hidden map[string]struct{}) []javWallRow {
 	if depth > javWallMaxDepth {
 		return nil
 	}
@@ -293,7 +339,7 @@ func collectJavRows(ctx context.Context, taskID int64, absDir, relDir, cat strin
 	// 先把这一层的文件按名字归位（一次 ReadDir 拿到全部）。
 	files, subdirs := splitJavDirEntries(entries)
 
-	rows := javWallRowsForDir(taskID, absDir, relDir, cat, files)
+	rows := javWallRowsForDir(ref, absDir, relDir, cat, files)
 
 	// 再递归子目录（影片目录通常在分类目录的下一层）。
 	for _, sub := range subdirs {
@@ -304,13 +350,13 @@ func collectJavRows(ctx context.Context, taskID int64, absDir, relDir, cat strin
 		if relDir != "" {
 			childRel = relDir + "/" + sub.Name()
 		}
-		rows = append(rows, collectJavRows(ctx, taskID, filepath.Join(absDir, sub.Name()), childRel, cat, depth+1, hidden)...)
+		rows = append(rows, collectJavRows(ctx, ref, filepath.Join(absDir, sub.Name()), childRel, cat, depth+1, hidden)...)
 	}
 	return rows
 }
 
 // javWallRowsForDir 把一个目录里**直接躺着**的 `.strm` 变成卡片。
-func javWallRowsForDir(taskID int64, absDir, relDir, cat string, files map[string]os.DirEntry) []javWallRow {
+func javWallRowsForDir(ref posterRef, absDir, relDir, cat string, files map[string]os.DirEntry) []javWallRow {
 	strmNames := make([]string, 0, 4)
 	for name := range files {
 		if strings.EqualFold(filepath.Ext(name), ".strm") {
@@ -345,12 +391,12 @@ func javWallRowsForDir(taskID int64, absDir, relDir, cat string, files map[strin
 		if name, ok := pickJavImage(files, names.Poster, "poster"); ok {
 			item.HasPoster = true
 			item.PosterRev = javWallRev(files[name])
-			item.PosterURL = javWallImageURL(taskID, relDir, name, item.PosterRev, "poster")
+			item.PosterURL = javWallImageURL(ref, relDir, name, item.PosterRev, "poster")
 		}
 		if name, ok := pickJavImage(files, names.Thumb, "thumb"); ok {
 			item.HasThumb = true
 			item.ThumbRev = javWallRev(files[name])
-			item.ThumbURL = javWallImageURL(taskID, relDir, name, item.ThumbRev, "thumb")
+			item.ThumbURL = javWallImageURL(ref, relDir, name, item.ThumbRev, "thumb")
 		}
 		if name, ok := pickJavImage(files, names.Fanart, "fanart"); ok {
 			item.HasFanart = true
@@ -756,4 +802,20 @@ func splitJavDirEntries(entries []os.DirEntry) (map[string]os.DirEntry, []os.Dir
 		files[e.Name()] = e
 	}
 	return files, subdirs
+}
+
+// hasStrmInDir 报告这一层**直接**躺着 `.strm` 吗（不递归）。
+//
+// 用来分辨「分类目录」与「作品目录」——见 buildJavWallSnapshot 里那段注释。
+func hasStrmInDir(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".strm") {
+			return true
+		}
+	}
+	return false
 }

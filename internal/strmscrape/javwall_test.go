@@ -72,7 +72,7 @@ func writeJavLibrary(t *testing.T, root string) {
 
 func javWallSnapshotForTest(t *testing.T, root string, hidden []string) *javWallSnapshot {
 	t.Helper()
-	snap, err := buildJavWallSnapshot(context.Background(), 1, root, hidden)
+	snap, err := buildJavWallSnapshot(context.Background(), posterRef{TaskID: 1}, root, hidden)
 	if err != nil {
 		t.Fatalf("buildJavWallSnapshot: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestListJavWallHiddenDirsWithoutTask(t *testing.T) {
 	// 设置页那一行走的就是这条（taskId=0，没有磁盘可扫）：候选只有分类规则的目标目录，
 	// 加上兜底目录名 —— 后者即使磁盘上还没有也要在，否则用户没法「预先设好」。
 	s := &Service{}
-	out, err := s.ListJavWallHiddenDirs(context.Background(), 0)
+	out, err := s.ListJavWallHiddenDirs(context.Background(), WallSourceRef{})
 	if err != nil {
 		t.Fatalf("ListJavWallHiddenDirs: %v", err)
 	}
@@ -362,5 +362,62 @@ func TestJavWallPicksForeignImageVariants(t *testing.T) {
 		if !it.HasPoster || it.PosterURL == "" {
 			t.Errorf("%s 应当有海报（%s），实际 has_poster=%v url=%q", tc.stem, tc.why, it.HasPoster, it.PosterURL)
 		}
+	}
+}
+
+// TestJavWallFlatLibraryHasNoCategoryTabs 两层库（没有分类层）不建分类 tab。
+//
+// # 这是一条真机踩出来的回归测试（2026-10-14）
+//
+// 用户的本地目录是 `国产AV/作品/` —— **只有两层**，250 个作品目录直接躺在根下。
+// 原来的实现把每个一级目录都当一个分类 tab，于是渲染出 250 个 tab，
+// 网格被顶到屏幕外（实测 tab 数 251、grid top = 1384px，一屏看不到一张海报）。
+//
+// 判据是「这一层**直接**有没有 .strm」——**不递归**（第一版拿递归结果的
+// 长度判，两边都非空，分支永远走不到，所以这条用例也钉住了那个坑）。
+func TestJavWallFlatLibraryHasNoCategoryTabs(t *testing.T) {
+	root := t.TempDir()
+	// 两层：根下直接是作品目录，作品目录里才有 .strm。
+	for _, name := range []string{"MDSR-0003-3", "MD-0351", "blx-0064"} {
+		dir := filepath.Join(root, name)
+		mustMkdir(t, dir)
+		mustWrite(t, filepath.Join(dir, name+".strm"), "url")
+		mustWrite(t, filepath.Join(dir, "poster.jpg"), "p")
+	}
+	snap := javWallSnapshotForTest(t, root, nil)
+	if len(snap.rows) != 3 {
+		t.Fatalf("卡片数 = %d，期望 3", len(snap.rows))
+	}
+	if len(snap.cats) != 0 {
+		t.Fatalf("两层库不该有分类 tab，得到 %d 个：%v", len(snap.cats), snap.cats)
+	}
+}
+
+// TestJavWallThreeLevelLibraryKeepsCategoryTabs 三层库（有分类层）行为**逐字不变**。
+//
+// 上面那条改的是「没有分类层」那种库；有分类层的（`国产/91CM-109/`）必须照旧
+// 每个一级目录一个 tab —— 否则就是拿一个修一个、把老库弄坏。
+func TestJavWallThreeLevelLibraryKeepsCategoryTabs(t *testing.T) {
+	root := t.TempDir()
+	for cat, works := range map[string][]string{
+		"国产": {"91CM-109", "DYBC005"},
+		"有码": {"NIMA-086"},
+	} {
+		for _, w := range works {
+			dir := filepath.Join(root, cat, w)
+			mustMkdir(t, dir)
+			mustWrite(t, filepath.Join(dir, w+".strm"), "url")
+		}
+	}
+	snap := javWallSnapshotForTest(t, root, nil)
+	if len(snap.rows) != 3 {
+		t.Fatalf("卡片数 = %d，期望 3", len(snap.rows))
+	}
+	names := map[string]bool{}
+	for _, c := range snap.cats {
+		names[c.Name] = true
+	}
+	if !names["国产"] || !names["有码"] {
+		t.Fatalf("三层库该保留分类 tab，得到 %v", snap.cats)
 	}
 }

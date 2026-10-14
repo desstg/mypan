@@ -8,6 +8,8 @@ import {
 import { fetchStrmTasks, type StrmTask } from "@/api/strm";
 import StrmJavWall from "@/components/admin/StrmJavWall.vue";
 import StrmJavWallHiddenDirsModal from "@/components/admin/StrmJavWallHiddenDirsModal.vue";
+import StrmWallLocalDirDialog from "@/components/admin/StrmWallLocalDirDialog.vue";
+import StrmTmdbWallDeleteModal from "@/components/admin/StrmTmdbWallDeleteModal.vue";
 import { JAV_WALL_SORTS } from "@/api/strmJavWall";
 import {
   backfillStrmScrapeImages,
@@ -28,6 +30,9 @@ import {
   type StrmScrapeItemListStats,
   type StrmScrapeItemStatus,
   type StrmScrapeProgress,
+  fetchWallLocalDirs,
+  type WallLocalDir,
+  type WallSourceRef,
 } from "@/api/strmScrape";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
 import StrmScrapeScopePicker from "@/components/admin/StrmScrapeScopePicker.vue";
@@ -88,7 +93,32 @@ function saveSortKey(key: SortKey) {
 }
 
 const tasks = ref<StrmTask[]>([]);
-const selectedTaskId = ref<number | null>(null);
+/**
+ * 墙上挂的**本地目录**（不在任何 STRM 任务之下的媒体库目录，见后端 wall_source.go）。
+ *
+ * 与 `tasks` 并列成为下拉里的两组选项 —— 它们不是任务，所以不能塞进 `tasks`。
+ */
+const wallDirs = ref<WallLocalDir[]>([]);
+const localDirOpen = ref(false);
+/**
+ * 下拉当前选中的是**哪个数据源**，值是 `"T:12"`（任务）或 `"L:<id>"`（本地目录）。
+ *
+ * 为什么合并成一个字符串键而不是两个 ref：`AppSelect` 的 modelValue 本来就是一个
+ * 字符串，两组合并渲染天然如此；而 `selectedTaskId` 由它派生（见下），
+ * 面板里二十来处 `selectedTaskId.value` 的读点就不用动。
+ */
+const selectedKey = ref<string | null>(null);
+/** 由 `selectedKey` 派生的任务 id（本地目录源时为 null）。 */
+const selectedTaskId = computed<number | null>(() => {
+  const k = selectedKey.value ?? "";
+  return k.startsWith("T:") ? Number(k.slice(2)) || null : null;
+});
+/** 由 `selectedKey` 派生的本地目录注册项。 */
+const selectedLocalDir = computed<WallLocalDir | null>(() => {
+  const k = selectedKey.value ?? "";
+  if (!k.startsWith("L:")) return null;
+  return wallDirs.value.find((d: WallLocalDir) => d.id === k.slice(2)) ?? null;
+});
 const scopeOpen = ref(false);
 const scopeLoading = ref(false);
 const excludedScopeDirs = ref<string[]>([]);
@@ -122,20 +152,45 @@ const selectedCandidateKey = ref("");
 const previewPosterURL = ref("");
 const previewPosterTitle = ref("");
 
-const taskOptions = computed(() =>
-  tasks.value.map((t) => ({
-    value: String(t.id),
+/**
+ * 下拉的选项：两组（STRM 任务 / 本地目录）。
+ *
+ * `group` 是新加的（见 AppSelect）—— `tag` 槽已经被「番号 / tmdb」占用，塞不下
+ * 「这行是任务还是本地目录」，所以靠分组标题区分来源。
+ */
+const sourceOptions = computed(() => {
+  const taskOpts = tasks.value.map((t) => ({
+    value: `T:${t.id}`,
     label: t.name || `任务 #${t.id}`,
-    // 媒体类型徽标：番号与 tmdb 是两套刮削（番号读本地侧车、走海报墙），
-    // 选任务时就该看出来，而不是等选中之后整面墙变了才知道。
     tag: t.media_kind === "jav" ? "番号" : "tmdb",
-  })),
-);
+    group: "STRM 任务",
+  }));
+  const localOpts = wallDirs.value.map((d: WallLocalDir) => ({
+    value: `L:${d.id}`,
+    label: d.name || d.root,
+    tag: d.media_kind === "jav" ? "番号" : "tmdb",
+    group: "本地目录",
+  }));
+  return [...taskOpts, ...localOpts];
+});
 const selectedTask = computed(() =>
   tasks.value.find((t) => Number(t.id) === Number(selectedTaskId.value)) || null,
 );
-// 任务是不是「番号影片」：决定整面墙长什么样（番号有自己的一套）。
-const isJavTask = computed(() => selectedTask.value?.media_kind === "jav");
+/** 当前数据源的媒体类型（任务看 task，本地目录看注册项）。 */
+const sourceMediaKind = computed(
+  () => selectedTask.value?.media_kind ?? selectedLocalDir.value?.media_kind ?? "",
+);
+// 数据源是不是「番号影片」：决定整面墙长什么样（番号有自己的一套）。
+// 任务与本地目录共用这一个判据 —— 后端也是同一套词（tmdb / jav）。
+const isJavSource = computed(() => sourceMediaKind.value === "jav");
+// 只有**任务**源才谈得上「番号墙隐藏目录」那些按任务存的东西。
+const isJavTask = isJavSource;
+/**
+ * 「全部目录」那颗按钮对本地目录源**不适用**：它那两套语义（番号=整档隐藏哪些一级
+ * 目录 / tmdb=刮削范围）都建立在「这个目录是某个任务的输出」之上。
+ * 禁用它并给一句 title，比留一颗按了没意义的按钮好。
+ */
+const scopeApplicable = computed(() => selectedLocalDir.value === null);
 const javWallRef = ref<{
   refreshMeta: () => void;
   // 在线刮削住在番号墙里（它要按目录扫盘），页头那颗按钮转调它。
@@ -148,6 +203,18 @@ const javHiddenOpen = ref(false);
 // 已隐藏的目录数（页头那颗按钮的文案要用）。从墙的列表响应里带回来，省一次请求。
 const javHiddenCount = ref(0);
 
+/**
+ * 当前数据源在请求里该怎么带：任务给 `strm_task_id`、本地目录给 `local_dir_id`。
+ *
+ * 抽成一个 computed 而不是每个调用点自己拼 —— 拼错一处就是「某个动作打到了别的源上」，
+ * 而那种错在界面上是静默的。
+ */
+const sourceRef = computed<number | WallSourceRef>(() => {
+  const dir = selectedLocalDir.value;
+  if (dir) return { local_dir_id: dir.id };
+  return selectedTaskId.value ?? 0;
+});
+
 // 页头那颗「全部目录」按钮的文案：两种任务各是各的一套（外观与位置完全一样）。
 const scopeLabel = computed(() => {
   if (isJavTask.value) {
@@ -158,11 +225,26 @@ const scopeLabel = computed(() => {
 
 /** 页头那颗按钮点了之后走哪套：番号墙是「隐藏哪些目录」，其余是「刮削范围」。 */
 function openScopePanel() {
+  if (!scopeApplicable.value) return;
   if (isJavTask.value) {
     javHiddenOpen.value = true;
     return;
   }
   scopeOpen.value = true;
+}
+
+/**
+ * 本地目录注册项变了（加了 / 移除了）。
+ *
+ * `selectedKey` 指向的那一项被移除时**清空选中**，让 `loadTasks` 那条回落逻辑
+ * 把它挪到第一个可选项上 —— 不清的话下拉会显示一个不存在的值，而墙上还是旧数据。
+ */
+function onWallDirsChanged(dirs: WallLocalDir[]) {
+  wallDirs.value = dirs;
+  if (selectedKey.value?.startsWith("L:") && !dirs.some((d: WallLocalDir) => `L:${d.id}` === selectedKey.value)) {
+    selectedKey.value = null;
+  }
+  void loadTasks();
 }
 
 /** 隐藏名单改了之后：重列墙（服务端已经作废了所有快照），并让按钮文案跟上。 */
@@ -171,24 +253,24 @@ function onJavHiddenSaved() {
 }
 
 async function loadScope() {
-  const taskId = selectedTaskId.value;
+  const ref = sourceRef.value;
   excludedScopeDirs.value = [];
   // 番号影片不吃「刮削范围」（那是 TMDB 索引那条路的东西），这一趟纯属白跑。
-  if (!taskId || isJavTask.value) return;
+  if (!selectedKey.value || isJavSource.value) return;
   try {
-    const data = await fetchStrmScrapeScope(taskId);
-    if (selectedTaskId.value === taskId) excludedScopeDirs.value = data.excluded_dirs ?? [];
+    const data = await fetchStrmScrapeScope(ref);
+    if (sourceRef.value === ref) excludedScopeDirs.value = data.excluded_dirs ?? [];
   } catch (e) {
     toast.error(getApiErrorMessage(e, "读取刮削范围失败"));
   }
 }
 
 async function saveScope(dirs: string[]) {
-  const taskId = selectedTaskId.value;
-  if (!taskId || scopeLoading.value) return;
+  const ref = sourceRef.value;
+  if (!selectedKey.value || scopeLoading.value) return;
   scopeLoading.value = true;
   try {
-    const data = await saveStrmScrapeScope(taskId, dirs);
+    const data = await saveStrmScrapeScope(ref, dirs);
     excludedScopeDirs.value = data.excluded_dirs ?? [];
     scopeOpen.value = false;
     // 番号影片不走 TMDB 索引（这颗按钮对它们是另一套），别白列一次。
@@ -247,7 +329,7 @@ const currentListQuery = computed<StrmScrapeItemListQuery>(() => ({
 }));
 const currentListQueryKey = computed(() =>
   JSON.stringify({
-    task_id: selectedTaskId.value ?? 0,
+    source_key: selectedKey.value ?? '',
     ...currentListQuery.value,
   }),
 );
@@ -366,11 +448,11 @@ function replaceItem(updated: StrmScrapeItem) {
 }
 
 async function requestItems(
-  taskId: number,
+  ref: number | WallSourceRef,
   query: StrmScrapeItemListQuery,
   refreshIndex = false,
 ) {
-  return refreshIndex ? refreshStrmScrapeIndex(taskId, query) : fetchStrmScrapeItems(taskId, query);
+  return refreshIndex ? refreshStrmScrapeIndex(ref, query) : fetchStrmScrapeItems(ref, query);
 }
 
 function disconnectLoadMoreObserver() {
@@ -398,8 +480,8 @@ async function loadItems(opts?: {
   preserveLoaded?: boolean;
   refreshIndex?: boolean;
 }) {
-  const taskId = selectedTaskId.value;
-  if (!taskId) {
+  const ref = sourceRef.value;
+  if (!selectedKey.value) {
     clearItemList();
     return false;
   }
@@ -408,7 +490,7 @@ async function loadItems(opts?: {
   // （errNotTmdbTask），弹一条「该任务不是 tmdb 影片任务，番号影片请在海报墙上操作」
   // —— 用户什么都没点就看到一个红条。watch(currentListQueryKey) 那条路早有同样的
   // 守卫，这里补上它缺的那一处。
-  if (isJavTask.value) {
+  if (isJavSource.value) {
     clearItemList();
     return false;
   }
@@ -428,8 +510,8 @@ async function loadItems(opts?: {
     clearItemList();
   }
   try {
-    const data = await requestItems(taskId, buildListQuery(offset, limit), Boolean(opts?.refreshIndex));
-    if (seq !== loadItemsSeq || selectedTaskId.value !== taskId) return false;
+    const data = await requestItems(ref, buildListQuery(offset, limit), Boolean(opts?.refreshIndex));
+    if (seq !== loadItemsSeq || sourceRef.value !== ref) return false;
     applyListResult(data, append);
     await nextTick();
     if (!append) {
@@ -439,7 +521,7 @@ async function loadItems(opts?: {
     setupLoadMoreObserver();
     return true;
   } catch (e) {
-    if (seq !== loadItemsSeq || selectedTaskId.value !== taskId) return false;
+    if (seq !== loadItemsSeq || sourceRef.value !== ref) return false;
     const fallback = append
       ? "加载更多失败"
       : opts?.refreshIndex
@@ -469,10 +551,25 @@ const progressPolling = useConditionalPolling({
 async function loadTasks() {
   const list = await fetchStrmTasks();
   tasks.value = Array.isArray(list) ? list : [];
-  if (!selectedTaskId.value && tasks.value.length) {
-    selectedTaskId.value = Number(tasks.value[0].id);
-  } else if (selectedTaskId.value && !tasks.value.some((t) => Number(t.id) === Number(selectedTaskId.value))) {
-    selectedTaskId.value = tasks.value.length ? Number(tasks.value[0].id) : null;
+  // 本地目录注册项与任务一起拉：它们是同一份下拉里的两组选项。
+  try {
+    const dirs = await fetchWallLocalDirs();
+    wallDirs.value = dirs.dirs ?? [];
+  } catch {
+    // 拉不到注册项不该挡住任务那组 —— 那是另一件事的故障。
+    wallDirs.value = [];
+  }
+  const valid = new Set([
+    ...tasks.value.map((t) => `T:${t.id}`),
+    ...wallDirs.value.map((d: WallLocalDir) => `L:${d.id}`),
+  ]);
+  if (selectedKey.value && !valid.has(selectedKey.value)) {
+    selectedKey.value = null; // 选中的源没了（任务删了 / 目录移除了）
+  }
+  if (!selectedKey.value) {
+    // 默认落到第一个可选项：优先任务（用户最常用），没有才用本地目录。
+    if (tasks.value.length) selectedKey.value = `T:${tasks.value[0].id}`;
+    else if (wallDirs.value.length) selectedKey.value = `L:${wallDirs.value[0].id}`;
   }
 }
 
@@ -481,7 +578,9 @@ async function syncProgress() {
     const p = await fetchStrmScrapeProgress();
     const previous = progress.value;
     const wasRunning = previous?.running;
-    const sameTask = Number(p.strm_task_id) === Number(selectedTaskId.value);
+    // ⚠️ 比 **source_key** 而不是 strm_task_id：进度是单槽全局，本地目录源跑起来时
+    // strm_task_id 是 0，只比它会让任务墙「认领」别的源那一轮（亮起「刮削中」）。
+    const sameTask = (p.source_key ?? "") === (selectedKey.value ?? "");
     const previousRevision =
       Number(previous?.strm_task_id) === Number(p.strm_task_id)
         ? Number(previous?.item_revision || 0)
@@ -504,13 +603,13 @@ async function syncProgress() {
 }
 
 async function startScrape() {
-  if (!selectedTaskId.value) {
-    toast.error("请先选择 STRM 任务");
+  if (!selectedKey.value) {
+    toast.error("请先选择任务或本地目录");
     return;
   }
   if (running.value) return;
   try {
-    const p = await runStrmScrape(selectedTaskId.value);
+    const p = await runStrmScrape(sourceRef.value);
     progress.value = p;
     progressPolling.sync();
     toast.success("已开始刮削");
@@ -537,8 +636,8 @@ async function stopScrape() {
  * 只补缺：不重写已有 nfo 的正文，也不覆盖已有的图。
  */
 async function backfillArtwork() {
-  if (!selectedTaskId.value) {
-    toast.error("请先选择 STRM 任务");
+  if (!selectedKey.value) {
+    toast.error("请先选择任务或本地目录");
     return;
   }
   if (running.value) {
@@ -558,7 +657,7 @@ async function backfillArtwork() {
     return;
   }
   try {
-    const p = await backfillStrmScrapeImages(selectedTaskId.value);
+    const p = await backfillStrmScrapeImages(sourceRef.value);
     progress.value = p;
     progressPolling.sync();
     toast.success("已开始补齐");
@@ -569,7 +668,7 @@ async function backfillArtwork() {
 
 async function refreshAll() {
   await loadTasks();
-  if (!selectedTaskId.value) {
+  if (!selectedKey.value) {
     clearItemList();
     await syncProgress();
     return;
@@ -635,7 +734,8 @@ function canRescrape(item: StrmScrapeItem) {
 function isItemBusy(item: StrmScrapeItem) {
   if (rescrapingId.value && rescrapingId.value === item.id) return true;
   if (!running.value) return false;
-  if (Number(progress.value?.strm_task_id) !== Number(selectedTaskId.value)) return false;
+  // 比 source_key：本地目录源的 strm_task_id 是 0，只比它会让别的源的进度被判成本源的。
+  if ((progress.value?.source_key ?? "") !== (selectedKey.value ?? "")) return false;
   return String(progress.value?.current_item_id || "") === item.id;
 }
 
@@ -726,14 +826,14 @@ async function searchCandidates() {
 }
 
 async function applyMatch() {
-  if (!matchItem.value || !selectedTaskId.value || !selectedCandidateKey.value) return;
+  if (!matchItem.value || !selectedKey.value || !selectedCandidateKey.value) return;
   const hit = candidates.value.find((c) => hitKey(c) === selectedCandidateKey.value);
   if (!hit) return;
   matchApplying.value = true;
   try {
     const year = hitYear(hit);
     const result = await rematchStrmScrapeItem({
-      strm_task_id: selectedTaskId.value,
+      ...(typeof sourceRef.value === "number" ? { strm_task_id: sourceRef.value } : sourceRef.value),
       item_id: matchItem.value.id,
       tmdb_id: hitId(hit),
       media_type: hitMediaType(hit),
@@ -759,7 +859,7 @@ async function applyMatch() {
 
 async function clearMatchAndComplete() {
   const item = matchItem.value;
-  if (!item || !selectedTaskId.value || matchApplying.value) return;
+  if (!item || !selectedKey.value || matchApplying.value) return;
   try {
     await confirm({
       title: "取消错误匹配",
@@ -775,7 +875,7 @@ async function clearMatchAndComplete() {
   try {
     const mediaType = matchSearchType.value === "auto" ? item.media_type : matchSearchType.value;
     const updated = await markStrmScrapeNormal({
-      strm_task_id: selectedTaskId.value,
+      ...(typeof sourceRef.value === "number" ? { strm_task_id: sourceRef.value } : sourceRef.value),
       item_id: item.id,
       media_type: mediaType,
       clear_match: true,
@@ -791,7 +891,7 @@ async function clearMatchAndComplete() {
 }
 
 async function markEnded(item: StrmScrapeItem) {
-  if (!selectedTaskId.value || !canMarkEnded(item)) return;
+  if (!selectedKey.value || !canMarkEnded(item)) return;
   const title = (item.title || item.folder_name || "该影片").trim();
   const manual = markActionLabel(item) === "完成";
   try {
@@ -819,7 +919,7 @@ async function markEnded(item: StrmScrapeItem) {
 }
 
 async function confirmDoubt(item: StrmScrapeItem) {
-  if (!selectedTaskId.value || !canConfirmDoubt(item)) return;
+  if (!selectedKey.value || !canConfirmDoubt(item)) return;
   markingNormalId.value = item.id;
   try {
     await applyNormalState(item);
@@ -832,9 +932,9 @@ async function confirmDoubt(item: StrmScrapeItem) {
 }
 
 async function applyNormalState(item: StrmScrapeItem) {
-  if (!selectedTaskId.value) return;
+  if (!selectedKey.value) return;
   const updated = await markStrmScrapeNormal({
-    strm_task_id: selectedTaskId.value,
+    ...(typeof sourceRef.value === "number" ? { strm_task_id: sourceRef.value } : sourceRef.value),
     item_id: item.id,
     media_type: item.media_type,
   });
@@ -844,11 +944,11 @@ async function applyNormalState(item: StrmScrapeItem) {
 }
 
 async function rescrapeItem(item: StrmScrapeItem) {
-  if (!selectedTaskId.value || !canRescrape(item) || running.value) return;
+  if (!selectedKey.value || !canRescrape(item) || running.value) return;
   rescrapingId.value = item.id;
   try {
     const result = await rescrapeStrmScrapeItem({
-      strm_task_id: selectedTaskId.value,
+      ...(typeof sourceRef.value === "number" ? { strm_task_id: sourceRef.value } : sourceRef.value),
       item_id: item.id,
     });
     if (result.started) {
@@ -864,6 +964,29 @@ async function rescrapeItem(item: StrmScrapeItem) {
   } finally {
     rescrapingId.value = "";
   }
+}
+
+// —— 删除一部作品（电影一部 / 剧集整部）——
+//
+// 点垃圾桶**不直接删**，先开确认弹窗（`StrmTmdbWallDeleteModal`）——那一份会去
+// 服务端取「会删掉什么」的清单摆给用户看，再让他点第二次。这是会删用户东西的动作。
+//
+// 删完**只把这张卡从当前列表里摘掉**（不整表重列，滚动位置不跳）；服务端那边
+// 已经作废了索引缓存，下一次真正刷新时列表会与磁盘一致。
+const deleting = ref<StrmScrapeItem | null>(null);
+
+function askDelete(item: StrmScrapeItem) {
+  deleting.value = item;
+}
+
+function onDeleted() {
+  const id = deleting.value?.id;
+  deleting.value = null;
+  if (!id) return;
+  const idx = items.value.findIndex((it) => it.id === id);
+  if (idx < 0) return;
+  items.value.splice(idx, 1);
+  stats.value = { ...stats.value, total: Math.max(0, stats.value.total - 1) };
 }
 
 watch(selectedTaskId, () => {
@@ -882,8 +1005,8 @@ watch(currentListQueryKey, () => {
   if (!booted.value) return;
   // 番号影片的卡片是子组件直接扫本地磁盘来的，**不经过 TMDB 索引** ——
   // 不早退的话每敲一个字都会白发一次 TMDB 列表请求（错了还会弹 toast）。
-  if (isJavTask.value) return;
-  if (!selectedTaskId.value) {
+  if (isJavSource.value) return;
+  if (!selectedKey.value) {
     clearItemList();
     return;
   }
@@ -900,7 +1023,7 @@ onMounted(async () => {
   try {
     await loadTasks();
     await syncProgress();
-    if (selectedTaskId.value) {
+    if (selectedKey.value) {
       await loadItems();
     } else {
       clearItemList();
@@ -931,9 +1054,11 @@ defineExpose({
   onlineScrape: () => javWallRef.value?.onlineScrape?.(),
   onlineScraping: computed(() => Boolean(javWallRef.value?.onlineScraping)),
   onlineScrapeLabel: computed(() => javWallRef.value?.onlineScrapeLabel ?? "在线刮削"),
-  // 父组件（辅助工具页）要用它决定页头那几个按钮显不显示：番号任务上跑 TMDB 刮削
+  // 父组件（辅助工具页）要用它决定页头那几个按钮显不显示：番号那面跑 TMDB 刮削
   // 会往同一批目录写 nfo，而「标记为正常」那一步会把 thumb/poster 删掉。
-  isJavTask,
+  // ⚠️ 对外叫 `isJavSource`：它同时涵盖**任务**与**本地目录**两种源（判据是
+  // 数据源的 media_kind，两者同一套词）。父组件原先读的是 `isJavTask`。
+  isJavSource,
   refresh: refreshAll,
   refreshing,
   running,
@@ -950,22 +1075,34 @@ defineExpose({
     <div class="scrape-panel__head">
       <div class="scrape-panel__head-left">
         <h2>海报墙</h2>
-        <div v-if="taskOptions.length" class="scrape-panel__task-select">
+        <div v-if="sourceOptions.length" class="scrape-panel__task-select">
           <AppSelect
-            :model-value="selectedTaskId != null ? String(selectedTaskId) : ''"
-            :options="taskOptions"
-            @update:model-value="(v) => (selectedTaskId = Number(v) || null)"
+            :model-value="selectedKey ?? ''"
+            :options="sourceOptions"
+            @update:model-value="(v) => (selectedKey = String(v) || null)"
           />
         </div>
         <AppButton
-          v-if="selectedTaskId"
+          v-if="selectedKey"
           variant="secondary"
           size="md"
           class="scrape-panel__scope-button"
-          :disabled="running || scopeLoading"
+          :disabled="running || scopeLoading || !scopeApplicable"
+          :title="scopeApplicable ? undefined : '本地目录源没有「按任务存的范围 / 隐藏目录」'"
           @click="openScopePanel"
         >
           {{ scopeLabel }}
+        </AppButton>
+        <!-- 「本地目录」入口：把不在任何任务之下的媒体库目录挂到墙上。 -->
+        <AppButton
+          variant="secondary"
+          size="md"
+          class="scrape-panel__scope-button"
+          :disabled="running"
+          title="把本地的媒体库目录挂到海报墙上"
+          @click="localDirOpen = true"
+        >
+          <i class="fas fa-folder-plus" />&nbsp;本地目录
         </AppButton>
       </div>
       <div class="scrape-panel__head-actions">
@@ -1086,7 +1223,7 @@ defineExpose({
     </div>
 
     <StrmScrapeScopePicker
-      v-if="selectedTaskId && !isJavTask"
+      v-if="selectedTaskId && !isJavSource"
       :open="scopeOpen"
       :task-id="selectedTaskId"
       :task-name="selectedTask?.name"
@@ -1097,11 +1234,27 @@ defineExpose({
 
     <!-- 番号影片那颗按钮是另一码事：勾哪些一级目录**整档不出现在墙上**（全局一份）。 -->
     <StrmJavWallHiddenDirsModal
-      v-if="isJavTask"
+      v-if="isJavSource"
       :open="javHiddenOpen"
-      :task-id="selectedTaskId"
+      :source="sourceRef"
       @close="javHiddenOpen = false"
       @saved="onJavHiddenSaved"
+    />
+
+    <!-- 本地目录：把不在任何任务之下的媒体库目录挂到墙上。 -->
+    <StrmWallLocalDirDialog
+      :open="localDirOpen"
+      @close="localDirOpen = false"
+      @changed="onWallDirsChanged"
+    />
+
+    <!-- TMDB 墙的删除确认弹窗（电影删这一部 / 剧集删整部）。 -->
+    <StrmTmdbWallDeleteModal
+      :open="deleting !== null"
+      :source="sourceRef"
+      :item="deleting"
+      @close="deleting = null"
+      @deleted="onDeleted"
     />
 
     <div v-if="running && progress" class="scrape-progress">
@@ -1110,10 +1263,10 @@ defineExpose({
     </div>
 
     <AdminEmptyState
-      v-if="!loading && !tasks.length"
+      v-if="!loading && !tasks.length && !wallDirs.length"
       icon="🎬"
-      title="还没有 STRM 任务"
-      description="请先在「STRM 任务」里创建任务，再回来刮削其输出目录。"
+      title="还没有可挂的数据源"
+      description="可以先去「STRM 任务」里建一个任务；或者点上面的「本地目录」把已有的媒体库目录挂上来。"
     />
 
     <!-- 番号影片：整套换成番号自己的海报墙（一级目录 tab / 视图切换 / 编辑 / 重刮）。
@@ -1121,7 +1274,7 @@ defineExpose({
     <StrmJavWall
       v-if="!loading && isJavTask"
       ref="javWallRef"
-      :task-id="selectedTaskId"
+      :source="sourceRef"
       :keyword="javKeyword"
       :sort="javSortKey"
       @hidden-dirs="javHiddenCount = $event.length"
@@ -1284,14 +1437,19 @@ defineExpose({
                     }"
                   ></i>
                 </span>
-                <span
-                  v-if="item.tv_state === 'updating'"
-                  class="scrape-card__updating"
-                  title="追更中"
+                <!-- 原来的「追更」蓝底徽标已去掉（它只是个展示标签、点了没反应，
+                     与番号墙那面也不统一）。右上角现在只有这一颗删除键，样式与
+                     番号墙一致：悬停/聚焦才显形，触屏常显。点开的是确认弹窗、
+                     不是直接删。 -->
+                <button
+                  type="button"
+                  class="scrape-card__del"
+                  title="删除这一部（本地文件与网盘那一份）"
+                  aria-label="删除"
+                  @click.stop="askDelete(item)"
                 >
-                  <i class="fas fa-bolt"></i>
-                  追更
-                </span>
+                  <i class="fas fa-trash-can" />
+                </button>
 
                 <div v-if="isItemBusy(item)" class="scrape-card__busy" title="正在刮削">
                   <BusySpinner :size="22" color="#fff" />
@@ -1986,27 +2144,34 @@ defineExpose({
 .scrape-card__mark--doubt {
   background: var(--warning);
 }
-.scrape-card__updating {
+/* 右上角的删除键。**与番号墙（`StrmJavWall.vue` 的 `.jav-card__del`）逐条对齐**：
+   位置（top/right 6px）、尺寸 28、圆形、半透明黑底、悬停/聚焦才显形、触屏常显。
+   两面临时各写一份（这里用的是 `.scrape-card` 前缀，样式在本组件的 scoped 块里），
+   改一边时另一边要跟着改 —— 这是「两面墙的操作键长得一样」的必要代价。 */
+.scrape-card__del {
   position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 2;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: 999px;
-  display: inline-flex;
+  top: 6px;
+  right: 6px;
+  z-index: 3;
+  width: 28px;
+  height: 28px;
+  display: flex;
   align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  font-weight: 700;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.55);
   color: #fff;
-  background: color-mix(in srgb, #0ea5e9 92%, transparent);
-  backdrop-filter: blur(6px);
-  box-shadow: 0 4px 12px rgba(14, 165, 233, 0.28);
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s;
 }
-.scrape-card__updating i {
-  font-size: 10px;
-}
+.scrape-card:hover .scrape-card__del,
+.scrape-card:focus-within .scrape-card__del { opacity: 1; }
+@media (hover: none) { .scrape-card__del { opacity: 1; } }
+.scrape-card__del:hover { background: var(--danger); }
+.scrape-card__del:focus-visible { opacity: 1; outline: 2px solid var(--danger); outline-offset: 1px; }
 .scrape-card__busy {
   position: absolute;
   inset: 0;

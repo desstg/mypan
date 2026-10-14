@@ -281,10 +281,7 @@ func TestStartJavWallOnlineScrapeRunsInBackground(t *testing.T) {
 
 	svc := &Service{strm: &strm.Service{}}
 	// jav 为 nil：守卫要在**起任务之前**返回错误（进去之后错误只能落在进度里）。
-	if _, err := svc.StartJavWallOnlineScrape(context.Background(), 0); err == nil {
-		t.Fatal("task_id 无效该报错")
-	}
-	if _, err := svc.StartJavWallOnlineScrape(context.Background(), 1); err == nil {
+	if _, err := svc.StartJavWallOnlineScrape(context.Background(), WallSourceRef{StrmTaskID: 1}); err == nil {
 		t.Fatal("番号服务未装配该报错")
 	}
 }
@@ -295,22 +292,22 @@ func TestStartJavWallOnlineScrapeRunsInBackground(t *testing.T) {
 // 的话，它只会读到「没在跑、也没结果」，那句话就永远弹不出来。
 func TestJavOnlineProgressKeepsResultUntilRead(t *testing.T) {
 	svc := &Service{}
-	svc.setJavOnlineProgress(7, 0, 10, "在线刮削中…")
-	if p := svc.JavOnlineScrapeProgressOf(7); !p.Running || p.Total != 10 {
+	svc.setJavOnlineProgress("7", 0, 10, "在线刮削中…")
+	if p := svc.JavOnlineScrapeProgressOf("7"); !p.Running || p.Total != 10 {
 		t.Fatalf("起步进度 = %+v", p)
 	}
-	svc.setJavOnlineProgress(7, 3, 10, "在线刮削：A")
-	if p := svc.JavOnlineScrapeProgressOf(7); p.Done != 3 || !p.Running {
+	svc.setJavOnlineProgress("7", 3, 10, "在线刮削：A")
+	if p := svc.JavOnlineScrapeProgressOf("7"); p.Done != 3 || !p.Running {
 		t.Fatalf("推进后 = %+v", p)
 	}
 	// **推进不动 Running**：收尾由 Start 那个 goroutine 统一做，两者分开才不会
 	// 出现「完成了但还没有结果」那一瞬（前端正好那时轮询就会误判成失败）。
-	svc.setJavOnlineProgress(7, 9, 10, "在线刮削：Z")
-	if p := svc.JavOnlineScrapeProgressOf(7); !p.Running || p.Done != 9 {
+	svc.setJavOnlineProgress("7", 9, 10, "在线刮削：Z")
+	if p := svc.JavOnlineScrapeProgressOf("7"); !p.Running || p.Done != 9 {
 		t.Fatalf("推进后 = %+v", p)
 	}
 	// 别的任务读不到这个任务的进度。
-	if p := svc.JavOnlineScrapeProgressOf(8); p.Running || p.Total != 0 {
+	if p := svc.JavOnlineScrapeProgressOf("8"); p.Running || p.Total != 0 {
 		t.Fatalf("任务 8 读到了任务 7 的进度 = %+v", p)
 	}
 }
@@ -325,7 +322,7 @@ func TestJavOnlineProgressKeepsResultUntilRead(t *testing.T) {
 // 刷新页面（本地状态归零）才好。
 func TestJavOnlineProgressReportsFinishedState(t *testing.T) {
 	svc := &Service{}
-	svc.setJavOnlineProgress(7, 0, 10, "在线刮削中…")
+	svc.setJavOnlineProgress("7", 0, 10, "在线刮削中…")
 
 	// 模拟收尾那个 goroutine 干的事（带锁一次写完）。
 	svc.javOnlineMu.Lock()
@@ -335,7 +332,7 @@ func TestJavOnlineProgressReportsFinishedState(t *testing.T) {
 	svc.javOnlineMu.Unlock()
 
 	for i := 0; i < 3; i++ {
-		p := svc.JavOnlineScrapeProgressOf(7)
+		p := svc.JavOnlineScrapeProgressOf("7")
 		if p.Running {
 			t.Fatalf("第 %d 次读：收尾之后还说自己在跑 = %+v（前端就是被这个卡在「刮削中…」）", i+1, p)
 		}
@@ -349,8 +346,8 @@ func TestJavOnlineProgressReportsFinishedState(t *testing.T) {
 
 	// 正在跑的时候必须如实说在跑（别修过头，反过来把 running 写死 false）。
 	svc2 := &Service{}
-	svc2.setJavOnlineProgress(7, 3, 10, "在线刮削：A")
-	if p := svc2.JavOnlineScrapeProgressOf(7); !p.Running {
+	svc2.setJavOnlineProgress("7", 3, 10, "在线刮削：A")
+	if p := svc2.JavOnlineScrapeProgressOf("7"); !p.Running {
 		t.Fatalf("跑着的时候读成没在跑 = %+v", p)
 	}
 }

@@ -11,6 +11,28 @@ export type StrmScrapeItemListSort =
   | "added_desc"
   | "added_asc";
 
+// ————————————————————— 数据源 —————————————————————
+
+/**
+ * 一个「墙的数据源」：STRM 任务 或 挂上来的本地目录。
+ *
+ * 后端两个参数并存、`local_dir_id` 优先（见 internal/strmscrape/wall_source.go）。
+ * **为什么是兄弟参数而不是把它编码进 strm_task_id**：那个 id 出现在二十来处
+ * （query / body / 进度 / 海报 URL），改成字符串是破坏性的；加一个可选参数是纯增量。
+ */
+export interface WallSourceRef {
+  strm_task_id?: number;
+  local_dir_id?: string;
+}
+
+/** 把「任务 id」或「数据源」统一成请求参数。 */
+export function sourceParams(ref: number | WallSourceRef): Record<string, string | number> {
+  if (typeof ref === "number") return { strm_task_id: ref };
+  if (ref.local_dir_id) return { local_dir_id: ref.local_dir_id };
+  if (ref.strm_task_id) return { strm_task_id: ref.strm_task_id };
+  return {};
+}
+
 export interface StrmScrapeItem {
   id: string;
   rel_dir: string;
@@ -37,6 +59,10 @@ export interface StrmScrapeItem {
 export interface StrmScrapeProgress {
   running: boolean;
   strm_task_id: number;
+  /** 这一轮跑的是哪个数据源（`任务 = "5"` / `本地目录 = "local-<id>"`）。
+   *  **进度是单槽全局**，前端靠它判「这轮是不是我发起的」—— 只比 strm_task_id 的话，
+   *  在本地目录上跑一次会让任务墙也亮起「刮削中」。 */
+  source_key?: string;
   total: number;
   done: number;
   skipped: number;
@@ -93,23 +119,25 @@ export interface StrmScrapeItemListResult {
 export interface StrmScrapeScope {
   strm_task_id: number;
   excluded_dirs: string[];
+  /** 这一份范围属于哪个数据源（见 StrmScrapeProgress.source_key）。 */
+  source_key?: string;
 }
 
-export function fetchStrmScrapeScope(strmTaskId: number) {
-  return http.get<StrmScrapeScope>("/admin/strm-scrape/scope", { strm_task_id: strmTaskId });
+export function fetchStrmScrapeScope(ref: number | WallSourceRef) {
+  return http.get<StrmScrapeScope>("/admin/strm-scrape/scope", sourceParams(ref));
 }
 
-export function saveStrmScrapeScope(strmTaskId: number, excludedDirs: string[]) {
+export function saveStrmScrapeScope(ref: number | WallSourceRef, excludedDirs: string[]) {
   return http.put<StrmScrapeScope>("/admin/strm-scrape/scope", {
-    strm_task_id: strmTaskId,
+    ...sourceParams(ref),
     excluded_dirs: excludedDirs,
   });
 }
 
-export async function fetchStrmScrapeScopeDirectories(strmTaskId: number, parent = "") {
+export async function fetchStrmScrapeScopeDirectories(ref: number | WallSourceRef, parent = "") {
   const items = await http.get<Array<{ id: string; name: string; mod_time?: string }>>(
     "/admin/strm-scrape/scope/directories",
-    { strm_task_id: strmTaskId, parent },
+    { ...sourceParams(ref), parent },
   );
   return items.map<FileItem>((item) => ({
     id: item.id,
@@ -128,9 +156,9 @@ export function saveStrmScrapeSettings(settings: Partial<StrmScrapeSettings>) {
   return http.put<StrmScrapeSettings>("/admin/strm-scrape/settings", settings);
 }
 
-export function runStrmScrape(strmTaskId: number, writeMode?: StrmScrapeWriteMode) {
+export function runStrmScrape(ref: number | WallSourceRef, writeMode?: StrmScrapeWriteMode) {
   return http.post<StrmScrapeProgress>("/admin/strm-scrape/run", {
-    strm_task_id: strmTaskId,
+    ...sourceParams(ref),
     write_mode: writeMode,
   });
 }
@@ -143,22 +171,21 @@ export function fetchStrmScrapeProgress() {
   return http.get<StrmScrapeProgress>("/admin/strm-scrape/progress");
 }
 
-export function fetchStrmScrapeItems(strmTaskId: number, query: StrmScrapeItemListQuery = {}) {
+export function fetchStrmScrapeItems(ref: number | WallSourceRef, query: StrmScrapeItemListQuery = {}) {
   return http.get<StrmScrapeItemListResult>("/admin/strm-scrape/items", {
-    strm_task_id: strmTaskId,
+    ...sourceParams(ref),
     ...query,
   });
 }
 
-export function refreshStrmScrapeIndex(strmTaskId: number, query: StrmScrapeItemListQuery = {}) {
+export function refreshStrmScrapeIndex(ref: number | WallSourceRef, query: StrmScrapeItemListQuery = {}) {
   return http.post<StrmScrapeItemListResult>("/admin/strm-scrape/refresh-index", {
-    strm_task_id: strmTaskId,
+    ...sourceParams(ref),
     ...query,
   });
 }
 
-export function rematchStrmScrapeItem(input: {
-  strm_task_id: number;
+export function rematchStrmScrapeItem(input: WallSourceRef & {
   item_id: string;
   tmdb_id: string;
   media_type: string;
@@ -168,8 +195,7 @@ export function rematchStrmScrapeItem(input: {
   return http.post<StrmScrapeRematchResult>("/admin/strm-scrape/rematch", input);
 }
 
-export function markStrmScrapeNormal(input: {
-  strm_task_id: number;
+export function markStrmScrapeNormal(input: WallSourceRef & {
   item_id: string;
   media_type?: string;
   clear_match?: boolean;
@@ -177,7 +203,7 @@ export function markStrmScrapeNormal(input: {
   return http.post<StrmScrapeItem>("/admin/strm-scrape/mark-normal", input);
 }
 
-export function rescrapeStrmScrapeItem(input: { strm_task_id: number; item_id: string }) {
+export function rescrapeStrmScrapeItem(input: WallSourceRef & { item_id: string }) {
   return http.post<StrmScrapeRematchResult>("/admin/strm-scrape/rescrape", input);
 }
 
@@ -298,9 +324,64 @@ export interface WallActor {
 }
 
 /** TMDB 影片墙的详情。 */
-export function fetchStrmScrapeItemDetail(strmTaskId: number, itemId: string) {
+export function fetchStrmScrapeItemDetail(ref: number | WallSourceRef, itemId: string) {
   return http.get<WallDetail>("/admin/strm-scrape/items/detail", {
-    strm_task_id: String(strmTaskId),
+    ...sourceParams(ref),
+    item_id: itemId,
+  });
+}
+
+// ————————————————————— 删除一部作品 —————————————————————
+
+/**
+ * 「会删掉什么」——删除前的预览。**不写任何东西**，纯算。
+ *
+ * TMDB 这一面按 `item_id` 寻址（它是 `pathToItemID(relKey)` 的稳定哈希，卡片上本来就有）。
+ */
+export interface TmdbWallDeletePreview {
+  /** 作品名（剧集是剧名），弹窗标题用。 */
+  title: string;
+  /** movie / tv —— 前端据此说「整部剧」还是「这一部电影」。 */
+  media_type: string;
+  /** 作品目录（相对任务根）。 */
+  local_dir: string;
+  /** 本地将被删掉的文件（相对任务根），已排序；可能只是前若干个。 */
+  local_files: string[];
+  /** 本地文件**总数**（local_files 只是前若干个）。 */
+  local_file_count: number;
+  /** 网盘上将被删除的目录路径；cloud_skipped 非空时它是空串。 */
+  cloud_path?: string;
+  /** 非空时写明网盘那一步为什么没做（照原样显示给用户）。 */
+  cloud_skipped?: string;
+}
+
+export interface TmdbWallDeleteResult {
+  /** 真正删掉的本地文件数。 */
+  removed_files: number;
+  /** 本地作品目录也删了。 */
+  removed_dir: boolean;
+  /** 网盘那一份也删了。 */
+  cloud_deleted: boolean;
+  /** 非空时说明网盘那一步为什么没做（本地已经删干净了）。 */
+  cloud_skipped?: string;
+}
+
+export function previewTmdbWallDelete(ref: number | WallSourceRef, itemId: string) {
+  return http.post<TmdbWallDeletePreview>("/admin/strm-scrape/items/delete-preview", {
+    ...sourceParams(ref),
+    item_id: itemId,
+  });
+}
+
+/**
+ * 真删。**本地作品目录不可恢复（整个目录端掉），网盘那一份进回收站。**
+ *
+ * 剧集删的是**整部**（含 Season 子目录下的所有集），不是一集。
+ * 调用方必须先走 `previewTmdbWallDelete` 把清单摆给用户确认。
+ */
+export function deleteTmdbWallItem(ref: number | WallSourceRef, itemId: string) {
+  return http.post<TmdbWallDeleteResult>("/admin/strm-scrape/items/delete", {
+    ...sourceParams(ref),
     item_id: itemId,
   });
 }
@@ -311,8 +392,51 @@ export function fetchStrmScrapeItemDetail(strmTaskId: number, itemId: string) {
  * 只补缺：**不重写已有 nfo 的正文**，也不覆盖已有的图。已经齐了的作品会被跳过。
  * 与「开始刮削」同一条后台队列，进度看 `fetchStrmScrapeProgress`。
  */
-export function backfillStrmScrapeImages(strmTaskId: number) {
+export function backfillStrmScrapeImages(ref: number | WallSourceRef) {
   return http.post<StrmScrapeProgress>("/admin/strm-scrape/backfill", {
-    strm_task_id: strmTaskId,
+    ...sourceParams(ref),
   });
+}
+
+
+// ————————————————————— 墙上挂的本地目录 —————————————————————
+
+/**
+ * 海报墙上挂的一个**本地目录**。
+ *
+ * 这些目录不在任何 STRM 任务之下（是别的工具产出的媒体库目录），所以不能靠任务
+ * 反查 —— 用户注册一份，墙的下拉里就多一个可选项。
+ *
+ * ⚠️ `root` 是**跑 LitePan 那个进程能看到的路径**（部署在容器里时就是容器内路径）。
+ */
+export interface WallLocalDir {
+  /** 稳定短标识（与 root 无关：改路径、改名都不换它）。 */
+  id: string;
+  /** 下拉里显示的名字（默认取 basename，用户可改）。 */
+  name: string;
+  root: string;
+  /** `tmdb` / `jav` —— 决定用哪面墙渲染，与 STRM 任务的 media_kind 同一套词。 */
+  media_kind: "tmdb" | "jav";
+  created_at?: string;
+}
+
+export interface WallLocalDirList {
+  dirs: WallLocalDir[];
+}
+
+export function fetchWallLocalDirs() {
+  return http.get<WallLocalDirList>("/admin/strm-scrape/local-dirs");
+}
+
+export function createWallLocalDir(input: { root: string; name?: string; media_kind: "tmdb" | "jav" }) {
+  return http.post<WallLocalDirList>("/admin/strm-scrape/local-dirs", input);
+}
+
+export function updateWallLocalDir(id: string, name: string) {
+  return http.put<WallLocalDirList>(`/admin/strm-scrape/local-dirs/${encodeURIComponent(id)}`, { name });
+}
+
+/** ⚠️ 只删**注册项**，不碰磁盘上的任何文件。 */
+export function deleteWallLocalDir(id: string) {
+  return http.del<WallLocalDirList>(`/admin/strm-scrape/local-dirs/${encodeURIComponent(id)}`);
 }

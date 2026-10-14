@@ -36,9 +36,10 @@ type JavWallHiddenDirList struct {
 
 // ListJavWallHiddenDirs 列候选。
 //
-// taskID > 0 时按那个任务的实际输出目录列（带部数）—— 墙页头那个按钮走这条；
-// taskID <= 0 时按分类规则的目标目录列（没有磁盘可扫）—— STRM 设置页那一行走这条。
-func (s *Service) ListJavWallHiddenDirs(ctx context.Context, taskID int64) (JavWallHiddenDirList, error) {
+// `ref` 有数据源时按那个源的实际输出目录列（带部数）—— 墙页头那个按钮走这条；
+// 没有数据源（`ref.empty()`）时按分类规则的目标目录列（没有磁盘可扫）——
+// STRM 设置页那一行走这条。
+func (s *Service) ListJavWallHiddenDirs(ctx context.Context, ref WallSourceRef) (JavWallHiddenDirList, error) {
 	out := JavWallHiddenDirList{
 		Hidden:       javWallHiddenDirs(s.settings),
 		FallbackName: javWallDefaultHiddenName(s.settings),
@@ -63,8 +64,12 @@ func (s *Service) ListJavWallHiddenDirs(ctx context.Context, taskID int64) (JavW
 		}
 	}
 
-	if taskID > 0 {
-		snap, err := s.javWallRows(ctx, taskID, false)
+	if !ref.empty() {
+		src, err := s.resolveSource(ctx, ref)
+		if err != nil {
+			return JavWallHiddenDirList{}, err
+		}
+		snap, err := s.javWallRows(ctx, src, false)
 		if err != nil {
 			return JavWallHiddenDirList{}, err
 		}
@@ -126,7 +131,7 @@ func (s *Service) ListJavWallHiddenDirs(ctx context.Context, taskID int64) (JavW
 
 // UpdateJavWallHiddenDirs 保存名单（勾上 = 隐藏），并让所有番号墙的快照作废 ——
 // 名单是全局的，改完每一面墙都要立刻跟上（只等 TTL 的话最长一分钟，用户会以为没保存上）。
-func (s *Service) UpdateJavWallHiddenDirs(ctx context.Context, taskID int64, dirs []string) (JavWallHiddenDirList, error) {
+func (s *Service) UpdateJavWallHiddenDirs(ctx context.Context, ref WallSourceRef, dirs []string) (JavWallHiddenDirList, error) {
 	if s.settings == nil {
 		return JavWallHiddenDirList{}, errJavWallSettingsUnavailable
 	}
@@ -139,7 +144,7 @@ func (s *Service) UpdateJavWallHiddenDirs(ctx context.Context, taskID int64, dir
 		return JavWallHiddenDirList{}, err
 	}
 	s.InvalidateJavWallAll()
-	return s.ListJavWallHiddenDirs(ctx, taskID)
+	return s.ListJavWallHiddenDirs(ctx, ref)
 }
 
 // javWallDefaultHiddenName 是「用户还没勾过」时默认隐藏的那个名字：

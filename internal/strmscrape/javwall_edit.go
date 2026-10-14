@@ -61,16 +61,16 @@ type JavWallWatermarkState struct {
 }
 
 // JavWallItem 读一部片的可编辑数据。
-func (s *Service) JavWallItem(ctx context.Context, taskID int64, relDir, stem string) (*JavWallItemDetail, error) {
-	ref, err := s.resolveJavItem(ctx, taskID, relDir, stem)
+func (s *Service) JavWallItem(ctx context.Context, ref WallSourceRef, relDir, stem string) (*JavWallItemDetail, error) {
+	item, err := s.resolveJavItem(ctx, ref, relDir, stem)
 	if err != nil {
 		return nil, err
 	}
-	return s.javWallDetail(ctx, ref)
+	return s.javWallDetail(ctx, item)
 }
 
 func (s *Service) javWallDetail(ctx context.Context, ref javItemRef) (*JavWallItemDetail, error) {
-	snap, err := s.javWallRows(ctx, ref.Task.ID, false)
+	snap, err := s.javWallRows(ctx, ref.Src, false)
 	if err != nil {
 		return nil, err
 	}
@@ -146,11 +146,11 @@ func (s *Service) javWallPosterState(ref javItemRef) JavWallPosterState {
 //
 // 只写 nfo —— 侧车 json、thumb、poster 都不动（poster 由 SaveJavWallPoster 单独保存，
 // 两个动作的后果完全不同：一个改文本、一个改图，合并会让「我只想改标题」变成「图也变了」）。
-func (s *Service) SaveJavWallMeta(ctx context.Context, taskID int64, relDir, stem string, meta *emby.MovieMeta) (*JavWallItemDetail, error) {
+func (s *Service) SaveJavWallMeta(ctx context.Context, src WallSourceRef, relDir, stem string, meta *emby.MovieMeta) (*JavWallItemDetail, error) {
 	if meta == nil {
 		return nil, domain.Errorf(domain.CodeValidation, "缺少要保存的元数据")
 	}
-	ref, err := s.resolveJavItem(ctx, taskID, relDir, stem)
+	ref, err := s.resolveJavItem(ctx, src, relDir, stem)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +196,7 @@ func (s *Service) SaveJavWallMeta(ctx context.Context, taskID int64, relDir, ste
 	if err := strm.WriteFileAtomic(ref.Root, joinRel(ref.RelDir, ref.Names.NFO), body); err != nil {
 		return nil, domain.Errorf(domain.CodeInternal, "写入 nfo 失败：%v", err)
 	}
-	s.invalidateJavWall(taskID)
+	s.invalidateJavWall(ref.Src.ScopeKey())
 	return s.javWallDetail(ctx, ref)
 }
 
@@ -205,8 +205,8 @@ func (s *Service) SaveJavWallMeta(ctx context.Context, taskID int64, relDir, ste
 // watermarks 是编辑页上勾的那几个水印 id（空 = 不贴）——**这一条路不看总开关**：
 // 用户当场勾了、也当场在预览里看得见，那就是他的意思。总开关管的是"自动"那条路
 // （重刮 / 扫描），见 watermarkIDsForSidecar。
-func (s *Service) SaveJavWallPoster(ctx context.Context, taskID int64, relDir, stem string, rect emby.CropRect, watermarks []string) (*JavWallItemDetail, error) {
-	ref, err := s.resolveJavItem(ctx, taskID, relDir, stem)
+func (s *Service) SaveJavWallPoster(ctx context.Context, src WallSourceRef, relDir, stem string, rect emby.CropRect, watermarks []string) (*JavWallItemDetail, error) {
+	ref, err := s.resolveJavItem(ctx, src, relDir, stem)
 	if err != nil {
 		return nil, err
 	}
@@ -233,43 +233,56 @@ func (s *Service) SaveJavWallPoster(ctx context.Context, taskID int64, relDir, s
 	if err := strm.WriteFileAtomic(ref.Root, joinRel(ref.RelDir, ref.Names.Poster), poster); err != nil {
 		return nil, domain.Errorf(domain.CodeInternal, "写入海报失败：%v", err)
 	}
-	s.invalidateJavWall(taskID)
+	s.invalidateJavWall(ref.Src.ScopeKey())
 	return s.javWallDetail(ctx, ref)
 }
 
 // RebuildJavWallItem 「重刮」：用**本地那份 json** 重建这一部
 // （nfo 重写、thumb/poster/fanart 重下、剧照缺哪张补哪张）。
-func (s *Service) RebuildJavWallItem(ctx context.Context, taskID int64, relDir, stem string) (*JavWallItemDetail, error) {
-	ref, err := s.resolveJavItem(ctx, taskID, relDir, stem)
+func (s *Service) RebuildJavWallItem(ctx context.Context, src WallSourceRef, relDir, stem string) (*JavWallItemDetail, error) {
+	ref, err := s.resolveJavItem(ctx, src, relDir, stem)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.strm.RebuildJavArtifacts(ctx, ref.Task, []string{joinRel(ref.RelDir, ref.StrmName)}); err != nil {
+	// 走**只要根目录**的那条入口：本地目录源没有 `*domain.StrmTask` 可传
+	// （见 strm.FillJavArtifactsInRoot 的注释）。
+	if _, err := s.strm.RebuildJavArtifactsInRoot(ctx, ref.Root, []string{joinRel(ref.RelDir, ref.StrmName)}); err != nil {
 		return nil, err
 	}
-	s.invalidateJavWall(taskID)
+	s.invalidateJavWall(ref.Src.ScopeKey())
 	return s.javWallDetail(ctx, ref)
 }
 
 // RefreshJavWallItem 只重读这一部（保存之后刷那一张卡片用）。
-func (s *Service) RefreshJavWallItem(ctx context.Context, taskID int64, relDir, stem string) (*JavWallItemDetail, error) {
-	s.invalidateJavWall(taskID)
-	ref, err := s.resolveJavItem(ctx, taskID, relDir, stem)
+func (s *Service) RefreshJavWallItem(ctx context.Context, src WallSourceRef, relDir, stem string) (*JavWallItemDetail, error) {
+	item, err := s.resolveJavItem(ctx, src, relDir, stem)
 	if err != nil {
 		return nil, err
 	}
-	return s.javWallDetail(ctx, ref)
+	s.invalidateJavWall(item.Src.ScopeKey())
+	return s.javWallDetail(ctx, item)
 }
 
 // ListJavWall 列出这一页卡片。force=true 时强制重建快照（「刷新元数据」走这条）。
-func (s *Service) ListJavWall(ctx context.Context, taskID int64, q JavWallListQuery, force bool) (JavWallListResult, error) {
-	snap, err := s.javWallRows(ctx, taskID, force)
+func (s *Service) ListJavWall(ctx context.Context, ref WallSourceRef, q JavWallListQuery, force bool) (JavWallListResult, error) {
+	src, err := s.resolveSource(ctx, ref)
+	if err != nil {
+		return JavWallListResult{}, err
+	}
+	return s.ListJavWallBySource(ctx, src, q, force)
+}
+
+// ListJavWallBySource 是 ListJavWall 的本体（数据源已在手上时走这条）。
+func (s *Service) ListJavWallBySource(ctx context.Context, src *wallSrc, q JavWallListQuery, force bool) (JavWallListResult, error) {
+	snap, err := s.javWallRows(ctx, src, force)
 	if err != nil {
 		return JavWallListResult{}, err
 	}
 	out := listJavWall(snap, q, s.newJavTitleLookup(snap.rows))
-	if task, _, taskErr := s.resolveTask(ctx, taskID); taskErr == nil && task != nil {
-		out.FullSyncWipe = task.ScanMode == domain.StrmScanModeFullSync
+	// 「全量扫描会覆盖手改」那条横幅**只对 STRM 任务有意义**：本地目录源没有扫描模式，
+	// 给 true 会让用户以为有个会覆盖他编辑的定时任务 —— 那是**不存在的**东西。
+	if src != nil && src.Task != nil {
+		out.FullSyncWipe = src.Task.ScanMode == domain.StrmScanModeFullSync
 	}
 	return out, nil
 }

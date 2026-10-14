@@ -28,7 +28,8 @@ import (
 
 // BackfillRequest 是「补齐剧照与演员」的入参。
 type BackfillRequest struct {
-	StrmTaskID int64 `json:"strm_task_id"`
+	StrmTaskID int64  `json:"strm_task_id"`
+	LocalDirID string `json:"local_dir_id,omitempty"`
 }
 
 // BackfillImages 扫一遍任务，给缺新数据的作品补抓。
@@ -36,32 +37,27 @@ type BackfillRequest struct {
 // 与 RunAsync 同构：起一个后台任务、复用同一份 Progress（前端那套进度轮询直接用）。
 // 也共用同一条 operationMu —— 与正常刮削**不能并发**（两套都会写同一批目录）。
 func (s *Service) BackfillImages(ctx context.Context, req BackfillRequest) error {
-	if req.StrmTaskID <= 0 {
-		return domain.Errorf(domain.CodeValidation, "strm_task_id 无效")
-	}
-	if _, _, err := s.resolveTask(ctx, req.StrmTaskID); err != nil {
+	src, err := s.resolveSource(ctx, WallSourceRef{StrmTaskID: req.StrmTaskID, LocalDirID: req.LocalDirID})
+	if err != nil {
 		return err
 	}
-	if err := s.requireTmdbTask(ctx, req.StrmTaskID); err != nil {
+	if err := requireTmdbSource(src); err != nil {
 		return err
 	}
 	if s.newTMDBClient() == nil {
 		return domain.Errorf(domain.CodeValidation, "未配置 TMDB API Key")
 	}
 	_ = ctx // 后台任务不随启动请求结束
-	return s.startAsyncOperation(req.StrmTaskID, 0, "准备补齐", "补齐完成", "strm backfill failed", func(runCtx context.Context) error {
-		return s.backfill(runCtx, req.StrmTaskID)
+	return s.startAsyncOperation(src, 0, "准备补齐", "补齐完成", "strm backfill failed", func(runCtx context.Context) error {
+		return s.backfill(runCtx, src)
 	})
 }
 
-func (s *Service) backfill(ctx context.Context, strmTaskID int64) error {
-	task, root, err := s.resolveTask(ctx, strmTaskID)
-	if err != nil {
-		return err
-	}
+func (s *Service) backfill(ctx context.Context, src *wallSrc) error {
+	root := src.Root
 	failures := make([]ScrapeFailure, 0)
 	defer func() {
-		s.notifyScrapeFailures(task, failures)
+		s.notifyScrapeFailures(src, failures)
 	}()
 	client := s.newTMDBClient()
 	if client == nil {
@@ -74,7 +70,7 @@ func (s *Service) backfill(ctx context.Context, strmTaskID int64) error {
 	if err != nil {
 		return err
 	}
-	works = filterWorksByScope(works, s.GetScope(strmTaskID).ExcludedDirs)
+	works = filterWorksByScope(works, s.GetScope(src.ScopeKey()).ExcludedDirs)
 
 	// 先挑出要处理的（这一步只读盘，很便宜），进度条才有总数。
 	targets := make([]workGroup, 0, len(works))
@@ -124,7 +120,7 @@ func (s *Service) backfill(ctx context.Context, strmTaskID int64) error {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			failures = append(failures, s.logScrapeFailure(task, g, displayName, ScrapeFailureStageWrite, err.Error()))
+			failures = append(failures, s.logScrapeFailure(src, g, displayName, ScrapeFailureStageWrite, err.Error()))
 			s.setProgress(func(p *Progress) {
 				p.Done = i + 1
 				p.Failed++
@@ -134,8 +130,8 @@ func (s *Service) backfill(ctx context.Context, strmTaskID int64) error {
 			time.Sleep(interval)
 			continue
 		}
-		s.upsertIndexItem(ctx, strmTaskID, root, g)
-		updated := buildItem(strmTaskID, root, g)
+		s.upsertIndexItem(ctx, src, root, g)
+		updated := buildItem(src.PosterRef(), root, g)
 		s.setProgress(func(p *Progress) {
 			p.Done = i + 1
 			p.CurrentItemID = ""

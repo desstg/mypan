@@ -64,7 +64,7 @@ type Service struct {
 	scanProgress    map[int64]liveScanProgress
 	// replaceBaseURL 是「一键替换基址」的后台任务状态（全局一个，不按任务）。
 	replaceBaseURL           *replaceBaseURLState
-	fileOperations           map[int64]struct{}
+	fileOperations map[any]struct{}
 	organizeBusy             RunningAccountLister
 	retentionBusy            RunningAccountLister
 	automationManagedChecker func(context.Context, int64) (bool, error)
@@ -121,7 +121,7 @@ func NewService(opts ServiceOptions) *Service {
 		taskCancels:     make(map[int64]context.CancelFunc),
 		dirtyAccounts:   make(map[int64]bool),
 		pendingRun:      make(map[int64]string),
-		fileOperations:  make(map[int64]struct{}),
+		fileOperations: make(map[any]struct{}),
 	}
 }
 
@@ -230,19 +230,49 @@ func (s *Service) TryBeginTaskFileOperation(taskID int64) (func(), bool) {
 	if s == nil || taskID <= 0 {
 		return nil, false
 	}
+	return s.tryBeginFileOperation(taskID)
+}
+
+// TryBeginRootFileOperation 按**根目录**取文件操作锁。
+//
+// 海报墙能挂「不在任何任务之下的本地目录」（见 strmscrape/wall_source.go），
+// 那种数据源没有 taskID 可用；用 0 当键会让所有本地源**共用同一把锁** ——
+// 两台不同的目录互相挡住对方，而真正该互斥的「同一个目录被两条路同时写」
+// 反而挡不住。
+//
+// 与 TryBeginTaskFileOperation 共用同一个 registry，只是键的类型不同
+// （任务用 int64、根用 `"r:"+绝对路径`）—— 两者在 map 里天然不撞。
+func (s *Service) TryBeginRootFileOperation(root string) (func(), bool) {
+	if s == nil {
+		return nil, false
+	}
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil, false
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	// Windows 上大小写不敏感，归一化免得同一棵树拿到两把锁。
+	key := "r:" + strings.ToLower(filepath.Clean(root))
+	return s.tryBeginFileOperation(key)
+}
+
+// tryBeginFileOperation 是两种取锁共用的本体。键是可比较的任意值。
+func (s *Service) tryBeginFileOperation(key any) (func(), bool) {
 	s.mu.Lock()
-	if _, busy := s.fileOperations[taskID]; busy {
+	if _, busy := s.fileOperations[key]; busy {
 		s.mu.Unlock()
 		return nil, false
 	}
-	s.fileOperations[taskID] = struct{}{}
+	s.fileOperations[key] = struct{}{}
 	s.mu.Unlock()
 
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			s.mu.Lock()
-			delete(s.fileOperations, taskID)
+			delete(s.fileOperations, key)
 			s.mu.Unlock()
 		})
 	}, true

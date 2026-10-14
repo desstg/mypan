@@ -33,7 +33,7 @@ func TestNotifyScrapeFailuresPublishesBellDetails(t *testing.T) {
 		{Stage: ScrapeFailureStageWrite, Name: "海贼王", Path: "动漫剧/海贼王 (1999)", Reason: "下载第 2 季海报：连接超时"},
 	}
 	svc := &Service{bus: bus}
-	svc.notifyScrapeFailures(&domain.StrmTask{ID: 7, AccountID: 3, Name: "媒体库"}, failures)
+	svc.notifyScrapeFailures(&wallSrc{Kind: "task", Task: &domain.StrmTask{ID: 7, AccountID: 3, Name: "媒体库"}}, failures)
 
 	select {
 	case evt := <-gotEvent:

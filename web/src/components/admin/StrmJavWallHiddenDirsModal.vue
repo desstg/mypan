@@ -7,6 +7,7 @@ import {
   type JavWallHiddenDirList,
   type JavWallHiddenDirOption,
 } from "@/api/strmJavWall";
+import type { WallSourceRef } from "@/api/strmScrape";
 import AppButton from "@/components/base/AppButton.vue";
 import AppModal from "@/components/base/AppModal.vue";
 import { toast } from "@/composables/useToast";
@@ -23,8 +24,8 @@ import { toast } from "@/composables/useToast";
 
 const props = defineProps<{
   open: boolean;
-  /** 只用来取候选清单与部数（0 = 不扫盘，退回按分类规则的目标目录列）。 */
-  taskId: number | null;
+  /** 数据源：只用来取候选清单与部数（不传 = 不扫盘，退回按分类规则的目标目录列）。 */
+  source: number | WallSourceRef;
 }>();
 
 const emit = defineEmits<{
@@ -54,13 +55,14 @@ async function loadData() {
   loading.value = true;
   errorText.value = "";
   try {
-    const taskId = props.taskId ?? 0;
-    const data = await fetchJavWallHiddenDirs(taskId);
+    const ref = props.source ?? 0;
+    const data = await fetchJavWallHiddenDirs(ref);
     applyList(data);
     // 按任务扫盘没扫出任何一级目录（输出目录还没生成 / 扫不到）时退到全局名单：
     // 只按分类规则的目标目录列。**有名字总比空白强** —— 空白会让用户以为功能坏了，
     // 而实际上他只是还没同步过。这条也兜住了「墙上能看到片、这里却是空的」那种不一致。
-    if (!options.value.length && taskId > 0) {
+    const hasSource = typeof ref === "object" ? Boolean(ref.local_dir_id || ref.strm_task_id) : ref > 0;
+    if (!options.value.length && hasSource) {
       applyList(await fetchJavWallHiddenDirs(0));
       if (!options.value.length) {
         errorText.value = "分类规则里也还没有目标目录 —— 先去「目录整理 → 番号匹配规则设置」建一条。";
@@ -101,7 +103,7 @@ async function save() {
   try {
     // 按候选清单的顺序回传，服务端还会再排序 + 去重。
     const dirs = options.value.filter((o) => checked.value.has(o.name)).map((o) => o.name);
-    const data = await saveJavWallHiddenDirs(props.taskId ?? 0, dirs);
+    const data = await saveJavWallHiddenDirs(props.source ?? 0, dirs);
     applyList(data);
     toast.success(dirs.length ? `已隐藏 ${dirs.length} 个目录` : "已取消隐藏，全部目录都会显示");
     emit("saved");

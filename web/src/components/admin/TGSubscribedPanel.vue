@@ -64,13 +64,10 @@ const STATUS_OPTIONS = TG_STATUS_FILTERS;
 /**
  * 筛选后的订阅。
  *
- * 「番号」是**刻意留的空档**：后端 domain.TGMediaType 只有 movie / tv，
- * 订阅表里不会出现别的值 —— 所以这一档筛出来必定是空的，由空状态去解释原因，
- * 而不是靠前端假装能显示点什么。
+ * 类型只有 all / movie / tv 三档（番号那一档已删，见 `TG_KIND_FILTERS` 的注释）。
  */
 const visible = computed(() =>
   subscriptions.value.filter((sub) => {
-    if (kind.value === "jav") return false;
     if (kind.value !== "all" && sub.media_type !== kind.value) return false;
     if (status.value !== "all" && sub.status !== status.value) return false;
     return true;
@@ -411,13 +408,11 @@ defineExpose({ load });
     <AdminEmptyState
       v-else-if="!loading"
       icon="📌"
-      :title="kind === 'jav' ? '番号订阅还没开放' : '没有符合条件的订阅'"
+      title="没有符合条件的订阅"
       :description="
-        kind === 'jav'
-          ? '这一档只是先占个位置 —— 番号订阅还没有实现，所以这里永远是空的。'
-          : subscriptions.length
-            ? '换个类型或状态看看。'
-            : '到「电影 / 剧集」里点海报右上角的「+」就能订阅。'
+        subscriptions.length
+          ? '换个类型或状态看看。'
+          : '到「电影 / 剧集」里点海报右上角的「+」就能订阅。'
       "
     />
 

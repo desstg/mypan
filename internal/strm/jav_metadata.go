@@ -284,13 +284,13 @@ func writeJavArtifacts(
 	//
 	// thumb：全量扫描与手动重刮都重下（用户 2026-09-28 明确要求全量也重下）；
 	//        增量扫描不动它。
-	needThumb := req.Items.Thumb && (req.Overwrite || req.RefetchImages || !artifactExists(filepath.Join(absDir, names.Thumb)))
+	needThumb := req.Items.Thumb && (req.Overwrite || req.RefetchImages || !artifactImageExists(absDir, names.Thumb))
 	// fanart 是 thumb 的字节复制 —— thumb 要重下时它跟着重下（否则会留一张旧图）。
 	// 它**不需要自己的开关**：既然是同一份字节，判据跟着 needThumb 就是对的，
 	// 而且不会多打一次上游（封面字节这一次只取一遍）。
-	needFanart := req.Items.Fanart && (needThumb || !artifactExists(filepath.Join(absDir, names.Fanart)))
+	needFanart := req.Items.Fanart && (needThumb || !artifactImageExists(absDir, names.Fanart))
 	// poster：全量重建、重刮重下，其余跳过。
-	needPoster := req.Items.Poster && (req.Overwrite || req.RefetchImages || !artifactExists(filepath.Join(absDir, names.Poster)))
+	needPoster := req.Items.Poster && (req.Overwrite || req.RefetchImages || !artifactImageExists(absDir, names.Poster))
 	if needThumb || needFanart || needPoster {
 		thumbBytes, ok := javCoverBytes(ctx, req, absDir, names, needThumb, sc, log)
 		if ok {
@@ -1061,6 +1061,55 @@ func artifactExists(absPath string) bool {
 	return err == nil
 }
 
+// artifactImageExts 是旁路图**所有**认得出来的扩展名（小写、带点）。
+//
+// 与 strmscrape 的 `imageExtensions`、`ResolvePosterFile` 的白名单、
+// `scanner.go` 的 isSharedMediaSidecar 是**同一套**：显示端四种都认，
+// 生成端判存在也必须四种都认，否则「明明有图还再写一份」。
+var artifactImageExts = []string{".jpg", ".jpeg", ".png", ".webp"}
+
+// artifactImageExists 报告 `base`（如 `poster.jpg` / `M-352-poster.jpg`）**任意一种
+// 扩展名**的图是否已经躺在 absDir 里。
+//
+// # 为什么不能只判字面那一个扩展名（2026-10-14）
+//
+// 生成端写的一律是 `.jpg`，所以原来的 `artifactExists(filepath.Join(absDir, names.Poster))`
+// 对**本程序产出的**目录完全正确。但用户挂上来的那批目录是**别的工具**产的，
+// 实测 250 个里 **34 个只有 `.png`**（`poster.png` / `thumb.png`），另有 67 个 jpg+png 都有。
+// 只判 `.jpg` 的后果是：对那 34 个会**再写一份 `poster.jpg` / `thumb.jpg`** ——
+// 用户明确说过「目录里有元数据、图片不覆盖，没有才新建」，那就是违反。
+//
+// ⚠️ 判据是「按主干 + 图片扩展名找」，所以 `poster.png` 会让 `poster.jpg` 算「已有」。
+// 这是**有意的**：同一个位置出现两种扩展名时，显示端（`pickJavImage`）本来就会挑一个用，
+// 再补一份另一格式的只会让「哪张是真的」变得说不清。
+func artifactImageExists(absDir, base string) bool {
+	if strings.TrimSpace(base) == "" {
+		return false
+	}
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	lowerStem := strings.ToLower(stem)
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.EqualFold(strings.TrimSuffix(name, filepath.Ext(name)), lowerStem) {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		for _, want := range artifactImageExts {
+			if ext == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // FindLocalSidecar 在一个本地目录里为**单独一个** `.strm` 找它的侧车。
 //
 // 内部就是 parseLocalSidecars + pairSidecar（传单元素列表），所以判据与生成器
@@ -1097,13 +1146,30 @@ func (s *Service) RebuildJavArtifacts(ctx context.Context, task *domain.StrmTask
 	if task.MediaKind != domain.StrmMediaKindJav {
 		return 0, domain.Errorf(domain.CodeValidation, "该任务不是番号影片任务")
 	}
+	root := TaskOutputDir(s.strmDir, TaskRelDir(task.GroupDir, task.OutputFolder))
+	return s.RebuildJavArtifactsInRoot(ctx, root, relStrmPaths)
+}
+
+// RebuildJavArtifactsInRoot 与 RebuildJavArtifacts 同一条生成路径，但**只要一个根目录**。
+//
+// 理由与 FillJavArtifactsInRoot 完全一样（见那一份的注释）：海报墙能挂不在任何任务
+// 之下的本地目录，而那些目录没有 `*domain.StrmTask` 可传。
+//
+// ⚠️ 这是**重刮**语义：`Overwrite` + `RefetchImages` 都为真 —— 手上那份会被换掉。
+// 只补缺的那条路是 `FillJavArtifactsInRoot`。
+func (s *Service) RebuildJavArtifactsInRoot(ctx context.Context, root string, relStrmPaths []string) (int64, error) {
+	if s == nil {
+		return 0, domain.Errorf(domain.CodeInternal, "服务未装配")
+	}
+	if strings.TrimSpace(root) == "" {
+		return 0, domain.Errorf(domain.CodeValidation, "输出目录无效")
+	}
 	if s.javImages == nil {
 		return 0, domain.Errorf(domain.CodeInternal, "图片抓取器未就绪")
 	}
 	if len(relStrmPaths) == 0 {
 		return 0, nil
 	}
-	root := TaskOutputDir(s.strmDir, TaskRelDir(task.GroupDir, task.OutputFolder))
 	res := generateJavArtifacts(ctx, javArtifactRequest{
 		Root:          root,
 		StrmFiles:     relStrmPaths,
@@ -1125,7 +1191,7 @@ func (s *Service) RebuildJavArtifacts(ctx context.Context, task *domain.StrmTask
 		// 一条都没生成、而且原因是"没有侧车" —— 这多半是本地还没同步下来，
 		// 如实报出去（界面上写清"先跑一次同步元数据的扫描"），不要静默成功。
 		return 0, domain.Errorf(domain.CodeValidation,
-			"本地没有这一部的侧车 json：请先对这个任务跑一次「同步元数据」的扫描，再重刮")
+			"本地没有这一部的侧车 json：请先跑一次「在线刮削」把元数据补齐，再重刮")
 	}
 	return res.Written, nil
 }
@@ -1153,13 +1219,32 @@ func (s *Service) FillJavArtifacts(ctx context.Context, task *domain.StrmTask, r
 	if task.MediaKind != domain.StrmMediaKindJav {
 		return 0, domain.Errorf(domain.CodeValidation, "该任务不是番号影片任务")
 	}
+	root := TaskOutputDir(s.strmDir, TaskRelDir(task.GroupDir, task.OutputFolder))
+	return s.FillJavArtifactsInRoot(ctx, root, relStrmPaths)
+}
+
+// FillJavArtifactsInRoot 与 FillJavArtifacts 同一条生成路径，但**只要一个根目录**。
+//
+// 存在的理由：海报墙现在也能挂**不在任何任务之下**的本地目录（别的工具产出的媒体库，
+// 见 strmscrape/wall_source.go），而那些目录没有 `*domain.StrmTask` 可传。
+// 生成器 `generateJavArtifacts` 本来就是「root + 设置」纯度的，任务只是用来推 root ——
+// 所以这里把那一步拆开，而不是给墙那边伪造一个任务。
+//
+// 只补缺：`Overwrite: false` + `RefetchImages: false`，已有的 nfo 与图一个都不动
+// （判据见 writeJavArtifacts 里那三个 need*）。用户明确要求过这条。
+func (s *Service) FillJavArtifactsInRoot(ctx context.Context, root string, relStrmPaths []string) (int64, error) {
+	if s == nil {
+		return 0, domain.Errorf(domain.CodeInternal, "服务未装配")
+	}
+	if strings.TrimSpace(root) == "" {
+		return 0, domain.Errorf(domain.CodeValidation, "输出目录无效")
+	}
 	if s.javImages == nil {
 		return 0, domain.Errorf(domain.CodeInternal, "图片抓取器未就绪")
 	}
 	if len(relStrmPaths) == 0 {
 		return 0, nil
 	}
-	root := TaskOutputDir(s.strmDir, TaskRelDir(task.GroupDir, task.OutputFolder))
 	res := generateJavArtifacts(ctx, javArtifactRequest{
 		Root:          root,
 		StrmFiles:     relStrmPaths,

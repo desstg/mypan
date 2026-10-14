@@ -1,7 +1,6 @@
 package strmscrape
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,9 +77,9 @@ type PlayableFile struct {
 // 判不过的一律 `logWarn` 丢掉、**不报错**：`.strm` 是纯文本，用户可能手改过、
 // 也可能指向别的播放器。那种文件对「能不能播」这个问题的答案就是「不能」，
 // 而整条请求因为其中一个文件坏了就 500，会把「这一部不能播」说成「这个接口坏了」。
-func (s *Service) readPlayableFiles(taskID int64, absDir, relDir string, names []string) []PlayableFile {
+func (s *Service) readPlayableFiles(ref posterRef, absDir, relDir string, names []string) []PlayableFile {
 	// 字幕只列一次，给这个目录下每一集都带上。
-	subs := listSubtitleFiles(taskID, absDir, relDir)
+	subs := listSubtitleFiles(ref, absDir, relDir)
 	out := make([]PlayableFile, 0, len(names))
 	for _, name := range names {
 		raw, err := os.ReadFile(filepath.Join(absDir, name))
@@ -110,7 +109,7 @@ func (s *Service) readPlayableFiles(taskID int64, absDir, relDir string, names [
 //
 // 只认 srt / vtt / sup 三种扩展名，与前端 VideoPreview 的字幕候选白名单一致。
 // 大小写不敏感（Windows 上用户可能手改成 `.SRT`）。
-func listSubtitleFiles(taskID int64, absDir, relDir string) []SubtitleFile {
+func listSubtitleFiles(ref posterRef, absDir, relDir string) []SubtitleFile {
 	entries, err := os.ReadDir(absDir)
 	if err != nil {
 		return nil
@@ -129,7 +128,7 @@ func listSubtitleFiles(taskID int64, absDir, relDir string) []SubtitleFile {
 			Name:   name,
 			Label:  subtitleLabelFromName(name),
 			Format: strings.TrimPrefix(ext, "."),
-			URL:    subtitleURLFromRel(taskID, joinRel(relDir, name)),
+			URL:    subtitleURLFromRel(ref, joinRel(relDir, name)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return naturalLess(out[i].Name, out[j].Name) })
@@ -145,12 +144,12 @@ func listSubtitleFiles(taskID int64, absDir, relDir string) []SubtitleFile {
 // 扩展名白名单都做完了），只是后缀白名单扩到字幕。接口路径名沿用 poster 不动 ——
 // 它已经是一个「按 rel 取任务输出目录里的本地文件」的通用出口，
 // 为了名字好看去动它会把所有现存海报 URL 一起改掉。
-func subtitleURLFromRel(taskID int64, rel string) string {
+func subtitleURLFromRel(ref posterRef, rel string) string {
 	rel = strings.TrimSpace(rel)
 	if rel == "" {
 		return ""
 	}
-	return fmt.Sprintf("/api/admin/strm-scrape/poster?strm_task_id=%d&rel=%s", taskID, pathEscape(rel))
+	return "/api/admin/strm-scrape/poster?" + ref.query() + "&rel=" + pathEscape(rel)
 }
 
 // subtitleLabelFromName 从文件名后缀推语言名。

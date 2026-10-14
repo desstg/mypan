@@ -76,10 +76,13 @@ type Service struct {
 	cancel      context.CancelFunc
 	indexLocks  sync.Map // taskID -> *sync.Mutex
 
-	// javWallCache 是番号海报墙的扫盘快照（taskID → 快照）。
-	// 与 indexLocks 一样是"每个任务一份"，但这里只是缓存：丢了重建即可。
+	// javWallCache 是番号海报墙的扫盘快照（`wallSource.ScopeKey()` → 快照）。
+	// 与 indexLocks 一样是"每个数据源一份"，但这里只是缓存：丢了重建即可。
+	//
+	// ⚠️ 键是**字符串**（不是 taskID）：墙的数据源现在有两种（STRM 任务 / 本地目录），
+	// 任务那侧沿用裸十进制（"5"）以免与已有状态分家，本地那侧是 `local-<id>`。
 	javWallMu    sync.Mutex
-	javWallCache map[int64]*javWallSnapshot
+	javWallCache map[string]*javWallSnapshot
 	// javTitleCache 是 nfo 标题的内存缓存（绝对路径 → 标题/番号/mtime/size）。
 	// 冷启动要读几千份 nfo，命中就免一次读盘 + 解析。**不落盘**。
 	javTitleMu    sync.Mutex
@@ -107,7 +110,7 @@ func New(opts Options) *Service {
 		strmDir:       strmDir,
 		log:           log,
 		files:         opts.FileInfo,
-		javWallCache:  map[int64]*javWallSnapshot{},
+		javWallCache:  map[string]*javWallSnapshot{},
 		javTitleCache: map[string]javTitleEntry{},
 		thumbs: thumbcache.New(opts.DataDir, func(msg string, args ...any) {
 			log.Warn(msg, args...)
@@ -163,23 +166,29 @@ func normalizeItemListQuery(in ItemListQuery) ItemListQuery {
 }
 
 func (s *Service) ListItems(ctx context.Context, strmTaskID int64, query ItemListQuery) (ItemListResult, error) {
-	query = normalizeItemListQuery(query)
-	_, root, err := s.resolveTask(ctx, strmTaskID)
+	src, err := s.taskSource(ctx, strmTaskID)
 	if err != nil {
 		return ItemListResult{}, err
 	}
-	if err := s.requireTmdbTask(ctx, strmTaskID); err != nil {
+	return s.ListItemsBySource(ctx, src, query)
+}
+
+// ListItemsBySource 是 ListItems 的本体（数据源已经在手上时走这条）。
+func (s *Service) ListItemsBySource(ctx context.Context, src *wallSrc, query ItemListQuery) (ItemListResult, error) {
+	query = normalizeItemListQuery(query)
+	if err := requireTmdbSource(src); err != nil {
 		return ItemListResult{}, err
 	}
+	root := src.Root
 	if abs, aerr := filepath.Abs(root); aerr == nil {
 		root = abs
 	}
 	var out ItemListResult
-	err = s.withTaskIndexLock(strmTaskID, func() error {
-		if err := s.ensureIndexLocked(ctx, strmTaskID, root); err != nil {
+	err := s.withTaskIndexLock(src.ScopeKey(), func() error {
+		if err := s.ensureIndexLocked(ctx, src, root); err != nil {
 			return err
 		}
-		items, err := s.listIndexItems(strmTaskID, query)
+		items, err := s.listIndexItems(src.ScopeKey(), src.PosterRef(), query)
 		if err != nil {
 			return err
 		}
@@ -191,43 +200,60 @@ func (s *Service) ListItems(ctx context.Context, strmTaskID int64, query ItemLis
 
 // RefreshIndex 扫盘重建索引并返回列表（海报墙刷新按钮）。
 func (s *Service) RefreshIndex(ctx context.Context, strmTaskID int64, query ItemListQuery) (ItemListResult, error) {
-	query = normalizeItemListQuery(query)
-	if err := s.RebuildIndex(ctx, strmTaskID); err != nil {
+	src, err := s.taskSource(ctx, strmTaskID)
+	if err != nil {
 		return ItemListResult{}, err
 	}
-	return s.listIndexItems(strmTaskID, query)
+	query = normalizeItemListQuery(query)
+	if err := s.RebuildIndex(ctx, src); err != nil {
+		return ItemListResult{}, err
+	}
+	return s.listIndexItems(src.ScopeKey(), src.PosterRef(), query)
 }
 
 func (s *Service) RunAsync(ctx context.Context, req RunRequest) error {
-	if req.StrmTaskID <= 0 {
-		return domain.Errorf(domain.CodeValidation, "strm_task_id 无效")
-	}
 	// 守卫要放在**起后台任务之前**：进 startAsyncOperation 之后就是异步的了，
 	// 错误只能落在 progress.Error 里，调用方拿不到（见 errNotTmdbTask 的注释）。
-	task, _, err := s.resolveTask(ctx, req.StrmTaskID)
+	src, err := s.resolveSource(ctx, WallSourceRef{StrmTaskID: req.StrmTaskID, LocalDirID: req.LocalDirID})
 	if err != nil {
 		return err
 	}
-	if task.MediaKind == javMediaKind {
-		return errNotTmdbTask
+	if err := requireTmdbSource(src); err != nil {
+		return err
 	}
 	_ = ctx // 后台任务不随启动请求结束
-	return s.startAsyncOperation(req.StrmTaskID, 0, "准备刮削", "刮削完成", "strm scrape failed", func(runCtx context.Context) error {
-		return s.run(runCtx, req)
+	return s.startAsyncOperation(src, 0, "准备刮削", "刮削完成", "strm scrape failed", func(runCtx context.Context) error {
+		return s.run(runCtx, src, req)
 	})
 }
 
-func (s *Service) startAsyncOperation(taskID int64, total int, message, doneMessage, logMessage string, run func(context.Context) error) error {
+// taskSource 用一个 taskID 现查一个数据源。
+//
+// 给**还没迁移到本地源**的那几条路用（TMDB 的详情 / 重匹配 / 重刮 / 补抓）：
+// 它们只需要把 taskID 还原成统一的数据源，好复用同一套下游。
+func (s *Service) taskSource(ctx context.Context, taskID int64) (*wallSrc, error) {
+	return s.resolveSource(ctx, WallSourceRef{StrmTaskID: taskID})
+}
+
+func (s *Service) startAsyncOperation(src *wallSrc, total int, message, doneMessage, logMessage string, run func(context.Context) error) error {
 	if !s.operationMu.TryLock() {
 		return domain.Errorf(domain.CodeValidation, "刮削任务进行中")
 	}
 	releaseFiles := func() {}
 	if s.strm != nil {
 		var ok bool
-		releaseFiles, ok = s.strm.TryBeginTaskFileOperation(taskID)
+		if src.isLocal() {
+			// 本地目录源没有任务 id，拿 TaskID 去取锁会拿到一把**键为 0 的**、
+			// 谁都能进的锁。改用按根目录取的锁 —— 它与任务那把是**同一个 registry**
+			// 里的不同键，所以「同一个目录既是某任务的输出、又被挂成本地源」这条
+			// 重合仍然互斥（注册期也另外拦了一道，见 rejectTaskOutputRoot）。
+			releaseFiles, ok = s.strm.TryBeginRootFileOperation(src.Root)
+		} else {
+			releaseFiles, ok = s.strm.TryBeginTaskFileOperation(src.TaskID)
+		}
 		if !ok {
 			s.operationMu.Unlock()
-			return domain.Errorf(domain.CodeValidation, "该 STRM 任务正在运行，请稍后再刮削")
+			return domain.Errorf(domain.CodeValidation, "该数据源正在运行，请稍后再刮削")
 		}
 	}
 	s.mu.Lock()
@@ -241,7 +267,8 @@ func (s *Service) startAsyncOperation(taskID int64, total int, message, doneMess
 	s.cancel = cancel
 	s.progress = Progress{
 		Running:   true,
-		TaskID:    taskID,
+		TaskID:    src.TaskID,
+		SourceKey: src.ScopeKey(),
 		Total:     total,
 		Message:   message,
 		StartedAt: time.Now().Format(time.RFC3339),
@@ -262,7 +289,7 @@ func (s *Service) startAsyncOperation(taskID int64, total int, message, doneMess
 			if s.progress.Message == "" {
 				s.progress.Message = "刮削失败"
 			}
-			s.log.Warn(logMessage, "task_id", taskID, "err", err)
+			s.log.Warn(logMessage, "source", src.ScopeKey(), "err", err)
 		} else if s.progress.Message == "" {
 			s.progress.Message = doneMessage
 		}
@@ -284,28 +311,26 @@ func (s *Service) overwriteForMatch(sameID bool) bool {
 // 取 task 而不是只比 taskID：resolveTask 已经查过一次库，这里再查一次是为了让
 // 调用点读起来是一句话 —— 这几条路的开销都在后面的扫盘/网络，多一次主键查询无所谓。
 func (s *Service) requireTmdbTask(ctx context.Context, strmTaskID int64) error {
-	task, _, err := s.resolveTask(ctx, strmTaskID)
+	src, err := s.taskSource(ctx, strmTaskID)
 	if err != nil {
 		return err
 	}
-	if task.MediaKind == javMediaKind {
-		return errNotTmdbTask
-	}
-	return nil
+	return requireTmdbSource(src)
 }
 
 // Rematch 对同 ID 沿用写入策略，换 ID 时强制覆盖并统一走 writeMatchedOpts。
 func (s *Service) Rematch(ctx context.Context, req RematchRequest) (*Item, bool, error) {
-	if req.StrmTaskID <= 0 || strings.TrimSpace(req.ItemID) == "" || strings.TrimSpace(req.TMDBID) == "" {
-		return nil, false, domain.Errorf(domain.CodeValidation, "参数不完整")
-	}
-	if err := s.requireTmdbTask(ctx, req.StrmTaskID); err != nil {
-		return nil, false, err
-	}
-	_, root, err := s.resolveTask(ctx, req.StrmTaskID)
+	src, err := s.resolveSource(ctx, WallSourceRef{StrmTaskID: req.StrmTaskID, LocalDirID: req.LocalDirID})
 	if err != nil {
 		return nil, false, err
 	}
+	if err := requireTmdbSource(src); err != nil {
+		return nil, false, err
+	}
+	if strings.TrimSpace(req.ItemID) == "" || strings.TrimSpace(req.TMDBID) == "" {
+		return nil, false, domain.Errorf(domain.CodeValidation, "参数不完整")
+	}
+	root := src.Root
 	g, err := findWorkByID(root, req.ItemID)
 	if err != nil {
 		return nil, false, err
@@ -323,12 +348,12 @@ func (s *Service) Rematch(ctx context.Context, req RematchRequest) (*Item, bool,
 	if display == "" {
 		display = workDisplayName(g)
 	}
-	current := buildItem(req.StrmTaskID, root, g)
-	err = s.startAsyncOperation(req.StrmTaskID, 1, "正在刮削："+display, "已重新匹配："+display, "strm rematch failed", func(runCtx context.Context) error {
+	current := buildItem(src.PosterRef(), root, g)
+	err = s.startAsyncOperation(src, 1, "正在刮削："+display, "已重新匹配："+display, "strm rematch failed", func(runCtx context.Context) error {
 		s.setProgress(func(p *Progress) {
 			p.CurrentItemID = req.ItemID
 		})
-		updated, applyErr := s.applyRematch(runCtx, req, root, g, mediaType, overwrite)
+		updated, applyErr := s.applyRematch(runCtx, src, req, root, g, mediaType, overwrite)
 		if applyErr != nil {
 			s.setProgress(func(p *Progress) {
 				p.Done = 1
@@ -353,7 +378,7 @@ func (s *Service) Rematch(ctx context.Context, req RematchRequest) (*Item, bool,
 	return &current, true, nil
 }
 
-func (s *Service) applyRematch(ctx context.Context, req RematchRequest, root string, g workGroup, mediaType string, overwrite bool) (*Item, error) {
+func (s *Service) applyRematch(ctx context.Context, src *wallSrc, req RematchRequest, root string, g workGroup, mediaType string, overwrite bool) (*Item, error) {
 	client := s.newTMDBClient()
 	if client == nil {
 		return nil, domain.Errorf(domain.CodeValidation, "未配置 TMDB API Key")
@@ -380,8 +405,8 @@ func (s *Service) applyRematch(ctx context.Context, req RematchRequest, root str
 		return nil, err
 	}
 	clearManualComplete(g)
-	s.upsertIndexItem(scrapeCtx, req.StrmTaskID, root, g)
-	item := buildItem(req.StrmTaskID, root, g)
+	s.upsertIndexItem(scrapeCtx, src, root, g)
+	item := buildItem(src.PosterRef(), root, g)
 	return &item, nil
 }
 
@@ -404,13 +429,14 @@ func (s *Service) MarkNormal(ctx context.Context, req MarkNormalRequest) (*Item,
 		return nil, domain.Errorf(domain.CodeValidation, "刮削任务进行中")
 	}
 	defer s.operationMu.Unlock()
-	if err := s.requireTmdbTask(ctx, req.StrmTaskID); err != nil {
-		return nil, err
-	}
-	_, root, err := s.resolveTask(ctx, req.StrmTaskID)
+	src, err := s.resolveSource(ctx, WallSourceRef{StrmTaskID: req.StrmTaskID, LocalDirID: req.LocalDirID})
 	if err != nil {
 		return nil, err
 	}
+	if err := requireTmdbSource(src); err != nil {
+		return nil, err
+	}
+	root := src.Root
 	g, err := findWorkByID(root, req.ItemID)
 	if err != nil {
 		return nil, err
@@ -426,8 +452,8 @@ func (s *Service) MarkNormal(ctx context.Context, req MarkNormalRequest) (*Item,
 		if err := writeManualComplete(g, mediaType); err != nil {
 			return nil, domain.Errorf(domain.CodeDriverError, "保存手动完成状态：%v", err)
 		}
-		s.upsertIndexItem(ctx, req.StrmTaskID, root, g)
-		item := buildItem(req.StrmTaskID, root, g)
+		s.upsertIndexItem(ctx, src, root, g)
+		item := buildItem(src.PosterRef(), root, g)
 		return &item, nil
 	}
 	if pending, ok := readPendingState(g); ok && pending.Status == PendingDoubt {
@@ -442,23 +468,24 @@ func (s *Service) MarkNormal(ctx context.Context, req MarkNormalRequest) (*Item,
 	} else if err := writeManualComplete(g, mediaType); err != nil {
 		return nil, domain.Errorf(domain.CodeDriverError, "保存手动完成状态：%v", err)
 	}
-	s.upsertIndexItem(ctx, req.StrmTaskID, root, g)
-	item := buildItem(req.StrmTaskID, root, g)
+	s.upsertIndexItem(ctx, src, root, g)
+	item := buildItem(src.PosterRef(), root, g)
 	return &item, nil
 }
 
 // Rescrape：沿用原 TMDB ID，走与「开始刮削」相同的 writeMatchedOpts（含正片季/finale 集数与 pending）。
 func (s *Service) Rescrape(ctx context.Context, req RescrapeRequest) (*Item, bool, error) {
-	if req.StrmTaskID <= 0 || strings.TrimSpace(req.ItemID) == "" {
+	if strings.TrimSpace(req.ItemID) == "" {
 		return nil, false, domain.Errorf(domain.CodeValidation, "参数不完整")
 	}
-	if err := s.requireTmdbTask(ctx, req.StrmTaskID); err != nil {
-		return nil, false, err
-	}
-	_, root, err := s.resolveTask(ctx, req.StrmTaskID)
+	src, err := s.resolveSource(ctx, WallSourceRef{StrmTaskID: req.StrmTaskID, LocalDirID: req.LocalDirID})
 	if err != nil {
 		return nil, false, err
 	}
+	if err := requireTmdbSource(src); err != nil {
+		return nil, false, err
+	}
+	root := src.Root
 	g, err := findWorkByID(root, req.ItemID)
 	if err != nil {
 		return nil, false, err
@@ -467,8 +494,8 @@ func (s *Service) Rescrape(ctx context.Context, req RescrapeRequest) (*Item, boo
 	meta, ok := readWorkNFOMeta(g, mediaType)
 	if _, manual := readManualComplete(g); manual && (!ok || strings.TrimSpace(meta.TMDBID) == "") {
 		clearManualComplete(g)
-		s.upsertIndexItem(ctx, req.StrmTaskID, root, g)
-		item := buildItem(req.StrmTaskID, root, g)
+		s.upsertIndexItem(ctx, src, root, g)
+		item := buildItem(src.PosterRef(), root, g)
 		return &item, false, nil
 	}
 	if !ok || strings.TrimSpace(meta.TMDBID) == "" {
@@ -478,16 +505,16 @@ func (s *Service) Rescrape(ctx context.Context, req RescrapeRequest) (*Item, boo
 	if display == "" {
 		display = workDisplayName(g)
 	}
-	current := buildItem(req.StrmTaskID, root, g)
+	current := buildItem(src.PosterRef(), root, g)
 	overwrite := s.overwriteForMatch(true)
 	if s.newTMDBClient() == nil {
 		return nil, false, domain.Errorf(domain.CodeValidation, "未配置 TMDB API Key")
 	}
-	err = s.startAsyncOperation(req.StrmTaskID, 1, "正在重新刮削："+display, "已重新刮削："+display, "strm rescrape failed", func(runCtx context.Context) error {
+	err = s.startAsyncOperation(src, 1, "正在重新刮削："+display, "已重新刮削："+display, "strm rescrape failed", func(runCtx context.Context) error {
 		s.setProgress(func(p *Progress) {
 			p.CurrentItemID = req.ItemID
 		})
-		updated, applyErr := s.applyRematch(runCtx, RematchRequest{
+		updated, applyErr := s.applyRematch(runCtx, src, RematchRequest{
 			StrmTaskID: req.StrmTaskID,
 			ItemID:     req.ItemID,
 			TMDBID:     meta.TMDBID,
@@ -519,11 +546,12 @@ func (s *Service) Rescrape(ctx context.Context, req RescrapeRequest) (*Item, boo
 	return &current, true, nil
 }
 
-func (s *Service) ResolvePosterFile(ctx context.Context, strmTaskID int64, rel string) (string, error) {
-	_, root, err := s.resolveTask(ctx, strmTaskID)
+func (s *Service) ResolvePosterFile(ctx context.Context, srcRef WallSourceRef, rel string) (string, error) {
+	src, err := s.resolveSource(ctx, srcRef)
 	if err != nil {
 		return "", err
 	}
+	root := src.Root
 	rel = filepath.Clean("/" + strings.TrimSpace(rel))
 	rel = strings.TrimPrefix(rel, "/")
 	full := filepath.Join(root, rel)
@@ -558,14 +586,11 @@ func (s *Service) PosterThumb(path string, width int) ([]byte, string) {
 	return s.thumbs.Get(path, width)
 }
 
-func (s *Service) run(ctx context.Context, req RunRequest) error {
-	task, root, err := s.resolveTask(ctx, req.StrmTaskID)
-	if err != nil {
-		return err
-	}
+func (s *Service) run(ctx context.Context, src *wallSrc, req RunRequest) error {
+	root := src.Root
 	failures := make([]ScrapeFailure, 0)
 	defer func() {
-		s.notifyScrapeFailures(task, failures)
+		s.notifyScrapeFailures(src, failures)
 	}()
 	mode := normalizeWriteMode(s.GetSettings().WriteMode)
 	if strings.TrimSpace(req.WriteMode) != "" {
@@ -588,7 +613,7 @@ func (s *Service) run(ctx context.Context, req RunRequest) error {
 	if err != nil {
 		return err
 	}
-	works = filterWorksByScope(works, s.GetScope(req.StrmTaskID).ExcludedDirs)
+	works = filterWorksByScope(works, s.GetScope(src.ScopeKey()).ExcludedDirs)
 	if len(works) == 0 {
 		s.setProgress(func(p *Progress) {
 			p.Total = 0
@@ -620,7 +645,7 @@ func (s *Service) run(ctx context.Context, req RunRequest) error {
 			return err
 		}
 		displayName := workDisplayName(g)
-		item := buildItem(req.StrmTaskID, root, g)
+		item := buildItem(src.PosterRef(), root, g)
 		need := mode == WriteModeOverwrite || workNeedsScrape(g, item.MediaType)
 		if !need {
 			s.setProgress(func(p *Progress) {
@@ -643,7 +668,7 @@ func (s *Service) run(ctx context.Context, req RunRequest) error {
 			if matchErr != nil {
 				reason = matchErr.Error()
 			}
-			failures = append(failures, s.logScrapeFailure(task, g, displayName, ScrapeFailureStageMatch, reason))
+			failures = append(failures, s.logScrapeFailure(src, g, displayName, ScrapeFailureStageMatch, reason))
 			s.setProgress(func(p *Progress) {
 				p.Done = i + 1
 				p.Failed++
@@ -664,7 +689,7 @@ func (s *Service) run(ctx context.Context, req RunRequest) error {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			failures = append(failures, s.logScrapeFailure(task, g, title, ScrapeFailureStageWrite, err.Error()))
+			failures = append(failures, s.logScrapeFailure(src, g, title, ScrapeFailureStageWrite, err.Error()))
 			s.setProgress(func(p *Progress) {
 				p.Done = i + 1
 				p.Failed++
@@ -674,8 +699,8 @@ func (s *Service) run(ctx context.Context, req RunRequest) error {
 			time.Sleep(interval)
 			continue
 		}
-		s.upsertIndexItem(ctx, req.StrmTaskID, root, g)
-		updated := buildItem(req.StrmTaskID, root, g)
+		s.upsertIndexItem(ctx, src, root, g)
+		updated := buildItem(src.PosterRef(), root, g)
 		s.setProgress(func(p *Progress) {
 			p.Done = i + 1
 			p.CurrentItemID = ""
@@ -686,7 +711,7 @@ func (s *Service) run(ctx context.Context, req RunRequest) error {
 		time.Sleep(interval)
 	}
 	// 全量对账一次，去掉已删除作品
-	_ = s.RebuildIndex(ctx, req.StrmTaskID)
+	_ = s.RebuildIndex(ctx, src)
 	s.setProgress(func(p *Progress) {
 		p.CurrentItemID = ""
 		p.Message = fmt.Sprintf("完成：成功 %d，跳过 %d，失败 %d", p.Done-p.Skipped-p.Failed, p.Skipped, p.Failed)

@@ -135,17 +135,20 @@ export interface TGSubscriptionEpisode {
 /**
  * 「已订阅」页的类型筛选。
  *
- * `jav`（番号）目前只是占位：后端 domain.TGMediaType 只有 movie / tv，
- * 订阅表里不会出现这个值 —— 选了它就是一个空列表加一句说明，
- * 而不是假装有数据。
+ * ⚠️ **这一页只有影片 / 剧集两档**。曾经有过一个 `jav`（番号）选项 —— 它是
+ * 占位：后端 domain.TGMediaType 只有 movie / tv，订阅表里不会出现别的值，
+ * 所以那一档筛出来必定是空的，界面上靠空状态解释「番号订阅还没开放」。
+ * 2026-10-14 用户要求删掉它：一个永远筛不出东西的选项只会让人以为订阅丢了。
+ *
+ * **番号那套订阅是另一码事**，住在侧栏那个「番号」分组下的「订阅」档
+ * （`TAB_JAV_SUB` → `JavSubscribePanel`），与这里没有关系。
  */
-export type TGSubscribeKindFilter = "all" | "movie" | "tv" | "jav";
+export type TGSubscribeKindFilter = "all" | "movie" | "tv";
 
 export const TG_KIND_FILTERS: { value: TGSubscribeKindFilter; label: string }[] = [
   { value: "all", label: "全部类型" },
   { value: "movie", label: "影片" },
   { value: "tv", label: "剧集" },
-  { value: "jav", label: "番号" },
 ];
 
 /**

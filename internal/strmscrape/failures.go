@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"litepan/internal/domain"
 )
 
 const scrapeFailureDetailSep = "\n---detail---\n"
@@ -25,7 +23,7 @@ type ScrapeFailure struct {
 	Reason string             `json:"reason"`
 }
 
-func (s *Service) logScrapeFailure(task *domain.StrmTask, g workGroup, name string, stage ScrapeFailureStage, reason string) ScrapeFailure {
+func (s *Service) logScrapeFailure(src *wallSrc, g workGroup, name string, stage ScrapeFailureStage, reason string) ScrapeFailure {
 	failure := ScrapeFailure{
 		Stage:  stage,
 		Name:   strings.TrimSpace(name),
@@ -45,8 +43,11 @@ func (s *Service) logScrapeFailure(task *domain.StrmTask, g workGroup, name stri
 			"stage", string(failure.Stage),
 			"error", failure.Reason,
 		}
-		if task != nil {
-			attrs = append(attrs, "task_id", task.ID, "task_name", task.Name)
+		if src != nil && src.Task != nil {
+			attrs = append(attrs, "task_id", src.Task.ID, "task_name", src.Task.Name)
+		} else if src != nil {
+			// 本地目录源：日志里要有**能定位是哪个目录**的标识（没有 task 可记）。
+			attrs = append(attrs, "source", src.ScopeKey(), "root", src.Root)
 		}
 		s.log.Warn("STRM 刮削作品失败", attrs...)
 	}

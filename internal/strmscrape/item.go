@@ -12,7 +12,7 @@ import (
 	"litepan/internal/mediaorganize/rules"
 )
 
-func buildItem(taskID int64, root string, g workGroup) Item {
+func buildItem(ref posterRef, root string, g workGroup) Item {
 	mediaType := resolveWorkMediaType(g)
 	hasNFO := workHasNFO(g, mediaType)
 	hasPoster := workHasPoster(g, mediaType)
@@ -126,7 +126,7 @@ func buildItem(taskID int64, root string, g workGroup) Item {
 	if hasPoster {
 		poster := workPosterFile(g, mediaType)
 		relPoster := filepath.ToSlash(relUnder(root, poster))
-		item.PosterURL = posterURLFromRel(taskID, relPoster)
+		item.PosterURL = posterURLFromRel(ref, relPoster)
 	}
 	return item
 }

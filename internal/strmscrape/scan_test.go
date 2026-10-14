@@ -37,7 +37,7 @@ func TestGroupWorks_TVSeasonsCollapse(t *testing.T) {
 	if inferMediaType(works[0]) != MediaTypeTV {
 		t.Fatalf("want tv, got %s", inferMediaType(works[0]))
 	}
-	item := buildItem(1, root, works[0])
+	item := buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.FileCount != 3 {
 		t.Fatalf("file_count=%d", item.FileCount)
 	}
@@ -130,7 +130,7 @@ func TestSpecialPrefixedMovieStaysInOwnDirectory(t *testing.T) {
 	if works[0].absDir != movie {
 		t.Fatalf("work dir=%q want %q", works[0].absDir, movie)
 	}
-	item := buildItem(1, root, works[0])
+	item := buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.MediaType != MediaTypeMovie || item.TMDBID != "1108306" || item.Title != wantTitle {
 		t.Fatalf("item=%+v", item)
 	}
@@ -457,7 +457,7 @@ func TestStatusMissWhenOnlyNFO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := buildItem(1, root, works[0])
+	item := buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.Status != ItemStatusMiss {
 		t.Fatalf("status=%s want miss (nfo only)", item.Status)
 	}
@@ -478,7 +478,7 @@ func TestStatusDoubtWithPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = writePendingState(works[0], scrapeState{Status: PendingDoubt, EpLocal: 1, EpTMDB: 40})
-	item := buildItem(1, root, works[0])
+	item := buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.Status != ItemStatusDoubt {
 		t.Fatalf("status=%s want doubt", item.Status)
 	}
@@ -486,7 +486,7 @@ func TestStatusDoubtWithPending(t *testing.T) {
 		t.Fatalf("ep local=%d tmdb=%d want from pending", item.EpLocal, item.EpTMDB)
 	}
 	clearPendingMarker(works[0])
-	item = buildItem(1, root, works[0])
+	item = buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.Status != ItemStatusOK {
 		t.Fatalf("after clear pending status=%s want ok", item.Status)
 	}
@@ -537,7 +537,7 @@ func TestRootReadySkipsEvenIfEpisodeIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := buildItem(1, root, works[0])
+	item := buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.Status != ItemStatusOK {
 		t.Fatalf("status=%s want ok", item.Status)
 	}
@@ -565,7 +565,7 @@ func TestPendingForcesScrapeAndUpdatingState(t *testing.T) {
 	if !workNeedsScrape(works[0], MediaTypeTV) {
 		t.Fatal("pending must scrape")
 	}
-	item := buildItem(1, root, works[0])
+	item := buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.Status != ItemStatusOK {
 		t.Fatalf("status=%s want ok (追更且根齐备)", item.Status)
 	}
@@ -599,7 +599,7 @@ func TestMarkNormalClearsPending(t *testing.T) {
 	if hasPendingMarker(works[0]) {
 		t.Fatal("pending should be cleared")
 	}
-	item := buildItem(1, root, works[0])
+	item := buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.Status != ItemStatusOK || item.TVState != TVStateEnded {
 		t.Fatalf("status=%s tv_state=%s", item.Status, item.TVState)
 	}
@@ -624,7 +624,7 @@ func TestManualCompleteSkipsUnmatchedWork(t *testing.T) {
 	if workNeedsScrape(g, MediaTypeTV) {
 		t.Fatal("手动完成的未匹配作品不应再次进入自动刮削")
 	}
-	item := buildItem(1, root, g)
+	item := buildItem(posterRef{TaskID: 1}, root, g)
 	if item.Status != ItemStatusOK || !item.ManualDone || item.TVState != TVStateEnded || item.TMDBID != "" {
 		t.Fatalf("手动完成状态错误：%+v", item)
 	}
@@ -695,7 +695,7 @@ func TestFinalizeKeepsPendingWhenLocalExceedsTMDB(t *testing.T) {
 	if st.Status != PendingIncomplete {
 		t.Fatalf("status=%s want incomplete", st.Status)
 	}
-	item := buildItem(1, root, works[0])
+	item := buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.Status != ItemStatusMiss {
 		t.Fatalf("item status=%s want miss", item.Status)
 	}
@@ -749,7 +749,7 @@ func TestFinalizeKeepsPendingWhenDoubt(t *testing.T) {
 	if !ok || st.Status != PendingDoubt || st.EpLocal != 1 || st.EpTMDB != 1 {
 		t.Fatalf("pending state=%+v ok=%v", st, ok)
 	}
-	item := buildItem(1, root, works[0])
+	item := buildItem(posterRef{TaskID: 1}, root, works[0])
 	if item.Status != ItemStatusDoubt {
 		t.Fatalf("status=%s want doubt", item.Status)
 	}

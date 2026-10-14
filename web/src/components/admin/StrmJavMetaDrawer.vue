@@ -11,6 +11,7 @@ import {
   type JavWallItem,
   type JavWallItemDetail,
 } from "@/api/strmJavWall";
+import type { WallSourceRef } from "@/api/strmScrape";
 import AdminSettingsDrawer from "@/components/admin/AdminSettingsDrawer.vue";
 import AppButton from "@/components/base/AppButton.vue";
 import AppInput from "@/components/base/AppInput.vue";
@@ -28,7 +29,8 @@ import { toast } from "@/composables/useToast";
 
 const props = defineProps<{
   open: boolean;
-  taskId: number | null;
+  /** 数据源：任务 id 或本地目录源（见 api 的 WallSourceRef）。 */
+  source: number | WallSourceRef;
   item: JavWallItem | null;
   /** 任务扫描方式是「全量」时提示一句：下次扫描会覆盖手改的内容。 */
   fullSyncWipe?: boolean;
@@ -141,9 +143,9 @@ async function load() {
     state.value = "idle";
     return;
   }
-  if (!props.taskId || !props.item) {
+  if (!props.source || !props.item) {
     // 抽屉开了但没有指向某一部（正常流程不会发生，但别让界面空着）
-    console.error("[jav-wall] 打开编辑器时缺少参数", { taskId: props.taskId, item: props.item });
+    console.error("[jav-wall] 打开编辑器时缺少参数", { taskId: props.source, item: props.item });
     state.value = "error";
     loadError.value = "没有选中影片（刷新一下列表再点「编辑」）";
     return;
@@ -152,7 +154,7 @@ async function load() {
   loadError.value = "";
   detail.value = null;
   try {
-    const data = await fetchJavWallItem(props.taskId, props.item.rel_dir, props.item.stem);
+    const data = await fetchJavWallItem(props.source, props.item.rel_dir, props.item.stem);
     detail.value = data;
     // `?? []` 不是多余的：服务端（或更早的版本）可能在 actors/tags 上给 null，
     // 而 JavStringListEditor 读 `modelValue.length` —— null 会让整个抽屉渲染失败。
@@ -183,7 +185,7 @@ function measure() {
   displayWidth.value = stageEl.value.clientWidth;
 }
 
-watch(() => [props.open, props.item?.stem, props.taskId], load, { immediate: true });
+watch(() => [props.open, props.item?.stem, props.source], load, { immediate: true });
 
 // —— 裁剪交互：指针捕获拖拽（照 CoverExtractToolCard 的姿势）——
 //
@@ -227,10 +229,10 @@ function resetRect() {
 }
 
 async function saveMeta() {
-  if (!props.taskId || !props.item) return;
+  if (!props.source || !props.item) return;
   savingMeta.value = true;
   try {
-    const data = await saveJavWallMeta(props.taskId, props.item.rel_dir, props.item.stem, { ...form });
+    const data = await saveJavWallMeta(props.source, props.item.rel_dir, props.item.stem, { ...form });
     detail.value = data;
     Object.assign(form, emptyMeta(), data.meta);
     toast.success("元数据已保存（已重写 " + data.names.nfo + "）");
@@ -243,7 +245,7 @@ async function saveMeta() {
 }
 
 async function savePoster() {
-  if (!props.taskId || !props.item || !detail.value) return;
+  if (!props.source || !props.item || !detail.value) return;
   savingPoster.value = true;
   try {
     // ⚠️ **不要再换算一次**：`rect.value` 在拖动时就已经是原生像素了
@@ -252,7 +254,7 @@ async function savePoster() {
     // 存出来的 poster 与 thumb 一模一样，用户实测撞见过。
     const native = { ...rect.value };
     const data = await saveJavWallPoster(
-      props.taskId,
+      props.source,
       props.item.rel_dir,
       props.item.stem,
       native,
@@ -270,10 +272,10 @@ async function savePoster() {
 }
 
 async function rebuild() {
-  if (!props.taskId || !props.item) return;
+  if (!props.source || !props.item) return;
   rebuilding.value = true;
   try {
-    const data = await rebuildJavWallItem(props.taskId, props.item.rel_dir, props.item.stem);
+    const data = await rebuildJavWallItem(props.source, props.item.rel_dir, props.item.stem);
     detail.value = data;
     Object.assign(form, emptyMeta(), data.meta);
     rect.value = data.poster.rect;

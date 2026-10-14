@@ -75,21 +75,38 @@ func (s *Service) loadScopes() storedScopes {
 	return out
 }
 
-func (s *Service) GetScope(strmTaskID int64) Scope {
-	dirs := normalizeScopeDirs(s.loadScopes()[strconv.FormatInt(strmTaskID, 10)])
-	return Scope{StrmTaskID: strmTaskID, ExcludedDirs: dirs}
+// GetScope 读某个数据源「排除哪些目录」的名单。
+//
+// ⚠️ 入参是 `scopeKey`（`wallSource.ScopeKey()`）而不是 taskID：
+// 挂上来的本地目录也有自己的排除名单。**键沿用任务的裸十进制**，
+// 所以已存的名单原样命中，不需要迁移。
+func (s *Service) GetScope(scopeKey string) Scope {
+	key := strings.TrimSpace(scopeKey)
+	if key == "" {
+		return Scope{}
+	}
+	dirs := normalizeScopeDirs(s.loadScopes()[key])
+	// StrmTaskID 只有任务源才有意义；这里回填是为了让老的返回结构不变
+	// （前端读的是 excluded_dirs，那个字段照常给）。
+	id, _ := strconv.ParseInt(key, 10, 64)
+	return Scope{StrmTaskID: id, ExcludedDirs: dirs}
 }
 
+// UpdateScope 保存名单。`in.StrmTaskID <= 0` 表示这是**本地目录**源 ——
+// 那种情况下键由调用方通过 `in.ScopeKey` 给（见 Scope 结构）。
 func (s *Service) UpdateScope(ctx context.Context, in Scope) (Scope, error) {
-	if in.StrmTaskID <= 0 {
-		return Scope{}, domain.Errorf(domain.CodeValidation, "strm_task_id 无效")
-	}
-	if _, _, err := s.resolveTask(ctx, in.StrmTaskID); err != nil {
-		return Scope{}, err
+	key := strings.TrimSpace(in.ScopeKey)
+	if key == "" {
+		if in.StrmTaskID <= 0 {
+			return Scope{}, domain.Errorf(domain.CodeValidation, "strm_task_id 无效")
+		}
+		if _, _, err := s.resolveTask(ctx, in.StrmTaskID); err != nil {
+			return Scope{}, err
+		}
+		key = strconv.FormatInt(in.StrmTaskID, 10)
 	}
 	dirs := normalizeScopeDirs(in.ExcludedDirs)
 	scopes := s.loadScopes()
-	key := strconv.FormatInt(in.StrmTaskID, 10)
 	if len(dirs) == 0 {
 		delete(scopes, key)
 	} else {
@@ -105,14 +122,36 @@ func (s *Service) UpdateScope(ctx context.Context, in Scope) (Scope, error) {
 		}
 	}
 	// 索引属于可重建数据；任务尚未生成输出目录时也允许预先保存范围。
-	_ = s.RebuildIndex(ctx, in.StrmTaskID)
-	return Scope{StrmTaskID: in.StrmTaskID, ExcludedDirs: dirs}, nil
+	// 用 `in` 自己还原一个最小数据源（不查库）——`RebuildIndex` 只需要 Root/MediaKind/Key。
+	_ = s.RebuildIndex(ctx, &wallSrc{
+		Kind:      scopeKindOf(key),
+		Root:      in.Root,
+		MediaKind: in.MediaKind,
+		TaskID:    in.StrmTaskID,
+		LocalID:   in.LocalDirID,
+	})
+	return Scope{StrmTaskID: in.StrmTaskID, ScopeKey: key, ExcludedDirs: dirs}, nil
 }
 
-func (s *Service) ListScopeDirectories(ctx context.Context, strmTaskID int64, parent string) ([]ScopeDirectory, error) {
-	_, root, err := s.resolveTask(ctx, strmTaskID)
+// scopeKindOf 从 scopeKey 反推源类型（裸十进制 = 任务，`local-` 前缀 = 本地目录）。
+func scopeKindOf(key string) string {
+	if strings.HasPrefix(key, "local-") {
+		return "local"
+	}
+	return "task"
+}
+
+// ListScopeDirectories 列某个数据源根下的一层子目录（「刮削范围」那棵树）。
+//
+// 入参是 `*wallSrc`：本地目录源也要能用这个选择器（它的根就是用户挂上来的那个目录）。
+func (s *Service) ListScopeDirectories(ctx context.Context, ref WallSourceRef, parent string) ([]ScopeDirectory, error) {
+	src, err := s.resolveSource(ctx, ref)
 	if err != nil {
 		return nil, err
+	}
+	root := src.Root
+	if abs, aerr := filepath.Abs(root); aerr == nil {
+		root = abs
 	}
 	parent = normalizeScopeDir(parent)
 	current := root

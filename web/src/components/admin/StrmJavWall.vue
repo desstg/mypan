@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { getApiErrorMessage } from "@/api/client";
+import type { WallSourceRef } from "@/api/strmScrape";
 import {
   fetchJavWallItems,
   fetchJavWallOnlineScrapeProgress,
@@ -14,6 +15,7 @@ import {
 import AppButton from "@/components/base/AppButton.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
 import StrmJavMetaDrawer from "@/components/admin/StrmJavMetaDrawer.vue";
+import StrmJavWallDeleteModal from "@/components/admin/StrmJavWallDeleteModal.vue";
 import { confirm } from "@/composables/useConfirm";
 import { findScrollBox, useFillViewport } from "@/composables/useFillViewport";
 import { toast } from "@/composables/useToast";
@@ -36,7 +38,8 @@ import WallDetailDrawer from "@/components/admin/WallDetailDrawer.vue";
 import WallPlayer from "@/components/admin/WallPlayer.vue";
 
 const props = defineProps<{
-  taskId: number | null;
+  /** 数据源：任务 id 或 `{ local_dir_id }`（见 api 的 WallSourceRef）。 */
+  source: number | WallSourceRef;
   keyword?: string;
   sort?: string;
 }>();
@@ -89,7 +92,7 @@ function publishHiddenDirs() {
  * 「加载中…」，用户每滚一屏就看到列表闪一下没了。所以另开 `loadingMore`。
  */
 async function load(options: { append?: boolean } = {}) {
-  if (!props.taskId) {
+  if (!props.source) {
     result.value = null;
     hasMore.value = false;
     total.value = 0;
@@ -104,7 +107,7 @@ async function load(options: { append?: boolean } = {}) {
     loading.value = true;
   }
   try {
-    const next = await fetchJavWallItems(props.taskId, {
+    const next = await fetchJavWallItems(props.source, {
       category: category.value,
       keyword: props.keyword ?? "",
       sort: props.sort ?? "added_desc",
@@ -157,7 +160,7 @@ let onlinePollTimer: number | undefined;
  * 与「刷新元数据」的区别：那一条只重读本地磁盘，这一条会联网。
  */
 async function onlineScrape() {
-  if (!props.taskId || onlineScraping.value) return;
+  if (!props.source || onlineScraping.value) return;
   try {
     await confirm({
       title: "在线刮削",
@@ -183,7 +186,7 @@ async function onlineScrape() {
   let baseline: JavWallOnlineScrapeProgress | null = null;
   let alreadyRunning: JavWallOnlineScrapeProgress | null = null;
   try {
-    const now = await fetchJavWallOnlineScrapeProgress(props.taskId);
+    const now = await fetchJavWallOnlineScrapeProgress(props.source);
     if (now.running) alreadyRunning = now;
     else baseline = now;
   } catch {
@@ -198,7 +201,7 @@ async function onlineScrape() {
   onlineScraping.value = true;
   try {
     // **起任务**（接口立刻返回，活在后头跑）。结果从进度里读 —— 见 startOnlinePoll。
-    await onlineScrapeJavWall({ strm_task_id: props.taskId });
+    await onlineScrapeJavWall(props.source);
     // 不在这里等：轮询那条路会在 running 变 false 时弹结果并收尾。
     startOnlinePoll(undefined, baseline);
   } catch (error) {
@@ -248,9 +251,9 @@ function startOnlinePoll(
   // 只认一次残影（见上面）；对上一次之后就一律按真实读数判。
   let shadow: JavWallOnlineScrapeProgress | null = baseline ?? null;
   const tick = async () => {
-    if (!props.taskId) return;
+    if (!props.source) return;
     try {
-      const p = await fetchJavWallOnlineScrapeProgress(props.taskId);
+      const p = await fetchJavWallOnlineScrapeProgress(props.source);
       if (shadow && sameProgress(p, shadow)) {
         shadow = null;
         return;
@@ -310,10 +313,10 @@ onUnmounted(stopOnlinePoll);
 
 /** 「刷新元数据」= 重读本地磁盘并重列（不是重新生成；重新生成是卡片上的「重刮」）。 */
 async function refreshMeta() {
-  if (!props.taskId) return;
+  if (!props.source) return;
   refreshing.value = true;
   try {
-    result.value = await refreshJavWall(props.taskId, {
+    result.value = await refreshJavWall(props.source, {
       category: category.value,
       keyword: props.keyword ?? "",
       sort: props.sort ?? "added_desc",
@@ -335,6 +338,32 @@ function openEditor(item: JavWallItem) {
   drawerOpen.value = true;
 }
 
+// —— 删除 ——
+//
+// 点垃圾桶**不直接删**，先开确认弹窗（`StrmJavWallDeleteModal`）——那一份会去
+// 服务端取「会删掉什么」的清单摆给用户看，再让他点第二次。这是全项目唯一会
+// 删用户东西的动作，多这一道是刻意的。
+//
+// 删完不整表重列（快照可能还没过期），**只把这张卡从当前列表里摘掉**：
+// 用户马上看到它消失，滚动位置也不跳。后端那边已经作废了快照，下一次真正
+// 刷新时列表会与磁盘一致。
+const deleting = ref<JavWallItem | null>(null);
+
+function askDelete(item: JavWallItem) {
+  deleting.value = item;
+}
+
+function onDeleted() {
+  const id = deleting.value?.id;
+  deleting.value = null;
+  if (!id || !result.value) return;
+  const idx = result.value.items.findIndex((it) => it.id === id);
+  if (idx < 0) return;
+  result.value.items.splice(idx, 1);
+  result.value.total = Math.max(0, result.value.total - 1);
+  total.value = result.value.total;
+}
+
 /** 保存之后只换这一张卡（不整表重列，免得滚动位置乱跳）。 */
 function replaceItem(updated: JavWallItem) {
   if (!result.value) return;
@@ -343,10 +372,10 @@ function replaceItem(updated: JavWallItem) {
 }
 
 async function rebuild(item: JavWallItem) {
-  if (!props.taskId) return;
+  if (!props.source) return;
   busyStem.value = item.stem;
   try {
-    const detail = await rebuildJavWallItem(props.taskId, item.rel_dir, item.stem);
+    const detail = await rebuildJavWallItem(props.source, item.rel_dir, item.stem);
     replaceItem(detail.item);
     toast.success("已重刮：" + item.number);
   } catch (error) {
@@ -553,12 +582,26 @@ function resetAndLoad() {
   void load();
 }
 
-// taskId 变了只重置分类 —— 真正的重列由下面那条 watch 触发（category 也在它的源里，
-// 所以「换任务」与「换分类」各自只跑一次 load）。
-watch(() => props.taskId, () => {
+// 数据源变了只重置分类（换源总是从「全部」看起）。
+watch(() => props.source, () => {
   category.value = "";
 });
-watch([category, () => props.sort], resetAndLoad);
+// 重列：换任务 / 换分类 / 换排序都走这一条。
+//
+// ⚠️ **`props.source` 必须留在源里，不能只靠「category 会被重置」那一跳。**
+// 原来这里只有 `[category, sort]`，换任务时靠上面那条把 category 置空来顺带触发 ——
+// 可**上一个任务停在「全部」时 category 本来就是空串**，赋值等于没变、watcher 不触发，
+// 于是墙上留着上一个任务的卡片，而 `props.source` 已经换成了新任务：
+//
+//   - 从前只是「看着不对」（点开详情报「这一部不在墙上」）；
+//   - 删除做出来之后它会**删错东西** —— 点新任务页面上的旧卡片，请求带的是
+//     新任务 id + 旧任务的 rel_dir/stem，删掉的是新任务里**同名**的那个目录。
+//     2026-10-14 实测踩到：任务 112 的 SZL-034 卡片打到任务 116 上（好在那边没有
+//     同名目录，报「目录不存在」）。
+//
+// 重列期间 `loading` 为真、模板会把整片网格换成「加载中…」，所以旧卡片不会
+// 停在屏幕上被点到。
+watch([() => props.source, category, () => props.sort], resetAndLoad);
 // 关键词来自页头那个输入框：那边是 v-model 直连，这里跟着 prop 变就重列（防抖）。
 let keywordTimer: number | undefined;
 watch(() => props.keyword, () => {
@@ -681,8 +724,8 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
         role="button"
         tabindex="0"
         :title="`《${item.number || item.title}》· 点开详情`"
-        @click="wall.openJav(taskId ?? 0, item)"
-        @keydown.enter.prevent="wall.openJav(taskId ?? 0, item)"
+        @click="wall.openJav(props.source, item)"
+        @keydown.enter.prevent="wall.openJav(props.source, item)"
       >
         <div class="jav-card__cover" :class="{ 'jav-card__cover--poster': view === 'poster' }">
           <!-- 两个视图各自的 URL；都没有或加载失败 → 统一占位图。
@@ -708,6 +751,19 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
               {{ busyStem === item.stem ? "重刮中…" : "重刮" }}
             </AppButton>
           </div>
+          <!-- 删除键在**右上角**（用户要求），与底部那两颗分开：
+               它是破坏性动作，混在「编辑 / 重刮」里会点错。
+               指过去才出现（触屏上常显，否则永远点不到），点开的是确认弹窗、
+               不是直接删 —— 弹窗里会列出具体会删掉什么。 -->
+          <button
+            type="button"
+            class="jav-card__del"
+            title="删除这一部（本地文件与网盘那一份）"
+            aria-label="删除"
+            @click.stop="askDelete(item)"
+          >
+            <i class="fas fa-trash-can" />
+          </button>
           <div v-if="busyStem === item.stem" class="jav-wall__busy" />
         </div>
         <div class="jav-wall__meta">
@@ -751,11 +807,20 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
 
     <StrmJavMetaDrawer
       :open="drawerOpen"
-      :task-id="props.taskId"
+      :source="props.source"
       :item="editing"
       :full-sync-wipe="result?.full_sync_wipe ?? false"
       @close="drawerOpen = false"
       @changed="replaceItem"
+    />
+
+    <!-- 删除确认弹窗：会去服务端取「会删掉什么」的清单再让用户确认。 -->
+    <StrmJavWallDeleteModal
+      :open="deleting !== null"
+      :source="props.source"
+      :item="deleting"
+      @close="deleting = null"
+      @deleted="onDeleted"
     />
   </div>
 </template>
@@ -795,6 +860,34 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
 .jav-card:hover .jav-card__hover,
 .jav-card:focus-within .jav-card__hover { opacity: 1; }
 @media (hover: none) { .jav-card__hover { opacity: 1; } }
+
+/* 右上角的删除键。**与底部那两颗同一套显隐规矩**（悬停 / 聚焦 / 触屏常显），
+   但位置分开：它是破坏性动作，混在「编辑 / 重刮」里迟早会点错。
+   背景压一层半透明黑，因为封面深浅不定 —— 纯图标在亮封面上会看不见。 */
+.jav-card__del {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 3;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s;
+}
+.jav-card:hover .jav-card__del,
+.jav-card:focus-within .jav-card__del { opacity: 1; }
+@media (hover: none) { .jav-card__del { opacity: 1; } }
+.jav-card__del:hover { background: var(--danger); }
+.jav-card__del:focus-visible { opacity: 1; outline: 2px solid var(--danger); outline-offset: 1px; }
 .jav-wall__busy { position: absolute; inset: 0; background: rgba(15, 23, 42, 0.25); }
 /* 还没轮到取图的卡片：占住封面那块位置，免得图到之前高度塌下去、
    滚动位置跟着跳（那比多下几张图更难受）。 */

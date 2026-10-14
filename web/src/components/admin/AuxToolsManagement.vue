@@ -109,7 +109,7 @@ async function handleDrawerSave() {
              写 nfo，而「标记为正常」那一步（clearScrapedMetadata）的正则正好命中
              thumb.jpg / poster.jpg —— 把番号生成器写的图删掉。番号自己的动作在
              卡片上（编辑 / 重刮）与设置下拉里（刷新元数据）。 -->
-        <template v-if="isScrapeTab && !scrapePanelRef?.isJavTask">
+        <template v-if="isScrapeTab && !scrapePanelRef?.isJavSource">
           <!-- 补齐：给**已经刮过**的作品补新抓的剧照/演员/背景图。它必须放在页头 ——
                藏在面板里那颗 ⚙ 的下拉菜单里时用户根本找不到（实测问「在哪里」）。
                `missing_only` 策略下已刮过的作品会被正常刮削跳过，这是它们唯一的入口。 -->
@@ -137,7 +137,7 @@ async function handleDrawerSave() {
              打上游（JAVDB）补齐缺的元数据。TMDB 那两颗（开始刮削 / 补齐剧照与演员）
              在番号任务上**不能出现**：那套会往同一批目录写 nfo，而「标记为正常」
              那一步的正则正好命中 thumb.jpg / poster.jpg，会把番号生成的图删掉。 -->
-        <template v-else-if="isScrapeTab && scrapePanelRef?.isJavTask">
+        <template v-else-if="isScrapeTab && scrapePanelRef?.isJavSource">
           <AppButton
             type="button"
             variant="primary"

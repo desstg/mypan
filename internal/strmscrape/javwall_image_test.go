@@ -11,8 +11,8 @@ import (
 // 这条钉的是「卡片 140~260 px 宽、原图 376×538」那个浪费：不带 w 时服务端会把
 // 原图整个发出去，一页 50 张实测 2 MB 多、最后一张要好几秒才画完。
 func TestJavWallImageURLCarriesWidth(t *testing.T) {
-	poster := javWallImageURL(2, "有码/MKON-149", "poster.jpg", "123", "poster")
-	thumb := javWallImageURL(2, "有码/MKON-149", "thumb.jpg", "456", "thumb")
+	poster := javWallImageURL(posterRef{TaskID: 2}, "有码/MKON-149", "poster.jpg", "123", "poster")
+	thumb := javWallImageURL(posterRef{TaskID: 2}, "有码/MKON-149", "thumb.jpg", "456", "thumb")
 
 	if !strings.Contains(poster, "&w=400") {
 		t.Errorf("海报视图应当带 w=400，got %q", poster)
@@ -28,7 +28,7 @@ func TestJavWallImageURLCarriesWidth(t *testing.T) {
 
 // 没有图（rel 为空）时返回空串，不能拼出半截地址。
 func TestJavWallImageURLEmptyWhenNoPoster(t *testing.T) {
-	if got := javWallImageURL(2, "有码/MKON-149", "", "1", "poster"); got != "" {
+	if got := javWallImageURL(posterRef{TaskID: 2}, "有码/MKON-149", "", "1", "poster"); got != "" {
 		t.Errorf("没有文件名时应当是空串，got %q", got)
 	}
 }
@@ -51,7 +51,7 @@ func TestJavWallImageWidthUnknownViewFallsBack(t *testing.T) {
 // 防的是「以后有人把宽度改成 "380px" 这种带单位的写法」。
 func TestJavWallImageWidthIsPlainInt(t *testing.T) {
 	for _, view := range []string{"poster", "thumb", ""} {
-		url := javWallImageURL(1, "a", "b.jpg", "", view)
+		url := javWallImageURL(posterRef{TaskID: 1}, "a", "b.jpg", "", view)
 		idx := strings.Index(url, "&w=")
 		if idx < 0 {
 			t.Fatalf("%s 的地址里没有 w：%q", view, url)

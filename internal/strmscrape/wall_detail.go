@@ -118,8 +118,8 @@ type WallSource struct {
 }
 
 // JavWallDetail 是番号影片墙的详情。
-func (s *Service) JavWallDetail(ctx context.Context, taskID int64, relDir, stem string) (*WallDetail, error) {
-	ref, err := s.resolveJavItem(ctx, taskID, relDir, stem)
+func (s *Service) JavWallDetail(ctx context.Context, srcRef WallSourceRef, relDir, stem string) (*WallDetail, error) {
+	ref, err := s.resolveJavItem(ctx, srcRef, relDir, stem)
 	if err != nil {
 		return nil, err
 	}
@@ -233,16 +233,16 @@ func (s *Service) JavWallDetail(ctx context.Context, taskID int64, relDir, stem 
 
 	// 图：海报走既有的 /poster，剧照走 extrafanart/（本地目录）。
 	if poster := workPosterFileForDir(ref.AbsDir, names); poster != "" {
-		detail.PosterURL = posterURLFromRel(taskID, relUnder(ref.Root, poster))
+		detail.PosterURL = posterURLFromRel(ref.Src.PosterRef(), relUnder(ref.Root, poster))
 		detail.PosterRatio = imageRatio(poster)
 	}
-	detail.Previews = localPreviewURLs(taskID, ref.Root, ref.AbsDir, names)
+	detail.Previews = localPreviewURLs(ref.Src.PosterRef(), ref.Root, ref.AbsDir, names)
 
 	// 源媒体信息：文件名 + 路径（已换算成宿主机视角）+ 源文件大小与类型。
 	detail.Source = s.wallSource(ref, hasSidecar, doc)
 
 	// 播放：与卡片播放同一套（读 `.strm` 正文 + 同目录字幕）。
-	detail.Playable = s.readPlayableFiles(taskID, ref.AbsDir, ref.RelDir, []string{ref.StrmName})
+	detail.Playable = s.readPlayableFiles(ref.Src.PosterRef(), ref.AbsDir, ref.RelDir, []string{ref.StrmName})
 	if detail.Playable == nil {
 		detail.Playable = []PlayableFile{}
 	}
@@ -259,21 +259,22 @@ func (s *Service) JavWallDetail(ctx context.Context, taskID int64, relDir, stem 
 //
 // 老作品（本次改造之前刮的）磁盘上只有简版 nfo（title/year/tmdbid/plot 四个字段），
 // 所以抽屉里那些块还是空的。想补上就对该任务点一次「补齐剧照与演员」（见 BackfillImages）。
-func (s *Service) TMDBWallDetail(ctx context.Context, taskID int64, itemID string) (*WallDetail, error) {
-	if err := s.requireTmdbTask(ctx, taskID); err != nil {
-		return nil, err
-	}
-	_, root, err := s.resolveTask(ctx, taskID)
+func (s *Service) TMDBWallDetail(ctx context.Context, srcRef WallSourceRef, itemID string) (*WallDetail, error) {
+	src, err := s.resolveSource(ctx, srcRef)
 	if err != nil {
 		return nil, err
 	}
+	if err := requireTmdbSource(src); err != nil {
+		return nil, err
+	}
+	root := src.Root
 	if abs, aerr := filepath.Abs(root); aerr == nil {
 		root = abs
 	}
 
 	var g workGroup
-	err = s.withTaskIndexLock(taskID, func() error {
-		if err := s.ensureIndexLocked(ctx, taskID, root); err != nil {
+	err = s.withTaskIndexLock(src.ScopeKey(), func() error {
+		if err := s.ensureIndexLocked(ctx, src, root); err != nil {
 			return err
 		}
 		found, ferr := findWorkByID(root, itemID)
@@ -308,7 +309,7 @@ func (s *Service) TMDBWallDetail(ctx context.Context, taskID int64, itemID strin
 			detail.ScoreMax = full.Ratings.Rating.Max
 			detail.Votes = full.Ratings.Rating.Votes
 		}
-		thumbs := actorPhotoURLs(taskID, root, g, mediaType, full)
+		thumbs := actorPhotoURLs(src.PosterRef(), root, g, mediaType, full)
 		for _, a := range full.Actors {
 			name := strings.TrimSpace(a.Name)
 			if name == "" {
@@ -346,13 +347,13 @@ func (s *Service) TMDBWallDetail(ctx context.Context, taskID int64, itemID strin
 	}
 
 	posterRel := itemPosterRel(root, g, mediaType)
-	detail.PosterURL = posterURLFromRel(taskID, posterRel)
+	detail.PosterURL = posterURLFromRel(src.PosterRef(), posterRel)
 	if posterRel != "" {
 		detail.PosterRatio = imageRatio(filepath.Join(root, filepath.FromSlash(posterRel)))
 	}
 	// 剧照与背景图（本地目录）。背景图**前端不渲染**，见 WallDetail.FanartURL 的注释。
-	detail.Previews = stillURLs(taskID, root, g.absDir)
-	detail.FanartURL = fanartURL(taskID, root, g)
+	detail.Previews = stillURLs(src.PosterRef(), root, g.absDir)
+	detail.FanartURL = fanartURL(src.PosterRef(), root, g)
 
 	// 源媒体信息：文件名 / 路径 / **网盘源文件**的大小与类型。
 	//
@@ -363,7 +364,7 @@ func (s *Service) TMDBWallDetail(ctx context.Context, taskID int64, itemID strin
 
 	// 播放：TMDB 墙的 item 可能是多集，strm_name 为空时列整个目录
 	// （与 /items/playable 那条接口同一套判断）。
-	detail.Playable = s.playableForWork(taskID, root, g)
+	detail.Playable = s.playableForWork(src.PosterRef(), root, g)
 	if detail.Playable == nil {
 		detail.Playable = []PlayableFile{}
 	}
@@ -445,7 +446,7 @@ func workStrmPath(g workGroup) string {
 }
 
 // playableForWork 从一个 workGroup 取可播文件：单文件作品只读那一个，多集列目录。
-func (s *Service) playableForWork(taskID int64, root string, g workGroup) []PlayableFile {
+func (s *Service) playableForWork(ref posterRef, root string, g workGroup) []PlayableFile {
 	// ⚠️ **按 entries 的绝对路径取，不能按作品目录列目录**。
 	//
 	// 剧集的 `.strm` 在 `Season 01/` 子目录里，而作品目录（g.absDir）是它的**上一层**
@@ -471,7 +472,7 @@ func (s *Service) playableForWork(taskID int64, root string, g workGroup) []Play
 	for _, it := range items {
 		// 每一集可能与别的集**不在同一个目录**（Season 01 / Season 02），
 		// 所以逐条按它自己那层取（字幕也是按目录列的）。
-		got := s.readPlayableFiles(taskID, filepath.Dir(it.abs), it.rel, []string{filepath.Base(it.abs)})
+		got := s.readPlayableFiles(ref, filepath.Dir(it.abs), it.rel, []string{filepath.Base(it.abs)})
 		out = append(out, got...)
 	}
 	return out
@@ -528,7 +529,7 @@ func workPosterFileForDir(absDir string, names emby.Names) string {
 //
 // 剧照是**本地目录**（Emby / Kodi 的约定，见 emby.ExtraFanartDir），
 // 与海报走同一个本地文件出口。目录不存在就返回空 —— 「有就显示」。
-func localPreviewURLs(taskID int64, root, absDir string, names emby.Names) []string {
+func localPreviewURLs(ref posterRef, root, absDir string, names emby.Names) []string {
 	// 平铺布局没有 extrafanart（它是**目录级**约定，一个目录只能有一份，
 	// 见 emby.TargetNames 的说明），所以 extra_dir 为空就直接返回。
 	extra := strings.TrimSpace(names.ExtraDir)
@@ -557,7 +558,7 @@ func localPreviewURLs(taskID int64, root, absDir string, names emby.Names) []str
 	out := make([]string, 0, len(names2))
 	for _, name := range names2 {
 		rel := relUnder(root, filepath.Join(dir, name))
-		out = append(out, posterURLFromRel(taskID, filepath.ToSlash(rel)))
+		out = append(out, posterURLFromRel(ref, filepath.ToSlash(rel)))
 	}
 	return out
 }

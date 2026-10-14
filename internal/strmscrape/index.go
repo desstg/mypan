@@ -19,24 +19,67 @@ import (
 const indexSchemaVersion = "2"
 
 // TaskIndexPath 返回任务刮削索引库路径：data/strmscrape/{task_id}.sqlite
+//
+// 与 `SourceIndexPath` 的关系：任务那侧的 ScopeKey 就是裸十进制，所以两者对任务
+// 给出**同一个**文件名 —— 已经存在的 `5.sqlite` 会被原样复用，不需要迁移。
 func TaskIndexPath(dataDir string, taskID int64) string {
-	return filepath.Join(strings.TrimSpace(dataDir), "strmscrape", strconv.FormatInt(taskID, 10)+".sqlite")
+	return SourceIndexPath(dataDir, strconv.FormatInt(taskID, 10))
+}
+
+// SourceIndexPath 返回某个**数据源**的刮削索引库路径：data/strmscrape/{scopeKey}.sqlite
+//
+// `scopeKey` 是 `wallSrc.ScopeKey()`：任务是裸十进制（`"5"`），挂上来的本地目录
+// 是 `local-<hex>`。两者都只含 `[0-9a-z-]`，所以直接当文件名是安全的 ——
+// 这里**不做**哈希：哈希会让已经存在的 `5.sqlite` 全部作废（用户升级后要重扫一遍），
+// 而键本身已经是「文件名安全」的。
+func SourceIndexPath(dataDir, scopeKey string) string {
+	key := sanitizeIndexKey(scopeKey)
+	if key == "" {
+		key = "unknown"
+	}
+	return filepath.Join(strings.TrimSpace(dataDir), "strmscrape", key+".sqlite")
+}
+
+// sanitizeIndexKey 把 ScopeKey 收敛成一个安全的文件名片段。
+//
+// 只放行 `[0-9a-z-]`（大写转小写）：本地目录的 id 是十六进制、任务是十进制，
+// 两者本来就在这个字符集里；这一层是防「将来有人往键里塞别的东西」——
+// 键一旦带 `/` 或 `..`，索引库就会被写到 data 目录之外。
+func sanitizeIndexKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	var b strings.Builder
+	b.Grow(len(key))
+	for _, r := range key {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r == '-':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // RemoveTaskIndex 删除任务索引及其 WAL/SHM（任务删除时调用）。
 func RemoveTaskIndex(dataDir string, taskID int64) {
-	base := TaskIndexPath(dataDir, taskID)
+	RemoveSourceIndex(dataDir, strconv.FormatInt(taskID, 10))
+}
+
+// RemoveSourceIndex 删除某个数据源的索引及其 WAL/SHM。
+//
+// 三个文件一起删：SQLite 的 WAL/SHM 留着会让下一次打开读到**已经删掉的库的**
+// 残留页（Windows 上尤其明显，文件锁还没释放时更是）。
+func RemoveSourceIndex(dataDir, scopeKey string) {
+	base := SourceIndexPath(dataDir, scopeKey)
 	for _, p := range []string{base, base + "-wal", base + "-shm"} {
 		_ = os.Remove(p)
 	}
 }
 
-func (s *Service) indexPath(taskID int64) string {
-	return TaskIndexPath(s.dataDir, taskID)
+func (s *Service) indexPath(scopeKey string) string {
+	return SourceIndexPath(s.dataDir, scopeKey)
 }
 
-func (s *Service) withTaskIndexLock(taskID int64, fn func() error) error {
-	v, _ := s.indexLocks.LoadOrStore(taskID, &sync.Mutex{})
+func (s *Service) withTaskIndexLock(scopeKey string, fn func() error) error {
+	v, _ := s.indexLocks.LoadOrStore(scopeKey, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
@@ -101,8 +144,8 @@ CREATE TABLE IF NOT EXISTS items (
 	return err
 }
 
-func (s *Service) indexFileExists(taskID int64) bool {
-	st, err := os.Stat(s.indexPath(taskID))
+func (s *Service) indexFileExists(scopeKey string) bool {
+	st, err := os.Stat(s.indexPath(scopeKey))
 	return err == nil && !st.IsDir()
 }
 
@@ -128,8 +171,8 @@ func itemPosterRel(root string, g workGroup, mediaType string) string {
 	return filepath.ToSlash(relUnder(root, workPosterFile(g, mediaType)))
 }
 
-func posterURLFromRel(taskID int64, rel string) string {
-	return posterURLFromRelWidth(taskID, rel, 0)
+func posterURLFromRel(ref posterRef, rel string) string {
+	return posterURLFromRelWidth(ref, rel, 0)
 }
 
 // posterURLFromRelWidth 同上，但带一个**显示宽度**（CSS 像素）。
@@ -139,12 +182,12 @@ func posterURLFromRel(taskID int64, rel string) string {
 //
 // 详情抽屉里的图（演员头像 w185、剧照 w780）比卡片海报大得多，不缩的话一次开抽屉
 // 就是几 MB，所以那一侧拼 URL 时带上它。
-func posterURLFromRelWidth(taskID int64, rel string, width int) string {
+func posterURLFromRelWidth(ref posterRef, rel string, width int) string {
 	rel = strings.TrimSpace(rel)
 	if rel == "" {
 		return ""
 	}
-	base := fmt.Sprintf("/api/admin/strm-scrape/poster?strm_task_id=%d&rel=%s", taskID, pathEscape(rel))
+	base := "/api/admin/strm-scrape/poster?" + ref.query() + "&rel=" + pathEscape(rel)
 	if width > 0 {
 		return fmt.Sprintf("%s&w=%d", base, width)
 	}
@@ -158,33 +201,24 @@ func boolToInt(v bool) int {
 	return 0
 }
 
-// RebuildIndex 扫盘重建该任务索引。
+// RebuildIndex 扫盘重建某个**数据源**的索引。
 //
-// 只给 tmdb 影片任务用：番号那套不落索引库（直接扫本地目录，见 javWallRows），
-// 给番号任务建索引只会留下一个没人读的 sqlite。
-func (s *Service) RebuildIndex(ctx context.Context, strmTaskID int64) error {
-	if strmTaskID <= 0 {
-		return domain.Errorf(domain.CodeValidation, "strm_task_id 无效")
-	}
-	if task, _, err := s.resolveTask(ctx, strmTaskID); err != nil {
+// 只给 tmdb 那面墙用：番号那套不落索引库（直接扫本地目录，见 javWallRows），
+// 给它建索引只会留下一个没人读的 sqlite。
+func (s *Service) RebuildIndex(ctx context.Context, src *wallSrc) error {
+	if err := requireTmdbSource(src); err != nil {
 		return err
-	} else if task.MediaKind == javMediaKind {
-		return errNotTmdbTask
 	}
-	return s.withTaskIndexLock(strmTaskID, func() error {
-		return s.rebuildIndexLocked(ctx, strmTaskID)
+	return s.withTaskIndexLock(src.ScopeKey(), func() error {
+		return s.rebuildIndexLocked(ctx, src)
 	})
 }
 
-func (s *Service) rebuildIndexLocked(ctx context.Context, strmTaskID int64) error {
+func (s *Service) rebuildIndexLocked(ctx context.Context, src *wallSrc) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, root, err := s.resolveTask(ctx, strmTaskID)
-	if err != nil {
-		return err
-	}
-	root, err = filepath.Abs(root)
+	root, err := filepath.Abs(src.Root)
 	if err != nil {
 		return err
 	}
@@ -202,19 +236,19 @@ func (s *Service) rebuildIndexLocked(ctx context.Context, strmTaskID int64) erro
 	if err != nil {
 		return err
 	}
-	works = filterWorksByScope(works, s.GetScope(strmTaskID).ExcludedDirs)
+	works = filterWorksByScope(works, s.GetScope(src.ScopeKey()).ExcludedDirs)
 	items := make([]Item, 0, len(works))
 	rels := make([]string, 0, len(works))
 	for _, g := range works {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		it := buildItem(strmTaskID, root, g)
+		it := buildItem(src.PosterRef(), root, g)
 		items = append(items, it)
 		rels = append(rels, itemPosterRel(root, g, it.MediaType))
 	}
 
-	db, err := openTaskIndexDB(s.indexPath(strmTaskID))
+	db, err := openTaskIndexDB(s.indexPath(src.ScopeKey()))
 	if err != nil {
 		return err
 	}
@@ -284,15 +318,15 @@ ON CONFLICT(id) DO UPDATE SET
 	return err
 }
 
-func (s *Service) upsertIndexItem(ctx context.Context, strmTaskID int64, root string, g workGroup) {
-	_ = s.withTaskIndexLock(strmTaskID, func() error {
+func (s *Service) upsertIndexItem(ctx context.Context, src *wallSrc, root string, g workGroup) {
+	_ = s.withTaskIndexLock(src.ScopeKey(), func() error {
 		if abs, err := filepath.Abs(root); err == nil {
 			root = abs
 		}
-		if !s.indexFileExists(strmTaskID) {
-			return s.rebuildIndexLocked(ctx, strmTaskID)
+		if !s.indexFileExists(src.ScopeKey()) {
+			return s.rebuildIndexLocked(ctx, src)
 		}
-		db, err := openTaskIndexDB(s.indexPath(strmTaskID))
+		db, err := openTaskIndexDB(s.indexPath(src.ScopeKey()))
 		if err != nil {
 			return err
 		}
@@ -303,10 +337,10 @@ func (s *Service) upsertIndexItem(ctx context.Context, strmTaskID int64, root st
 				storedAbs = abs
 			}
 			if storedAbs != root {
-				return s.rebuildIndexLocked(ctx, strmTaskID)
+				return s.rebuildIndexLocked(ctx, src)
 			}
 		}
-		it := buildItem(strmTaskID, root, g)
+		it := buildItem(src.PosterRef(), root, g)
 		rel := itemPosterRel(root, g, it.MediaType)
 		tx, err := db.Begin()
 		if err != nil {
@@ -361,7 +395,7 @@ func itemListOrderBy(sort ItemListSort) string {
 	}
 }
 
-func scanIndexItems(rows *sql.Rows, strmTaskID int64) ([]Item, error) {
+func scanIndexItems(rows *sql.Rows, ref posterRef) ([]Item, error) {
 	out := make([]Item, 0, 128)
 	for rows.Next() {
 		var it Item
@@ -383,7 +417,7 @@ func scanIndexItems(rows *sql.Rows, strmTaskID int64) ([]Item, error) {
 			y := int(year.Int64)
 			it.Year = &y
 		}
-		it.PosterURL = posterURLFromRel(strmTaskID, posterRel)
+		it.PosterURL = posterURLFromRel(ref, posterRel)
 		out = append(out, it)
 	}
 	return out, rows.Err()
@@ -402,8 +436,8 @@ FROM items
 	return stats, err
 }
 
-func (s *Service) listIndexItems(strmTaskID int64, query ItemListQuery) (ItemListResult, error) {
-	db, err := openTaskIndexDB(s.indexPath(strmTaskID))
+func (s *Service) listIndexItems(scopeKey string, ref posterRef, query ItemListQuery) (ItemListResult, error) {
+	db, err := openTaskIndexDB(s.indexPath(scopeKey))
 	if err != nil {
 		return ItemListResult{}, err
 	}
@@ -438,7 +472,7 @@ FROM items
 		return ItemListResult{}, err
 	}
 	defer rows.Close()
-	items, err := scanIndexItems(rows, strmTaskID)
+	items, err := scanIndexItems(rows, ref)
 	if err != nil {
 		return ItemListResult{}, err
 	}
@@ -452,24 +486,24 @@ FROM items
 	}, nil
 }
 
-func (s *Service) ensureIndexLocked(ctx context.Context, strmTaskID int64, root string) error {
+func (s *Service) ensureIndexLocked(ctx context.Context, src *wallSrc, root string) error {
 	rootAbs := root
 	if abs, err := filepath.Abs(root); err == nil {
 		rootAbs = abs
 	}
-	if !s.indexFileExists(strmTaskID) {
-		return s.rebuildIndexLocked(ctx, strmTaskID)
+	if !s.indexFileExists(src.ScopeKey()) {
+		return s.rebuildIndexLocked(ctx, src)
 	}
-	db, err := openTaskIndexDB(s.indexPath(strmTaskID))
+	db, err := openTaskIndexDB(s.indexPath(src.ScopeKey()))
 	if err != nil {
-		return s.rebuildIndexLocked(ctx, strmTaskID)
+		return s.rebuildIndexLocked(ctx, src)
 	}
 	defer db.Close()
 	if ver, ok := readIndexMeta(db, "schema"); !ok || ver != indexSchemaVersion {
 		// 任务索引是可重建缓存，不做列迁移；先关闭并删除旧库，兼容 Windows 文件锁。
 		_ = db.Close()
-		RemoveTaskIndex(s.dataDir, strmTaskID)
-		return s.rebuildIndexLocked(ctx, strmTaskID)
+		RemoveSourceIndex(s.dataDir, src.ScopeKey())
+		return s.rebuildIndexLocked(ctx, src)
 	}
 	if stored, ok := readIndexMeta(db, "root"); ok && stored != "" {
 		storedAbs := stored
@@ -477,13 +511,13 @@ func (s *Service) ensureIndexLocked(ctx context.Context, strmTaskID int64, root 
 			storedAbs = abs
 		}
 		if storedAbs != rootAbs {
-			return s.rebuildIndexLocked(ctx, strmTaskID)
+			return s.rebuildIndexLocked(ctx, src)
 		}
 	}
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM items`).Scan(&n); err != nil || n == 0 {
 		// 空索引常见于目录当时为空或重建中断；再扫一次对齐磁盘
-		return s.rebuildIndexLocked(ctx, strmTaskID)
+		return s.rebuildIndexLocked(ctx, src)
 	}
 	return nil
 }

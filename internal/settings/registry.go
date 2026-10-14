@@ -87,6 +87,14 @@ const (
 	// 取末条规则那个行为。一旦用户保存过，就是他当场勾选的那份名单。
 	// 细节与「为什么不能用空串表示空列表」见 javwallhidden.go。
 	KeyStrmJavWallHiddenDirs = "strm_jav_wall_hidden_dirs"
+	// KeyStrmWallLocalDirs 是「海报墙上额外挂的**本地目录**」（JSON 数组，见 walldirs.go）。
+	//
+	// 这些目录不在任何 STRM 任务之下（是别的工具产出的媒体库目录），所以不能靠
+	// `resolveTask` 反查；用户注册一份，墙的下拉里就多一个可选项。
+	//
+	// Default 用 `[]` 而不是空串：与 KeyStrmJavWallHiddenDirs 那个坑同源 ——
+	// 空串在本项目里表示「没存过」，而「一个本地目录都没加」是个有效状态。
+	KeyStrmWallLocalDirs     = "strm_wall_local_dirs"
 	KeyLocalUploadEnabled    = "local_upload_enabled"
 	KeyLocalUploadMappings   = "local_upload_mappings"
 	KeyCoverExtractEnabled   = "cover_extract_enabled"
@@ -485,6 +493,15 @@ func defaultSpecs() []Spec {
 			Default:   "",
 			Hidden:    true,
 			normalize: normalizeJavWallHiddenDirsValue,
+		},
+		// 海报墙上挂的本地目录。同上：由墙页头那颗按钮读写，不该在「系统设置」的
+		// 通用表单里露出一个裸 JSON 输入框。
+		{
+			Key:       KeyStrmWallLocalDirs,
+			Type:      TypeString,
+			Default:   "[]",
+			Hidden:    true,
+			normalize: normalizeWallLocalDirsValue,
 		},
 
 		selectSpec(KeyStrmMetadataSyncMode, "strm", "元数据同步策略", "local_primary=保留本地并从云端补缺；cloud_primary=本地目录与云端保持一致；bidirectional=本地与云端互相补缺。", "local_primary", []Option{

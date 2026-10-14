@@ -5,6 +5,7 @@ import {
   type PlayableFile,
   type StrmScrapeItem,
   type WallDetail,
+  type WallSourceRef,
 } from "@/api/strmScrape";
 import { fetchJavWallItemDetail } from "@/api/strmJavWall";
 import { toPlayableCandidates } from "@/components/admin/wallPlayable";
@@ -91,14 +92,18 @@ export function useWallDetail() {
     await present(item.title, () => fetchStrmScrapeItemDetail(taskId, item.id));
   }
 
-  /** 番号影片墙。 */
+  /** 番号影片墙。`source` 是任务 id 或本地目录源（见 api 的 WallSourceRef）。 */
   async function openJav(
-    taskId: number,
+    source: number | WallSourceRef,
     item: { id: string; rel_dir: string; stem: string; number?: string; title?: string },
   ) {
-    if (!taskId) return;
+    if (typeof source === "number" ? !source : !source.local_dir_id && !source.strm_task_id) return;
     await present(item.number || item.title || item.stem, () =>
-      fetchJavWallItemDetail({ strm_task_id: taskId, rel_dir: item.rel_dir, stem: item.stem }),
+      fetchJavWallItemDetail({
+        ...(typeof source === "number" ? { strm_task_id: source } : source),
+        rel_dir: item.rel_dir,
+        stem: item.stem,
+      }),
     );
   }
 

@@ -30,13 +30,40 @@ func javWallQuery(r *http.Request) strmscrape.JavWallListQuery {
 	}
 }
 
-func javWallTaskID(r *http.Request) (int64, error) {
-	raw := strings.TrimSpace(r.URL.Query().Get("strm_task_id"))
-	id, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || id <= 0 {
-		return 0, domain.Errorf(domain.CodeValidation, "缺少或非法的 strm_task_id")
+// javWallSourceRef 从 query 里读数据源选择器（`local_dir_id` 优先，其次 `strm_task_id`）。
+//
+// 两个都不给时报错 —— 墙必须有数据源才能列东西。
+func javWallSourceRef(r *http.Request) (strmscrape.WallSourceRef, error) {
+	ref := strmscrape.WallSourceRef{
+		StrmTaskID: qInt64(r, "strm_task_id"),
+		LocalDirID: strings.TrimSpace(r.URL.Query().Get("local_dir_id")),
 	}
-	return id, nil
+	if ref.StrmTaskID <= 0 && ref.LocalDirID == "" {
+		return ref, domain.Errorf(domain.CodeValidation, "缺少 strm_task_id 或 local_dir_id")
+	}
+	return ref, nil
+}
+
+// javWallOptionalSourceRef 同上去掉「必须给一个」的校验：给不出就返回零值
+// （读侧按「没有数据源」处理，比如「整档隐藏」在 STRM 设置页那一行）。
+func javWallOptionalSourceRef(r *http.Request) strmscrape.WallSourceRef {
+	ref := strmscrape.WallSourceRef{
+		StrmTaskID: qInt64(r, "strm_task_id"),
+		LocalDirID: strings.TrimSpace(r.URL.Query().Get("local_dir_id")),
+	}
+	if ref.StrmTaskID <= 0 {
+		ref.StrmTaskID = 0
+	}
+	return ref
+}
+
+// qInt64 读一个 int64 query 参数（缺失 / 非法都当 0）。
+func qInt64(r *http.Request, key string) int64 {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get(key)), 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
 }
 
 // listJavWallItems 列卡片。
@@ -44,12 +71,12 @@ func (h *Handler) listJavWallItems(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, err := javWallTaskID(r)
+	srcRef, err := javWallSourceRef(r)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	out, err := h.strmScrape.ListJavWall(r.Context(), taskID, javWallQuery(r), false)
+	out, err := h.strmScrape.ListJavWall(r.Context(), srcRef, javWallQuery(r), false)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -65,12 +92,12 @@ func (h *Handler) refreshJavWall(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, err := javWallTaskID(r)
+	srcRef, err := javWallSourceRef(r)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	out, err := h.strmScrape.ListJavWall(r.Context(), taskID, javWallQuery(r), true)
+	out, err := h.strmScrape.ListJavWall(r.Context(), srcRef, javWallQuery(r), true)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -86,8 +113,7 @@ func (h *Handler) listJavWallHiddenDirs(w http.ResponseWriter, r *http.Request) 
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID := javWallOptionalTaskID(r)
-	out, err := h.strmScrape.ListJavWallHiddenDirs(r.Context(), taskID)
+	out, err := h.strmScrape.ListJavWallHiddenDirs(r.Context(), javWallOptionalSourceRef(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -102,17 +128,18 @@ func (h *Handler) updateJavWallHiddenDirs(w http.ResponseWriter, r *http.Request
 	}
 	var body struct {
 		StrmTaskID int64    `json:"strm_task_id"`
+		LocalDirID string   `json:"local_dir_id,omitempty"`
 		Dirs       []string `json:"dirs"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeErr(w, err)
 		return
 	}
-	taskID := body.StrmTaskID
-	if taskID < 0 {
-		taskID = 0
+	srcRef := strmscrape.WallSourceRef{StrmTaskID: body.StrmTaskID, LocalDirID: strings.TrimSpace(body.LocalDirID)}
+	if srcRef.StrmTaskID < 0 {
+		srcRef.StrmTaskID = 0
 	}
-	out, err := h.strmScrape.UpdateJavWallHiddenDirs(r.Context(), taskID, body.Dirs)
+	out, err := h.strmScrape.UpdateJavWallHiddenDirs(r.Context(), srcRef, body.Dirs)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -142,17 +169,20 @@ func javWallOptionalTaskID(r *http.Request) int64 {
 // 「unknown field」（`decodeJSON` 开了 DisallowUnknownFields），用户看到的是
 // 一句「请求体解析失败：json: unknown field "rect"」。这个坑实测踩过。
 type javWallRef struct {
-	StrmTaskID int64  `json:"strm_task_id"`
+	StrmTaskID int64 `json:"strm_task_id"`
+	// LocalDirID 非空时优先（挂上来的本地目录源）。
+	LocalDirID string `json:"local_dir_id,omitempty"`
 	RelDir     string `json:"rel_dir"`
 	Stem       string `json:"stem"`
 }
 
-// normalize 校验并返回规范化的三元组。
-func (ref javWallRef) normalize() (int64, string, string, error) {
-	if ref.StrmTaskID <= 0 {
-		return 0, "", "", domain.Errorf(domain.CodeValidation, "缺少 strm_task_id")
+// normalize 校验并返回 (数据源, relDir, stem)。
+func (ref javWallRef) normalize() (strmscrape.WallSourceRef, string, string, error) {
+	src := strmscrape.WallSourceRef{StrmTaskID: ref.StrmTaskID, LocalDirID: strings.TrimSpace(ref.LocalDirID)}
+	if src.StrmTaskID <= 0 && src.LocalDirID == "" {
+		return src, "", "", domain.Errorf(domain.CodeValidation, "缺少 strm_task_id 或 local_dir_id")
 	}
-	return ref.StrmTaskID, ref.RelDir, ref.Stem, nil
+	return src, ref.RelDir, ref.Stem, nil
 }
 
 // getJavWallItem 读单品（编辑器打开时用）。
@@ -160,13 +190,13 @@ func (h *Handler) getJavWallItem(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, err := javWallTaskID(r)
+	srcRef, err := javWallSourceRef(r)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	q := r.URL.Query()
-	out, err := h.strmScrape.JavWallItem(r.Context(), taskID, q.Get("rel_dir"), q.Get("stem"))
+	out, err := h.strmScrape.JavWallItem(r.Context(), srcRef, q.Get("rel_dir"), q.Get("stem"))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -187,12 +217,12 @@ func (h *Handler) saveJavWallMeta(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	taskID, relDir, stem, err := body.javWallRef.normalize()
+	srcRef, relDir, stem, err := body.javWallRef.normalize()
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	out, err := h.strmScrape.SaveJavWallMeta(r.Context(), taskID, relDir, stem, body.Meta)
+	out, err := h.strmScrape.SaveJavWallMeta(r.Context(), srcRef, relDir, stem, body.Meta)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -216,7 +246,7 @@ func (h *Handler) saveJavWallPoster(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	taskID, relDir, stem, err := body.javWallRef.normalize()
+	srcRef, relDir, stem, err := body.javWallRef.normalize()
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -230,7 +260,7 @@ func (h *Handler) saveJavWallPoster(w http.ResponseWriter, r *http.Request) {
 			body.Rect.X, body.Rect.Y, body.Rect.W, body.Rect.H))
 		return
 	}
-	out, err := h.strmScrape.SaveJavWallPoster(r.Context(), taskID, relDir, stem, body.Rect, body.Watermarks)
+	out, err := h.strmScrape.SaveJavWallPoster(r.Context(), srcRef, relDir, stem, body.Rect, body.Watermarks)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -248,12 +278,12 @@ func (h *Handler) rebuildJavWallItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	taskID, relDir, stem, err := body.normalize()
+	srcRef, relDir, stem, err := body.normalize()
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	out, err := h.strmScrape.RebuildJavWallItem(r.Context(), taskID, relDir, stem)
+	out, err := h.strmScrape.RebuildJavWallItem(r.Context(), srcRef, relDir, stem)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -274,7 +304,7 @@ func (h *Handler) onlineScrapeJavWall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	taskID, _, _, err := body.normalize()
+	srcRef, _, _, err := body.normalize()
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -283,7 +313,7 @@ func (h *Handler) onlineScrapeJavWall(w http.ResponseWriter, r *http.Request) {
 	//
 	// 原来是同步跑完再返回 —— 108 部要十几分钟，群晖那层反代等不了就回 502
 	// （实测跑到 20 部左右）。见 StartJavWallOnlineScrape 的说明。
-	out, err := h.strmScrape.StartJavWallOnlineScrape(r.Context(), taskID)
+	out, err := h.strmScrape.StartJavWallOnlineScrape(r.Context(), srcRef)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -296,8 +326,7 @@ func (h *Handler) getJavWallOnlineProgress(w http.ResponseWriter, r *http.Reques
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("strm_task_id")), 10, 64)
-	writeOK(w, h.strmScrape.JavOnlineScrapeProgressOf(taskID))
+	writeOK(w, h.strmScrape.JavOnlineScrapeProgressByRef(javWallOptionalSourceRef(r)))
 }
 
 func (h *Handler) refreshJavWallItem(w http.ResponseWriter, r *http.Request) {
@@ -309,12 +338,12 @@ func (h *Handler) refreshJavWallItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	taskID, relDir, stem, err := body.normalize()
+	srcRef, relDir, stem, err := body.normalize()
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	out, err := h.strmScrape.RefreshJavWallItem(r.Context(), taskID, relDir, stem)
+	out, err := h.strmScrape.RefreshJavWallItem(r.Context(), srcRef, relDir, stem)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -330,13 +359,68 @@ func (h *Handler) getJavWallItemDetail(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, err := javWallTaskID(r)
+	srcRef, err := javWallSourceRef(r)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	q := r.URL.Query()
-	out, err := h.strmScrape.JavWallDetail(r.Context(), taskID, q.Get("rel_dir"), q.Get("stem"))
+	out, err := h.strmScrape.JavWallDetail(r.Context(), srcRef, q.Get("rel_dir"), q.Get("stem"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, out)
+}
+
+// previewJavWallDelete 「删除」前的**会删掉什么**。不写任何东西。
+//
+// 单独一步而不是让前端自己拼文案：删什么由服务端算（哪些文件属于这一部、
+// 目录会不会一起删、网盘那边删的是哪个路径），前端只负责展示与二次确认。
+// 前端拼的话，两边的判据迟早会漂 —— 而这一漂就是「提示说删 3 个文件、
+// 实际删了 12 个」这种事故。
+func (h *Handler) previewJavWallDelete(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	var body javWallRef
+	if err := decodeJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	srcRef, relDir, stem, err := body.normalize()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	out, err := h.strmScrape.PreviewJavWallDelete(r.Context(), srcRef, relDir, stem)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, out)
+}
+
+// deleteJavWallItem 「删除」：本地文件 + 目录（空了才删）+ 网盘那一份目录。
+//
+// ⚠️ 这个接口**会真的删东西**（本地不可恢复、网盘进回收站）。前端必须先走
+// preview 那条、把清单摆给用户、拿到确认之后才调这里 —— 服务端不重复弹窗，
+// 但也**不额外做「确认令牌」那一层**：这是后台管理接口，调用方就是管理员自己。
+func (h *Handler) deleteJavWallItem(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	var body javWallRef
+	if err := decodeJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	srcRef, relDir, stem, err := body.normalize()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	out, err := h.strmScrape.DeleteJavWallItem(r.Context(), srcRef, relDir, stem)
 	if err != nil {
 		writeErr(w, err)
 		return

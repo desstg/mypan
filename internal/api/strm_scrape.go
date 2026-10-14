@@ -57,12 +57,29 @@ func (h *Handler) getStrmScrapeScope(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("strm_task_id")), 10, 64)
-	if taskID <= 0 {
-		writeErr(w, domain.Errorf(domain.CodeValidation, "strm_task_id 无效"))
+	srcRef, err := strmScrapeSourceRef(r)
+	if err != nil {
+		writeErr(w, err)
 		return
 	}
-	writeOK(w, h.strmScrape.GetScope(taskID))
+	key, err := h.strmScrape.ScopeKeyOf(r.Context(), srcRef)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, h.strmScrape.GetScope(key))
+}
+
+// strmScrapeSourceRef 从 query 里读数据源选择器（`local_dir_id` 优先）。
+func strmScrapeSourceRef(r *http.Request) (strmscrape.WallSourceRef, error) {
+	ref := strmscrape.WallSourceRef{
+		StrmTaskID: qInt64(r, "strm_task_id"),
+		LocalDirID: strings.TrimSpace(r.URL.Query().Get("local_dir_id")),
+	}
+	if ref.StrmTaskID <= 0 && ref.LocalDirID == "" {
+		return ref, domain.Errorf(domain.CodeValidation, "缺少 strm_task_id 或 local_dir_id")
+	}
+	return ref, nil
 }
 
 func (h *Handler) updateStrmScrapeScope(w http.ResponseWriter, r *http.Request) {
@@ -86,8 +103,12 @@ func (h *Handler) listStrmScrapeScopeDirectories(w http.ResponseWriter, r *http.
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("strm_task_id")), 10, 64)
-	dirs, err := h.strmScrape.ListScopeDirectories(r.Context(), taskID, r.URL.Query().Get("parent"))
+	srcRef, err := strmScrapeSourceRef(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	dirs, err := h.strmScrape.ListScopeDirectories(r.Context(), srcRef, r.URL.Query().Get("parent"))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -254,9 +275,14 @@ func (h *Handler) getStrmScrapePoster(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("strm_task_id")), 10, 64)
+	// 数据源：`local_dir_id` 优先（挂上来的本地目录也能取图）。
+	// 只给 `strm_task_id` 的老 URL 行为逐字不变。
+	srcRef := strmscrape.WallSourceRef{
+		StrmTaskID: qInt64(r, "strm_task_id"),
+		LocalDirID: strings.TrimSpace(r.URL.Query().Get("local_dir_id")),
+	}
 	rel := strings.TrimSpace(r.URL.Query().Get("rel"))
-	path, err := h.strmScrape.ResolvePosterFile(r.Context(), taskID, rel)
+	path, err := h.strmScrape.ResolvePosterFile(r.Context(), srcRef, rel)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -318,9 +344,77 @@ func (h *Handler) getStrmScrapeItemDetail(w http.ResponseWriter, r *http.Request
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("strm_task_id")), 10, 64)
+	srcRef := strmscrape.WallSourceRef{
+		StrmTaskID: qInt64(r, "strm_task_id"),
+		LocalDirID: strings.TrimSpace(r.URL.Query().Get("local_dir_id")),
+	}
 	itemID := strings.TrimSpace(r.URL.Query().Get("item_id"))
-	out, err := h.strmScrape.TMDBWallDetail(r.Context(), taskID, itemID)
+	out, err := h.strmScrape.TMDBWallDetail(r.Context(), srcRef, itemID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, out)
+}
+
+// tmdbWallRef 是「哪一部作品」那两个字段。
+//
+// 与番号墙的 javWallRef 不同：TMDB 这一面按 `item_id` 寻址（它是 `pathToItemID(relKey)`
+// 的稳定哈希），前端卡片上本来就只有这个 id。
+type tmdbWallRef struct {
+	StrmTaskID int64 `json:"strm_task_id"`
+	// LocalDirID 非空时优先（挂上来的本地目录源）。
+	LocalDirID string `json:"local_dir_id,omitempty"`
+	ItemID     string `json:"item_id"`
+}
+
+// source 返回数据源选择器（`local_dir_id` 优先）。
+func (ref tmdbWallRef) source() strmscrape.WallSourceRef {
+	return strmscrape.WallSourceRef{StrmTaskID: ref.StrmTaskID, LocalDirID: strings.TrimSpace(ref.LocalDirID)}
+}
+
+// previewTmdbWallDelete 「删除」前的**会删掉什么**。不写任何东西。
+//
+// 与番号墙那一条同一条规矩：清单由服务端算，前端只负责摆出来 + 二次确认。
+func (h *Handler) previewTmdbWallDelete(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	var body tmdbWallRef
+	if err := decodeJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if src := body.source(); src.StrmTaskID <= 0 && src.LocalDirID == "" {
+		writeErr(w, domain.Errorf(domain.CodeValidation, "缺少 strm_task_id 或 local_dir_id"))
+		return
+	}
+	out, err := h.strmScrape.PreviewTmdbWallDelete(r.Context(), body.source(), body.ItemID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, out)
+}
+
+// deleteTmdbWallItem 「删除」：本地作品目录（电影一部 / 剧集整部）+ 网盘对应目录。
+//
+// ⚠️ 与番号墙那条一样**会真的删东西**（本地不可恢复、网盘进回收站）。前端必须先走
+// preview 那条、拿到用户确认之后才调这里。
+func (h *Handler) deleteTmdbWallDelete(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	var body tmdbWallRef
+	if err := decodeJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if src := body.source(); src.StrmTaskID <= 0 && src.LocalDirID == "" {
+		writeErr(w, domain.Errorf(domain.CodeValidation, "缺少 strm_task_id 或 local_dir_id"))
+		return
+	}
+	out, err := h.strmScrape.DeleteTmdbWallItem(r.Context(), body.source(), body.ItemID)
 	if err != nil {
 		writeErr(w, err)
 		return

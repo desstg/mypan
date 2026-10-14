@@ -41,7 +41,7 @@ type javTitleEntry struct {
 
 // javItemRef 是把 (rel_dir, stem) 收敛成的一组绝对路径。
 type javItemRef struct {
-	Task     *domain.StrmTask
+	Src      *wallSrc
 	Root     string
 	AbsDir   string
 	RelDir   string // 规范化后的相对目录（"/" 分隔，可为空）
@@ -62,15 +62,16 @@ type javItemRef struct {
 // ⚠️ 返回的 Stem 是**磁盘上的那一份**（忽略大小写比对后取磁盘名）：Windows 上
 // `ssis-001` 能配到 `SSIS-001.strm`，照请求写就会多出一个 `ssis-001.nfo`；
 // Linux 部署上那就是两份文件。
-func (s *Service) resolveJavItem(ctx context.Context, taskID int64, relDir, stem string) (javItemRef, error) {
+func (s *Service) resolveJavItem(ctx context.Context, srcRef WallSourceRef, relDir, stem string) (javItemRef, error) {
 	var ref javItemRef
-	task, root, err := s.resolveTask(ctx, taskID)
+	src, err := s.resolveSource(ctx, srcRef)
 	if err != nil {
 		return ref, err
 	}
-	if task.MediaKind != javMediaKind {
+	if !src.isJav() {
 		return ref, errNotJavTask
 	}
+	root := src.Root
 	rel := normalizeJavRelDir(relDir)
 	if rel == "" && strings.TrimSpace(relDir) != "" {
 		return ref, errBadJavPath
@@ -108,7 +109,7 @@ func (s *Service) resolveJavItem(ctx context.Context, taskID int64, relDir, stem
 		return ref, domain.Errorf(domain.CodeNotFound, "这一层没有名为 %s 的 .strm", stem)
 	}
 	ref = javItemRef{
-		Task:     task,
+		Src:      src,
 		Root:     root,
 		AbsDir:   absDir,
 		RelDir:   rel,
@@ -173,7 +174,7 @@ func joinRel(dir, name string) string {
 // 「不放大」那条路，结果是**一张都没缩**（实测本地样本 100% 命中这条路）。
 // 取得比原图宽之后，服务端看到的是「原图 > 目标宽」→ 真的缩，省下的是
 // 「原图尺寸 vs 卡片尺寸」那部分，与卡片样式变不变无关。
-func javWallImageURL(taskID int64, relDir, fileName, rev string, view string) string {
+func javWallImageURL(ref posterRef, relDir, fileName, rev string, view string) string {
 	// 没有文件名就没有图。生产路径上调用方已经用 pickJavArtifact 判过一次，
 	// 但这里再兜一道：少了它，joinRel 会把「目录 + 斜杠」拼成一个看着像路径、
 	// 实际指不到任何文件的地址，请求回来是 404 —— 而卡片上表现为一块占位图，
@@ -181,7 +182,7 @@ func javWallImageURL(taskID int64, relDir, fileName, rev string, view string) st
 	if strings.TrimSpace(fileName) == "" {
 		return ""
 	}
-	url := posterURLFromRel(taskID, joinRel(relDir, fileName))
+	url := posterURLFromRel(ref, joinRel(relDir, fileName))
 	if url == "" {
 		return ""
 	}

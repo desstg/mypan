@@ -2270,3 +2270,75 @@
 .wall-detail__cover--portrait {
   aspect-ratio: 2 / 3;
 }
+
+/* ————————————————————— 删除确认弹窗 —————————————————————
+ *
+ * 番号墙与 TMDB 墙**共用**这一套（`StrmJavWallDeleteModal.vue` /
+ * `StrmTmdbWallDeleteModal.vue`）。放在这里而不是各自的 `<style scoped>` 里：
+ * scoped 样式不跨组件，两份逐字复制迟早会漂，而这两个弹窗必须长得一模一样。
+ *
+ * 布局要点：弹窗高度**由内容决定**、超过上限才滚（与 `.jav-hidden` 同一套路）。
+ * 写成 `flex: 1 1 0` 会在上限不生效时把列表压成 0 高 —— 症状是「弹窗打开了、
+ * 标题与按钮都在，中间一片空白」。 */
+.jav-del {
+  width: min(90vw, 560px);
+  max-height: min(86vh, 620px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.jav-del__header {
+  display: flex;
+  align-items: flex-start;
+  padding: 20px 24px 12px;
+  gap: 16px;
+}
+.jav-del__titles { flex: 1; min-width: 0; }
+.jav-del__header h3 { margin: 0 0 6px; color: var(--text); font-size: 18px; }
+.jav-del__sub { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.7; }
+.jav-del__header > button {
+  border: 0; background: none; color: var(--text-muted); font-size: 22px; cursor: pointer;
+  line-height: 1; padding: 0 4px;
+}
+.jav-del__header > button:disabled { opacity: 0.4; cursor: default; }
+.jav-del__state { padding: 32px 24px; text-align: center; color: var(--text-muted); font-size: 13px; }
+.jav-del__state--err { color: var(--danger); font-size: 13px; margin: 8px 0 0; line-height: 1.6; }
+
+.jav-del__body {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 24px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.jav-del__section-title {
+  display: flex; align-items: center; gap: 7px;
+  color: var(--text); font-size: 13px; font-weight: 600; margin-bottom: 6px;
+}
+.jav-del__list {
+  margin: 0; padding: 8px 10px; list-style: none;
+  max-height: 180px; overflow-y: auto;
+  border-radius: var(--radius-sm); background: var(--surface-sunken);
+  font-size: 12px; color: var(--text-regular); line-height: 1.9;
+  word-break: break-all;
+}
+.jav-del__kv { margin: 0 0 4px; font-size: 13px; color: var(--text); word-break: break-all; }
+.jav-del__kv code { background: var(--surface-sunken); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+.jav-del__note { margin: 6px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.jav-del__warn {
+  margin: 0; padding: 9px 11px; border-radius: var(--radius-sm);
+  background: rgba(180, 83, 9, 0.08); color: #b45309; font-size: 12px; line-height: 1.6;
+}
+.jav-del__footer {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  border-top: 1px solid var(--border);
+  padding: 14px 24px;
+}
+@media (max-width: 640px) {
+  .jav-del { width: 94vw; }
+  .jav-del__header, .jav-del__body, .jav-del__footer { padding-inline: 18px; }
+}

@@ -435,6 +435,18 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/poster", h.getStrmScrapePoster)
 					// 详情抽屉：一张卡的元数据（标题/简介/演员/剧照/可播文件）。
 					r.Get("/items/detail", h.getStrmScrapeItemDetail)
+					// 删除一部作品（电影一部 / 剧集整部）：本地作品目录 + 网盘对应目录。
+					// 与番号墙那两条同一个套路：先 preview 看会删掉什么，确认后再 delete。
+					// ⚠️ 这两条**会真的删本地文件与网盘目录**，前端必须先弹确认。
+					r.Post("/items/delete-preview", h.previewTmdbWallDelete)
+					r.Post("/items/delete", h.deleteTmdbWallDelete)
+
+					// 海报墙挂的**本地目录**（不在任何 STRM 任务之下的媒体库目录）。
+					// ⚠️ DELETE 只删注册项，**不碰磁盘**。
+					r.Get("/local-dirs", h.listWallLocalDirs)
+					r.Post("/local-dirs", h.createWallLocalDir)
+					r.Put("/local-dirs/{id}", h.updateWallLocalDir)
+					r.Delete("/local-dirs/{id}", h.deleteWallLocalDir)
 
 					// 番号影片的海报墙（媒体类型 = 番号影片的任务）。与上面那套共用页面与
 					// 服务，但数据源是本地媒体库目录，不碰 TMDB。
@@ -454,6 +466,10 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/jav-wall/item/poster", h.saveJavWallPoster)
 					r.Post("/jav-wall/item/rebuild", h.rebuildJavWallItem)
 					r.Post("/jav-wall/item/refresh", h.refreshJavWallItem)
+					// 删除一部：先 preview 看会删掉什么，确认后再 delete。
+					// ⚠️ 这两条**会真的删本地文件与网盘目录**，前端必须先弹确认。
+					r.Post("/jav-wall/item/delete-preview", h.previewJavWallDelete)
+					r.Post("/jav-wall/item/delete", h.deleteJavWallItem)
 				})
 				r.Route("/automation", func(r chi.Router) {
 					r.Get("/rules", h.listAutomationRules)

@@ -1,7 +1,7 @@
 import { http } from "@/api/client";
 // 可播文件是**两面墙共用**的形状（同一个后端实现、同一套字幕结构），
 // 所以类型定义留在 strmScrape.ts 那一份，这里只 import —— 两边各写一份迟早会漂。
-import type { WallDetail } from "@/api/strmScrape";
+import { sourceParams, type WallDetail, type WallSourceRef } from "@/api/strmScrape";
 
 // 番号影片的海报墙（辅助工具 → 海报墙，选中「媒体类型 = 番号影片」的任务时用）。
 //
@@ -162,8 +162,8 @@ export interface JavWallItemDetail {
   watermark: JavWallWatermarkState;
 }
 
-function listParams(taskId: number, q: JavWallListQuery): Record<string, string | number> {
-  const out: Record<string, string | number> = { strm_task_id: taskId };
+function listParams(ref: number | WallSourceRef, q: JavWallListQuery): Record<string, string | number> {
+  const out: Record<string, string | number> = { ...sourceParams(ref) };
   // category 明确允许空串（= 全部），所以判 undefined 而不是判 falsy。
   if (q.category !== undefined && q.category !== "") out.category = q.category;
   if (q.keyword) out.keyword = q.keyword;
@@ -173,8 +173,8 @@ function listParams(taskId: number, q: JavWallListQuery): Record<string, string 
   return out;
 }
 
-export function fetchJavWallItems(taskId: number, q: JavWallListQuery = {}) {
-  return http.get<JavWallListResult>("/admin/strm-scrape/jav-wall/items", listParams(taskId, q));
+export function fetchJavWallItems(ref: number | WallSourceRef, q: JavWallListQuery = {}) {
+  return http.get<JavWallListResult>("/admin/strm-scrape/jav-wall/items", listParams(ref, q));
 }
 
 /**
@@ -183,21 +183,21 @@ export function fetchJavWallItems(taskId: number, q: JavWallListQuery = {}) {
  * **它不是重新生成**（那是卡片上的「重刮」）——只重读本地文件，不联网、不重建
  * nfo/图片，作用是把刚保存的东西显示出来（图片 URL 上的 rev 也跟着换）。
  */
-export function refreshJavWall(taskId: number, q: JavWallListQuery = {}) {
-  return http.post<JavWallListResult>("/admin/strm-scrape/jav-wall/refresh", {}, listParams(taskId, q));
+export function refreshJavWall(ref: number | WallSourceRef, q: JavWallListQuery = {}) {
+  return http.post<JavWallListResult>("/admin/strm-scrape/jav-wall/refresh", {}, listParams(ref, q));
 }
 
-export function fetchJavWallItem(taskId: number, relDir: string, stem: string) {
+export function fetchJavWallItem(ref: number | WallSourceRef, relDir: string, stem: string) {
   return http.get<JavWallItemDetail>("/admin/strm-scrape/jav-wall/item", {
-    strm_task_id: taskId,
+    ...sourceParams(ref),
     rel_dir: relDir,
     stem,
   });
 }
 
-export function saveJavWallMeta(taskId: number, relDir: string, stem: string, meta: JavMovieMeta) {
+export function saveJavWallMeta(ref: number | WallSourceRef, relDir: string, stem: string, meta: JavMovieMeta) {
   return http.put<JavWallItemDetail>("/admin/strm-scrape/jav-wall/item/meta", {
-    strm_task_id: taskId,
+    ...sourceParams(ref),
     rel_dir: relDir,
     stem,
     meta,
@@ -211,14 +211,14 @@ export function saveJavWallMeta(taskId: number, relDir: string, stem: string, me
  * 总开关管的是重刮 / 扫描那条自动路。
  */
 export function saveJavWallPoster(
-  taskId: number,
+  ref: number | WallSourceRef,
   relDir: string,
   stem: string,
   rect: JavCropRect,
   watermarks: string[] = [],
 ) {
   return http.post<JavWallItemDetail>("/admin/strm-scrape/jav-wall/item/poster", {
-    strm_task_id: taskId,
+    ...sourceParams(ref),
     rel_dir: relDir,
     stem,
     rect,
@@ -227,17 +227,17 @@ export function saveJavWallPoster(
 }
 
 /** 「重刮」：用**本地那份 json** 重建这一部（nfo 重写、封面/海报重下、剧照补缺）。 */
-export function rebuildJavWallItem(taskId: number, relDir: string, stem: string) {
+export function rebuildJavWallItem(ref: number | WallSourceRef, relDir: string, stem: string) {
   return http.post<JavWallItemDetail>("/admin/strm-scrape/jav-wall/item/rebuild", {
-    strm_task_id: taskId,
+    ...sourceParams(ref),
     rel_dir: relDir,
     stem,
   });
 }
 
-export function refreshJavWallItem(taskId: number, relDir: string, stem: string) {
+export function refreshJavWallItem(ref: number | WallSourceRef, relDir: string, stem: string) {
   return http.post<JavWallItemDetail>("/admin/strm-scrape/jav-wall/item/refresh", {
-    strm_task_id: taskId,
+    ...sourceParams(ref),
     rel_dir: relDir,
     stem,
   });
@@ -266,9 +266,8 @@ export interface JavWallHiddenDirList {
  * `taskId` 传 0（或省略）就不扫盘，只按分类规则的目标目录列 —— 设置页那一行走这条；
  * 墙页头那个按钮传任务 id，能拿到磁盘上真实存在的目录与各自的部数。
  */
-export function fetchJavWallHiddenDirs(taskId = 0) {
-  const params: Record<string, number> = {};
-  if (taskId > 0) params.strm_task_id = taskId;
+export function fetchJavWallHiddenDirs(ref: number | WallSourceRef = 0) {
+  const params: Record<string, string | number> = sourceParams(ref);
   return http.get<JavWallHiddenDirList>("/admin/strm-scrape/jav-wall/hidden-dirs", params);
 }
 
@@ -277,9 +276,9 @@ export function fetchJavWallHiddenDirs(taskId = 0) {
  *
  * 名单是**全局**一份（不按任务存），`taskId` 只决定保存后回吐的候选清单按哪个任务扫。
  */
-export function saveJavWallHiddenDirs(taskId: number, dirs: string[]) {
+export function saveJavWallHiddenDirs(ref: number | WallSourceRef, dirs: string[]) {
   return http.put<JavWallHiddenDirList>("/admin/strm-scrape/jav-wall/hidden-dirs", {
-    strm_task_id: taskId > 0 ? taskId : 0,
+    ...sourceParams(ref),
     dirs,
   });
 }
@@ -293,13 +292,12 @@ export const JAV_WALL_SORTS = [
 ];
 
 /** 番号影片墙的详情（详情抽屉用）。 */
-export function fetchJavWallItemDetail(input: {
-  strm_task_id: number;
+export function fetchJavWallItemDetail(input: WallSourceRef & {
   rel_dir: string;
   stem: string;
 }) {
   return http.get<WallDetail>("/admin/strm-scrape/jav-wall/item/detail", {
-    strm_task_id: String(input.strm_task_id),
+    ...sourceParams(input),
     rel_dir: input.rel_dir,
     stem: input.stem,
   });
@@ -318,6 +316,8 @@ export interface JavWallOnlineScrapeResult {
 /** 在线刮削的进度（前端按钮上的「刮削中…」）。 */
 export interface JavWallOnlineScrapeProgress {
   strm_task_id: number;
+  /** 这一轮跑的是哪个数据源（见 StrmScrapeProgress.source_key）。 */
+  source_key?: string;
   running: boolean;
   done: number;
   total: number;
@@ -336,12 +336,73 @@ export interface JavWallOnlineScrapeProgress {
  * 番号按 **nfo 的 `<num>` → 侧车 json 的 number → 拆主干**（去掉 `-U`/`-C`/`-4K`
  * 那些质量后缀）三条取，**不拿文件名当番号**。
  */
-export function onlineScrapeJavWall(input: { strm_task_id: number; rel_dir?: string; stem?: string }) {
-  return http.post<JavWallOnlineScrapeProgress>("/admin/strm-scrape/jav-wall/online-scrape", input);
+export function onlineScrapeJavWall(ref: number | WallSourceRef) {
+  return http.post<JavWallOnlineScrapeProgress>("/admin/strm-scrape/jav-wall/online-scrape", sourceParams(ref));
 }
 
-export function fetchJavWallOnlineScrapeProgress(strmTaskId: number) {
-  return http.get<JavWallOnlineScrapeProgress>("/admin/strm-scrape/jav-wall/online-scrape/progress", {
-    strm_task_id: strmTaskId,
+export function fetchJavWallOnlineScrapeProgress(ref: number | WallSourceRef) {
+  return http.get<JavWallOnlineScrapeProgress>("/admin/strm-scrape/jav-wall/online-scrape/progress", sourceParams(ref));
+}
+
+// ————————————————————— 删除一部 —————————————————————
+
+/**
+ * 「会删掉什么」——删除前的预览。**不写任何东西**，纯算。
+ *
+ * 为什么要有这一步：删什么由服务端算（哪些本地文件属于这一部、目录会不会一起删、
+ * 网盘那边删的是整个目录还是几个文件），前端只负责摆给用户看 + 二次确认。
+ * 前端自己拼文案的话，两边的判据迟早会漂 —— 那一漂就是「提示说删 3 个文件、
+ * 实际删了 12 个」这种事故。
+ */
+export interface JavWallDeletePreview {
+  /** 本地将被删掉的文件（相对任务根），已排序。 */
+  local_files: string[];
+  /** 这一部所在的本地目录（相对任务根）；根目录那档为空串。 */
+  local_dir: string;
+  /** 删完文件之后本地目录会不会一起删掉（目录里没有别的东西了）。 */
+  remove_local_dir: boolean;
+  /** 平铺布局（该目录还有别的 `.strm`）——文案要说清「只删这一部」。 */
+  flat: boolean;
+  /** 网盘上这一步要动的路径；cloud_skipped 非空时它是空串。 */
+  cloud_path?: string;
+  /** 网盘上删的是**整个目录**（独占布局）；为假时删的是 cloud_files 那几个文件。 */
+  cloud_remove_dir: boolean;
+  /** 平铺布局下网盘上将被删掉的文件名（独占时为 undefined）。 */
+  cloud_files?: string[];
+  /** 非空时写明网盘那一步为什么没做（照原样显示给用户）。 */
+  cloud_skipped?: string;
+}
+
+export interface JavWallDeleteResult {
+  /** 真正删掉的本地文件数。 */
+  removed_files: number;
+  /** 本地目录也删了。 */
+  removed_dir: boolean;
+  /** 网盘那一份也删了。 */
+  cloud_deleted: boolean;
+  /** 网盘上删的是整个目录（假 = 只删了几个文件）。 */
+  cloud_remove_dir: boolean;
+  /** 非空时说明网盘那一步为什么没做（本地已经删干净了）。 */
+  cloud_skipped?: string;
+}
+
+export function previewJavWallDelete(ref: number | WallSourceRef, relDir: string, stem: string) {
+  return http.post<JavWallDeletePreview>("/admin/strm-scrape/jav-wall/item/delete-preview", {
+    ...sourceParams(ref),
+    rel_dir: relDir,
+    stem,
+  });
+}
+
+/**
+ * 真删。**本地文件不可恢复，网盘那一份进回收站。**
+ *
+ * 调用方必须先走 `previewJavWallDelete` 把清单摆给用户确认 —— 服务端不重复弹窗。
+ */
+export function deleteJavWallItem(ref: number | WallSourceRef, relDir: string, stem: string) {
+  return http.post<JavWallDeleteResult>("/admin/strm-scrape/jav-wall/item/delete", {
+    ...sourceParams(ref),
+    rel_dir: relDir,
+    stem,
   });
 }

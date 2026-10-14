@@ -6,6 +6,9 @@ interface Option {
   label: string;
   disabled?: boolean;
   tag?: string;
+  /** 分组标题：同一个 group 的选项会被归到一块，并在**变化处**渲染一行小标题。
+   *  不给 group 就与以前完全一样（一个平铺列表）。 */
+  group?: string;
 }
 
 const props = withDefaults(
@@ -27,6 +30,26 @@ const menuStyle = ref<Record<string, string>>({});
 const selectedLabel = computed(
   () => props.options.find((o) => o.value === props.modelValue)?.label ?? "",
 );
+
+/**
+ * 渲染行：选项 + 分组标题。
+ *
+ * 分组标题只在**组名变化处**插一行（相邻同名只出一行）—— 这样调用方只管给每个
+ * 选项写上 group，不需要自己算「要不要出标题」。不给 group 时 rows 就是 options，
+ * 与以前逐字相同。
+ */
+type SelectRow = { kind: "group"; name: string } | { kind: "option"; opt: Option };
+
+const rows = computed<SelectRow[]>(() => {
+  const out: SelectRow[] = [];
+  props.options.forEach((opt, i) => {
+    if (opt.group && opt.group !== props.options[i - 1]?.group) {
+      out.push({ kind: "group", name: opt.group });
+    }
+    out.push({ kind: "option", opt });
+  });
+  return out;
+});
 
 async function positionMenu() {
   await nextTick();
@@ -100,21 +123,23 @@ onUnmounted(() => {
       <template v-if="open">
         <div class="select__backdrop" @click="close" />
         <ul ref="menuRef" class="select__menu" :style="menuStyle">
-          <li
-            v-for="opt in options"
-            :key="String(opt.value)"
-            class="select__option"
-            :class="{
-              'select__option--active': opt.value === modelValue,
-              'select__option--disabled': opt.disabled,
-            }"
-            @click="choose(opt)"
-          >
-            <span class="select__option-row">
-              <span>{{ opt.label }}</span>
-              <span v-if="opt.tag" class="select__option-tag">{{ opt.tag }}</span>
-            </span>
-          </li>
+          <template v-for="(row, i) in rows" :key="row.kind === 'group' ? `g:${row.name}:${i}` : String(row.opt.value)">
+            <li v-if="row.kind === 'group'" class="select__group">{{ row.name }}</li>
+            <li
+              v-else
+              class="select__option"
+              :class="{
+                'select__option--active': row.opt.value === modelValue,
+                'select__option--disabled': row.opt.disabled,
+              }"
+              @click="choose(row.opt)"
+            >
+              <span class="select__option-row">
+                <span>{{ row.opt.label }}</span>
+                <span v-if="row.opt.tag" class="select__option-tag">{{ row.opt.tag }}</span>
+              </span>
+            </li>
+          </template>
           <li v-if="!options.length" class="select__empty">无可选项</li>
         </ul>
       </template>
@@ -210,6 +235,16 @@ onUnmounted(() => {
 }
 .select__option--disabled:hover {
   background: transparent;
+}
+/* 分组标题：小号、灰、不可点（它不是一个选项，别让它看起来像）。 */
+.select__group {
+  padding: 7px 10px 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
+  cursor: default;
 }
 .select__option-tag {
   flex-shrink: 0;

@@ -29,7 +29,7 @@ func TestTaskIndexPathAndRemove(t *testing.T) {
 func TestIndexUpsertAndList(t *testing.T) {
 	dir := t.TempDir()
 	svc := &Service{dataDir: dir}
-	path := svc.indexPath(9)
+	path := svc.indexPath("9")
 	db, err := openTaskIndexDB(path)
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestIndexUpsertAndList(t *testing.T) {
 	}
 	_ = db.Close()
 
-	result, err := svc.listIndexItems(9, ItemListQuery{
+	result, err := svc.listIndexItems("9", posterRef{TaskID: 9}, ItemListQuery{
 		Limit: defaultItemListLimit,
 		Sort:  ItemListSortAddedDesc,
 	})
@@ -87,7 +87,7 @@ func TestIndexUpsertAndList(t *testing.T) {
 func TestListIndexItemsQuery(t *testing.T) {
 	dir := t.TempDir()
 	svc := &Service{dataDir: dir}
-	path := svc.indexPath(10)
+	path := svc.indexPath("10")
 	db, err := openTaskIndexDB(path)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestListIndexItemsQuery(t *testing.T) {
 	}
 	_ = db.Close()
 
-	result, err := svc.listIndexItems(10, ItemListQuery{
+	result, err := svc.listIndexItems("10", posterRef{TaskID: 10}, ItemListQuery{
 		Limit:     1,
 		MediaType: MediaTypeTV,
 		Sort:      ItemListSortTitleAsc,
@@ -148,7 +148,7 @@ func TestListIndexItemsQuery(t *testing.T) {
 		t.Fatalf("stats=%+v", result.Stats)
 	}
 
-	result, err = svc.listIndexItems(10, ItemListQuery{
+	result, err = svc.listIndexItems("10", posterRef{TaskID: 10}, ItemListQuery{
 		Limit:     defaultItemListLimit,
 		Offset:    1,
 		MediaType: MediaTypeTV,
@@ -161,7 +161,7 @@ func TestListIndexItemsQuery(t *testing.T) {
 		t.Fatalf("offset result=%+v", result)
 	}
 
-	result, err = svc.listIndexItems(10, ItemListQuery{
+	result, err = svc.listIndexItems("10", posterRef{TaskID: 10}, ItemListQuery{
 		Limit:   defaultItemListLimit,
 		Keyword: "alpha",
 		Sort:    ItemListSortAddedDesc,
