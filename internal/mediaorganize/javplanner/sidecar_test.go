@@ -1525,6 +1525,45 @@ func TestSidecarCNShapeRecognized(t *testing.T) {
 	}
 }
 
+// TestSidecarWesternShapeRecognized 欧美点分日期型番号（`Tushy.2026.09.20`）
+// 也让侧车被认出来 —— 与国产形状同一条判据（`javrules.IsRecognizableNumber`）。
+//
+// 起因（2026-10-16，与「在线刮削」那三处缺口同一轮）：`HasCode` **刻意**不含这类
+// 形态（并进去会让这些名字走进清理式改名，见 `IsWesternCode` 的注释），于是
+// `Tushy.2026.09.20.json` 在主整理这条路上等于**不存在** —— 视频不改名、json
+// 也没有任何动作搬它。而改名那条路（`RenameFilename` → `WesternCode`）产出的
+// 就是这个名字，两边对不上。
+func TestSidecarWesternShapeRecognized(t *testing.T) {
+	fs := newFakeFS()
+	const root = "/root"
+	fs.add(root, "Tushy.2026.09.20.json", 900, false)
+	fs.add(root, "tushy.26.09.20.kazumi.loves.anal.xxx-4k.mp4", 688*mb, false)
+	target := fs.add(root, "整理库", 0, true)
+
+	plan := buildPlanWith(t, fs, root, target, seedConfig())
+
+	if plan.Diagnostics["sidecars"] == nil {
+		t.Fatal("点分日期型的 json 应当被认作侧车")
+	}
+	renames := map[string]string{}
+	for _, a := range actionsFor(plan, stageRename) {
+		renames[a.SourceName] = a.TargetName
+	}
+	// 视频改成与 json 同名（**保留原大小写**，见 WesternCode 的注释）。
+	if got := renames["tushy.26.09.20.kazumi.loves.anal.xxx-4k.mp4"]; got != "Tushy.2026.09.20.mp4" {
+		t.Errorf("视频应当改名成 Tushy.2026.09.20.mp4，got %q（全部：%v）", got, renames)
+	}
+	dirNames := []string{}
+	for _, a := range actionsFor(plan, stageMoveIn) {
+		if a.Kind == moplan.ActionKindEnsureDir {
+			dirNames = append(dirNames, a.TargetName)
+		}
+	}
+	if len(dirNames) != 1 || dirNames[0] != "Tushy.2026.09.20" {
+		t.Errorf("应当建一个名为 Tushy.2026.09.20 的目录，got %v", dirNames)
+	}
+}
+
 // TestSidecarLowercaseJSONNotSidecar 全小写的常见 json 主名不该被当成侧车。
 //
 // `readme` / `config` / `notes` 这些名字在 `ParseJavFileName` 眼里都是「没有标记

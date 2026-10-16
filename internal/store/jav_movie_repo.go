@@ -17,7 +17,7 @@ type javMovieRepo struct{ db *DB }
 
 const javMovieColumns = `id, number, title, origin_title, title_zh, title_zh_source,
        cover_url, thumb_url, javbus_cover,
-       duration, release_date, score, summary, summary_source, review,
+       duration, release_date, score, summary, summary_source, summary_original, review,
        director_id, director_name, maker_id, maker_name, publisher_id, publisher_name,
        series_id, series_name, tags_json, preview_images_json, preview_video_url,
        magnets_count, reviews_count, has_cnsub, has_preview_images, has_preview_video,
@@ -35,12 +35,12 @@ func (r *javMovieRepo) Upsert(ctx context.Context, m *domain.JavMovie) error {
 	}
 	_, err := r.db.write.ExecContext(ctx, `
 INSERT INTO jav_movies(id, number, title, origin_title, title_zh, title_zh_source, cover_url, thumb_url, javbus_cover,
-                       duration, release_date, score, summary, summary_source, review,
+                       duration, release_date, score, summary, summary_source, summary_original, review,
                        director_id, director_name, maker_id, maker_name, publisher_id, publisher_name,
                        series_id, series_name, tags_json, preview_images_json, preview_video_url,
                        magnets_count, reviews_count, has_cnsub, has_preview_images, has_preview_video,
                        can_play, type, number_letter, raw_json, fetched_at, last_viewed_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
     number=excluded.number, title=excluded.title, origin_title=excluded.origin_title,
     -- 中文标题同 javbus_cover / summary：**只有补到了才覆盖**。JAVDB 那几条路
@@ -71,6 +71,9 @@ ON CONFLICT(id) DO UPDATE SET
     -- 来源跟着简介走：只有确实写进了新简介时才更新（否则「补来的」标签会飘到一个
     -- 空简介上，之后想重刷都挑不出该重刷的行）。
     summary_source=CASE WHEN excluded.summary <> '' THEN excluded.summary_source ELSE jav_movies.summary_source END,
+    -- AI 摘要的**原文**：只在确实带了新原文时写。空值不许把已有的原文冲掉
+    -- （重抓一次上游、而这次没走翻译时，excluded.summary_original 会是空串）。
+    summary_original=CASE WHEN excluded.summary_original <> '' THEN excluded.summary_original ELSE jav_movies.summary_original END,
     review=CASE WHEN excluded.review <> '' THEN excluded.review ELSE jav_movies.review END,
     director_id=excluded.director_id, director_name=excluded.director_name,
     maker_id=excluded.maker_id, maker_name=excluded.maker_name,
@@ -133,7 +136,7 @@ ON CONFLICT(id) DO UPDATE SET
     fetched_at=excluded.fetched_at,
     updated_at=CURRENT_TIMESTAMP`,
 		m.ID, m.Number, m.Title, m.OriginTitle, m.TitleZH, m.TitleZHSource, m.CoverURL, m.ThumbURL, m.JavbusCover,
-		nullableInt(m.Duration), m.ReleaseDate, nullableFloat(m.Score), m.Summary, m.SummarySource, m.Review,
+		nullableInt(m.Duration), m.ReleaseDate, nullableFloat(m.Score), m.Summary, m.SummarySource, m.SummaryOriginal, m.Review,
 		m.DirectorID, m.DirectorName, m.MakerID, m.MakerName, m.PublisherID, m.PublisherName,
 		m.SeriesID, m.SeriesName, jsonOr(m.Tags, "[]"), jsonOr(m.PreviewImages, "[]"), m.PreviewVideoURL,
 		m.MagnetsCount, m.ReviewsCount, boolToInt(m.HasCNSub), boolToInt(m.HasPreviewImages),
@@ -1098,7 +1101,7 @@ func scanJavMovie(sc javRowScanner) (*domain.JavMovie, error) {
 	)
 	err := sc.Scan(&m.ID, &m.Number, &m.Title, &m.OriginTitle, &m.TitleZH, &m.TitleZHSource,
 		&m.CoverURL, &m.ThumbURL, &m.JavbusCover,
-		&duration, &m.ReleaseDate, &score, &m.Summary, &m.SummarySource, &m.Review,
+		&duration, &m.ReleaseDate, &score, &m.Summary, &m.SummarySource, &m.SummaryOriginal, &m.Review,
 		&m.DirectorID, &m.DirectorName, &m.MakerID, &m.MakerName, &m.PublisherID, &m.PublisherName,
 		&m.SeriesID, &m.SeriesName, &tags, &previews, &m.PreviewVideoURL,
 		&m.MagnetsCount, &m.ReviewsCount, &hasCN, &hasPrevImg, &hasPrevVid,

@@ -201,7 +201,7 @@ func TestLiveJavOnlineScrape(t *testing.T) {
 		}
 		return
 	}
-	res, err := svc.strmScrape.JavWallOnlineScrape(ctx, task.ID)
+	res, err := svc.strmScrape.JavWallOnlineScrapeByTask(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("在线刮削失败：%v", err)
 	}

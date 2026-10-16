@@ -30,6 +30,9 @@ type CaribbeancomOptions struct {
 	RequestGap time.Duration
 	// ProxyURL 是兜底代理：直连不通时才走它（见 conn）。空串 = 只直连。
 	ProxyURL string
+	// FlareSolverrURL 是第三段出口（Cloudflare 挑战 / 年龄墙）。空 = 不启用。
+	// 见 flaresolverr.go —— 它慢（10~60 秒），只在直连与代理都过不去时才用。
+	FlareSolverrURL string
 }
 
 // NewCaribbeancom 构造 caribbeancom 来源。
@@ -42,7 +45,7 @@ func NewCaribbeancom(opts CaribbeancomOptions) *Caribbeancom {
 	if gap == 0 {
 		gap = defaultGap
 	}
-	c := newConn(httpOptions{Timeout: opts.Timeout, ProxyURL: opts.ProxyURL})
+	c := newConn(httpOptions{Timeout: opts.Timeout, ProxyURL: opts.ProxyURL, FlareSolverrURL: opts.FlareSolverrURL})
 	c.thr = throttler{gap: gap}
 	return &Caribbeancom{baseURL: base, c: c}
 }

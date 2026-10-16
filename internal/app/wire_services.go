@@ -259,6 +259,8 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		Settings:   st.settings,
 		Bus:        core.bus,
 		Log:        logs.For(logx.ModuleSystem),
+		// AI 翻译那条路（把日文简介/标题转中文）。aiorganize 在上面已经构造好了。
+		Translator: aiOrganizeSvc,
 	})
 	javSvc.SetStartupGate(startupGate)
 	javSvc.Register(core.bus)

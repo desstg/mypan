@@ -106,11 +106,67 @@ func TestMatchStation(t *testing.T) {
 		// 靠的就是这道闸。挡不住的话会得到 FC2PPV-4750465-FC2PPV。
 		{"FC2PPV-4750465.mp4", "FC2PPV-4750465", ""},
 		{"FC2-PPV-1234567.mp4", "FC2-PPV-1234567", ""},
+		// 字母番号不补站名。**理由在 2026-10-16 变了**（断言值不变）：
+		// 以前是「token 在番号里」；现在是这张默认词表里**根本没有裸的 `HEYZO`**
+		// —— 判据本身认得出（见下面拼上素人 token 的那组），词表这一层挡着。
 		{"HEYZO-3837.mp4", "HEYZO-3837", ""},
 	}
 	for _, c := range cases {
 		if got := MatchStation(c.name, c.number, tokens); got != c.want {
 			t.Errorf("MatchStation(%q, %q) = %q，期望 %q", c.name, c.number, got, c.want)
+		}
+	}
+
+	// ── 番号本体自带站名（2026-10-16 加）──
+	//
+	// 素人档**唯一**的路由入口：HEYZO / SIRO / GANA 的料只在素人链那几家上，
+	// 认不出站名就会走有码链、一部都补不到。以前这几条返回空串 —— 那时前缀一侧
+	// 也套着「token 不许出现在番号里」的闸，而 `HEYZO` 恰恰就在 `HEYZO-3950` 里面。
+	// 那不是「有意行为」，是一条漏判。
+	//
+	// ⚠️ 这几条**必须**在拼上素人 token 之后跑：`StationTokens` 出于形状过滤拿不到
+	// 裸的 `HEYZO`（默认规则表里写的是带尾连字符的 `HEYZO-`），而扫盘那侧真正的
+	// 输入是 `javrules.StationTokens(...)` **拼上** `jav.AmateurStationTokens()`
+	// （见 strmscrape.javScrapeStationTokens）。判据与词表分开考，各钉各的。
+	withAmateur := append(append([]string{}, tokens...),
+		"HEYZO", "LUXU", "SIRO", "GANA", "PEEP", "DEBZ", "FC2PPV")
+	amateurCases := []struct {
+		name   string
+		number string
+		want   string
+	}{
+		{"HEYZO-3950.mp4", "HEYZO-3950", "HEYZO"},
+		{"SIRO-5123.mp4", "SIRO-5123", "SIRO"},
+		{"200GANA-2931.mp4", "200GANA-2931", "GANA"},
+		// 带质量后缀的形态照样认（前缀那段没变）。
+		{"HEYZO-3950-4K.mp4", "HEYZO-3950", "HEYZO"},
+		// 水印前缀：站名仍然紧贴番号，照样认。
+		{"hhd800.com@HEYZO-3950.mp4", "HEYZO-3950", "HEYZO"},
+
+		// ── 反例 ──
+		// token 出现在番号**后**面、不紧贴开头 → 不认（形状判据只对开头生效）。
+		{"123-HEYZO.mp4", "123-HEYZO", ""},
+		// 番号里没有数字 → 不是番号，别认（`HEYZO` 孤零零一个词）。
+		{"HEYZO.mp4", "HEYZO", ""},
+		// 粘连形态（token 与数字之间没有分隔符）→ 不认，它更像一个普通词。
+		{"HEYZO3950.mp4", "HEYZO3950", ""},
+		// **FC2 系必须仍然为空**：它有自己那一档（`jav.RouteOf` 第 ① 步按前缀判走），
+		// 再补一个站名会让 `WorkNumber()` 拼出 `FC2PPV-4750465-FC2PPV`。
+		{"FC2PPV-4750465.mp4", "FC2PPV-4750465", ""},
+		{"FC2-PPV-1234567.mp4", "FC2-PPV-1234567", ""},
+	}
+	for _, c := range amateurCases {
+		if got := MatchStation(c.name, c.number, withAmateur); got != c.want {
+			t.Errorf("拼上素人 token 后 MatchStation(%q, %q) = %q，期望 %q", c.name, c.number, got, c.want)
+		}
+	}
+	// 词表里没有那个站名时，形状再对也认不出来（判据与词表是两件事）。
+	for _, c := range []struct{ name, number string }{
+		{"HEYZO-3950.mp4", "HEYZO-3950"},
+		{"SIRO-5123.mp4", "SIRO-5123"},
+	} {
+		if got := MatchStation(c.name, c.number, tokens); got != "" {
+			t.Errorf("默认词表里没有裸站名，MatchStation(%q, %q) 该为空，got %q", c.name, c.number, got)
 		}
 	}
 

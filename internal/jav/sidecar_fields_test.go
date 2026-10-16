@@ -1,6 +1,7 @@
 package jav
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -8,6 +9,72 @@ import (
 
 	"litepan/internal/domain"
 )
+
+// fakeMovieRepo 只实现 `GetByNumber`，其余方法一律 panic —— 它只服务
+// `SidecarTitleByNumber` 这一条路（那一条只查一次库）。
+//
+// 接口有三十来个方法，为一条测试把整个假库写出来不值当；**嵌入接口**让其余方法
+// 自动「被满足」（调用即 nil panic），而这条路上它们永远不会被调到。
+type fakeMovieRepo struct {
+	domain.JavMovieRepository
+
+	byNumber map[string]*domain.JavMovie
+	calls    int
+}
+
+func (f *fakeMovieRepo) GetByNumber(_ context.Context, number string) (*domain.JavMovie, error) {
+	f.calls++
+	m, ok := f.byNumber[number]
+	if !ok {
+		return nil, nil // 库里没有这一部：生产那侧是 err != nil || m == nil
+	}
+	return m, nil
+}
+
+// TestSidecarTitleByNumber 钉住「新建侧车那份标题的取值判据」。
+//
+// 这是四那条缺口（新建侧车里连 `title` 键都没有 → nfo 的 `<title>` /
+// `<originaltitle>` 永远空着）的取值端。判据必须与写侧 `buildSidecar`
+// **同一条**（`pickTitleZH`）：中文标题非空就用中文，否则回落原标题；
+// `origin_title` 恒为日文原名，不受中文影响。
+func TestSidecarTitleByNumber(t *testing.T) {
+	repo := &fakeMovieRepo{byNumber: map[string]*domain.JavMovie{
+		"IPZZ-909": {Number: "IPZZ-909", Title: "Original", TitleZH: "中文标题", OriginTitle: "日本語タイトル"},
+		"SSIS-001": {Number: "SSIS-001", Title: "Only Original", OriginTitle: "原名"},
+	}}
+	svc := &Service{movies: repo}
+
+	// ① 中文优先：title 取中文，origin_title 仍是日文原名。
+	title, origin := svc.SidecarTitleByNumber(context.Background(), "IPZZ-909")
+	if title != "中文标题" || origin != "日本語タイトル" {
+		t.Errorf("title=%q origin=%q，期望 中文标题 / 日本語タイトル", title, origin)
+	}
+
+	// ② 没有中文时回落原标题（`pickTitleZH` 那条判据）。
+	title, origin = svc.SidecarTitleByNumber(context.Background(), "SSIS-001")
+	if title != "Only Original" || origin != "原名" {
+		t.Errorf("title=%q origin=%q，期望 Only Original / 原名", title, origin)
+	}
+
+	// ③ 番号空 / 查不到 → 两个空串，调用方据此**不写这两个键**（写空串会让读取方
+	// 以为「这份侧车说了标题是空」，而事实只是「不知道」）。
+	if got, got2 := svc.SidecarTitleByNumber(context.Background(), ""); got != "" || got2 != "" {
+		t.Errorf("空番号该返回两个空串，got %q / %q", got, got2)
+	}
+	before := repo.calls
+	if got, got2 := svc.SidecarTitleByNumber(context.Background(), "NOT-IN-LIB"); got != "" || got2 != "" {
+		t.Errorf("库里没有的番号该返回两个空串，got %q / %q", got, got2)
+	}
+	if repo.calls != before+1 {
+		t.Errorf("空番号那次不该查库：calls %d → %d", before, repo.calls)
+	}
+
+	// ④ 没装配库时**不 panic**（这个函数会在扫盘那条路上被无条件调到）。
+	bare := &Service{}
+	if got, got2 := bare.SidecarTitleByNumber(context.Background(), "IPZZ-909"); got != "" || got2 != "" {
+		t.Errorf("未装配库该返回两个空串，got %q / %q", got, got2)
+	}
+}
 
 // TestSidecarFieldPathsExistInWriteSchema 是回写那条路的**契约闸门**。
 //

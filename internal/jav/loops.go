@@ -1177,7 +1177,7 @@ func (s *Service) summaryBackfillLoop(ctx context.Context, gate <-chan struct{})
 		if s.UserActiveWithin(userActivityWindow) {
 			continue
 		}
-		if len(s.enrichers()) == 0 {
+		if len(s.enrichers(RouteDefault)) == 0 {
 			continue
 		}
 		lastRun = time.Now()
@@ -1229,89 +1229,27 @@ func (s *Service) summaryBackfillLoop(ctx context.Context, gate <-chan struct{})
 // backfillSummary 给一部片补简介。返回是否真的补到了。
 //
 // 番号从**库里那行**取（`number` 字段），不解析标题 —— 影库里 title 可能被用户改过。
+//
+// 这是**后台**那条每小时回填循环的入口：动记账（enriched_at / summary_attempts）、
+// 用默认预算（enrichBudget）。判据与内核都在 backfill.go 的 backfillMovie 里 ——
+// 与「在线刮削」那条路（BackfillLibraryMovie）**共用同一个内核**，
+// 所以两处补出来的东西不会分家。
 func (s *Service) backfillSummary(ctx context.Context, movieID string) (bool, error) {
 	movie, err := s.movies.Get(ctx, movieID)
 	if err != nil {
 		return false, err
 	}
-	if movie == nil || strings.TrimSpace(movie.Number) == "" {
-		// 连番号都没有，问也没用：记一笔"问过"，免得每轮都挑它出来。
-		_ = s.movies.MarkEnriched(ctx, movieID)
+	if movie == nil {
 		return false, nil
 	}
-	linked, lerr := s.movies.ListActors(ctx, movieID)
-	if lerr != nil {
-		return false, lerr
-	}
-	missing := missingForMovie(movie, len(linked) > 0)
-	if !missing.Any() {
-		_ = s.movies.MarkEnriched(ctx, movieID)
-		return false, nil
-	}
-	patch, err := synopsis.Enrich(ctx, movie.Number, missing, s.enrichers()...)
-	// 中文标题是**另一条链**（只有 airav / missav 那两家，且判据是「另存」不是「补缺」，
-	// 见 titleEnrichers 的注释）。这条链**不看 missing**：库里没有中文标题就去要一个。
-	// 两段补丁合起来用 —— 同一次回填一次把简介与中文标题都办了，不额外多跑一轮。
-	if s.settings != nil && strings.TrimSpace(movie.TitleZH) == "" {
-		if tp, terr := synopsis.Enrich(ctx, movie.Number,
-			synopsis.Missing{TitleZH: true}, s.titleEnrichers()...); tp.TitleZH != "" {
-			patch.TitleZH = tp.TitleZH
-			if patch.Source == "" {
-				patch.Source = tp.Source
-			}
-			patch.Filled = append(patch.Filled, "title_zh")
-		} else if terr != nil {
-			s.logInfo("jav title zh backfill failed", "id", movieID, "number", movie.Number, "err", terr)
-		}
-	}
-	// ⚠️ `Enrich` **不会因为某家失败就中断** —— 它把最后一家的错误当返回值带回来，
-	// 但只要有任何一家给了东西，patch 就是有内容的。所以这里的判据是
-	// **先看 patch 有没有东西，再看 err**，不能像原来那样 err != nil 就直接 return：
-	// 那会让「airav 超时、但我们排在后面的 javbus 补到了导演/发行日期」这一轮的
-	// 成果被整份丢掉（实测踩过：一部片明明拿到了发行日期，库里还是空的）。
-	if patch.Empty() {
-		if err != nil {
-			// 全都失败（多半是网络/限流）。**不记 attempts** —— 那不是「这家没有」，
-			// 是「这轮没问到」，记了就少吃一次机会。
-			s.logInfo("jav summary backfill failed", "id", movieID, "number", movie.Number, "err", err)
-			return false, nil
-		}
-		// 真的问过、一家都没给。**这一笔不记 MarkEnriched**（2026-09-27 改的）：
-		// 记了就等于「这部再也不问了」，而各家的覆盖率是会变的（上游补了料、我们加了源、
-		// 那天恰好在限流）—— 实测正是这条规则让「简介为空」的那批几百部**永远补不上**，
-		// 加了新源也救不回来。
-		//
-		// 但也不能无限问下去：`summary_attempts` 记次数，问够 summaryMaxAttempts
-		// 次仍无结果才收手（见 PendingSummaryMovieIDs 的候选条件）。
-		s.logInfo("jav summary backfill empty", "id", movieID, "number", movie.Number)
-		if err := s.movies.BumpSummaryAttempts(ctx, movieID); err != nil {
-			return false, err
-		}
-		return false, nil
-	}
-	applyPatch(movie, patch, linked)
-	// 用 Upsert 而不是逐列 UPDATE：那条 SQL 已经全是「空值不覆盖」的 CASE，
-	// 语义正好，且与详情抓取走同一条路（不会出现两套写法）。
-	if err := s.movies.Upsert(ctx, movie); err != nil {
-		return false, err
-	}
-	// 简介还要落到**本地那份侧车 json** 上，否则 nfo 里还是空
-	// （nfo 读的是本地 json，不是库）。只动本地副本，不写网盘。
-	if patch.Summary != "" {
-		s.pushSummaryToSidecar(movie.Number, patch.Summary)
-	}
-	if patch.TitleZH != "" {
-		s.pushTitleZHToSidecar(movie.Number, patch.TitleZH)
-	}
-	// 这一轮补到的其余字段（时长/导演/片商/标签…）也推一次 —— 它们没有自己的通道，
-	// 而侧车要的是「这部片现在有什么」，不只是「这次补到了什么」。
-	s.pushMovieFieldsToSidecar(ctx, movieID)
-	if err := s.movies.MarkEnriched(ctx, movieID); err != nil {
-		return false, err
-	}
-	s.logInfo("jav movie enriched", "number", movie.Number, "source", patch.Source,
-		"fields", strings.Join(patch.Filled, ","))
-	return true, nil
+	// 路由档位：这条是**后台路**，靠库里的 `Type`（后台挑出来的都是抓过详情的，
+	// 所以 type 可信 —— 与在线刮削那条拿不到 type 的路正好相反，见 RouteInput）。
+	// 番号形状仍然优先（FC2 前缀 / 欧美点分型 不靠 type 也认得出）。
+	route := RouteOf(RouteInput{
+		Number:    strings.TrimSpace(movie.Number),
+		MovieType: strings.TrimSpace(movie.Type),
+	})
+	return s.backfillMovie(ctx, movie, route, enrichBudget, true)
 }
 
 // missingForMovie 看这部片缺哪些**可补**的字段。

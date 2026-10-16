@@ -1,0 +1,15 @@
+-- 给 jav_movies 加 `summary_original`：**AI 翻译前的简介原文**。
+--
+-- 背景（2026-10-15）：刮削抓回来的简介绝大多数是日文（DMM 的 og:description、
+-- avsox 的 description_ja…），用户要的是能读的中文，所以补缺链跑完会按设置
+-- 用 AI 把它翻成中文、覆盖 `summary`（nfo 的 `<plot>` 直接就是中文，那是用户要的）。
+--
+-- 为什么要单独留一列而不是就地覆盖：**原文是唯一能核「AI 翻得对不对」的依据**。
+-- 翻错了、或者哪天换了模型想重翻，没有原文就只能重新打一次上游。
+-- （与 `origin_title` / `title_zh` 那条「两行并存、谁也不是谁的替补」是同一个道理。）
+--
+-- 顺带写进侧车 json（键 `summary_original`），所以媒体库里也留得住 ——
+-- nfo 的 `<plot>` 用译文，原文不进 nfo（Emby 没有「原文剧情」这一栏）。
+--
+-- 空 = 没翻过（原文与译文同体，或本来就没简介）。
+ALTER TABLE jav_movies ADD COLUMN summary_original TEXT NOT NULL DEFAULT '';

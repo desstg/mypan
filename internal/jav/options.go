@@ -45,6 +45,22 @@ type Options struct {
 	// Folders 用来确保推送目标下的子目录存在，以及给推送成功的资源写元数据侧车。
 	// 为空时不做子目录（资源直接落在目标目录里）、也不写侧车。
 	Folders FolderStore
+
+	// Translator 是**AI 翻译**那条路（把日文简介/标题转成中文）。
+	//
+	// 窄接口而不是 *aiorganize.Service：同 Offline / Folders 一个理由 ——
+	// 测试注入桩只要几行，而真实实现天然满足它。
+	// 为空 = 不翻译（与「用户没配 AI」同一个效果）。
+	Translator Translator
+}
+
+// Translator 是 AI 翻译那一个能力（由 aiorganize.Service 实现）。
+type Translator interface {
+	// Available 报告「开了并且配好了」。假的时候调用方**安静跳过**，
+	// 不要把「没配 AI」当成错误。
+	Available() bool
+	// Translate 按 systemPrompt 处理 text，返回结果。
+	Translate(ctx context.Context, systemPrompt, text string) (string, error)
 }
 
 // FolderStore 是 file.Service 的一个窄切面：建目录 / 列目录 / 查条目 / 上传小文件。

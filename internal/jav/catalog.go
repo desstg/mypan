@@ -868,7 +868,13 @@ func (s *Service) enrichAndSave(ctx context.Context, rec *domain.JavMovie, n *ja
 	// 拿一份**独立副本**给补缺用：那个函数会往 n 上写补到的值，
 	// 而 n 是调用方的（入库已经用过了，这里不该再动它）。
 	work := *n
-	s.fillMissingFields(ctx, &work)
+	// 路由档位在这里算 —— 这是**唯一 type 可信的时刻**（刚抓的详情，见
+	// RouteInput.MovieType 那段说明：库里的 type 在新片场景下是兜底值）。
+	// 番号形状优先，`n.Type` 只作兜底，与 RouteOf 的判据顺序一致。
+	s.fillMissingFields(ctx, &work, RouteOf(RouteInput{
+		Number:    strings.TrimSpace(n.Number),
+		MovieType: strings.TrimSpace(n.Type),
+	}))
 
 	patch := patchFromNormalized(&work, n)
 	if patch.Empty() {

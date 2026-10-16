@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"litepan/internal/jav"
+	"litepan/internal/jav/emby"
 	"litepan/internal/jav/quality"
 	"litepan/internal/strm"
 )
@@ -39,6 +41,104 @@ func TestJavScrapeNumberFromNFO(t *testing.T) {
 	got := scrapeNumberInDir(t, dir, "DSOD-028-4K")
 	if got != "DSOD-028" {
 		t.Fatalf("番号 = %q，期望 DSOD-028（从 nfo 的 <num> 取）", got)
+	}
+}
+
+// TestJavScrapeNumberWidenedShapes 第 ③ 步那道闸放宽之后，两类以前**判空**的
+// 番号要认得出来（2026-10-16，三处缺口之二）。
+//
+// 缺口的表现正是这条链上最难发现的那种：番号取空 → `scrapeOneJav` 第一行
+// `if t.number == "" { return false, false }` 直接返回 —— **不写日志**，
+// 而在统计里算「跳过」。用户看到的是「点了一下，什么都没发生」。
+//
+// 两类都是主整理那条路**早就认**的（`javplanner.parseSidecarName` 用的
+// `IsRecognizableNumber` 里那两条加法），只有在线刮削这一侧漏同步：
+//
+//	国产形状   `DYXO002` / `XKG147` / `RS034` —— HasCode 的国产判据是**认厂牌**，
+//	           而这批片的厂牌一个都不在表里（真机 `番号临时` 那 7 部里 4 部是这类）
+//	点分日期型 `vixen.26.09.19` / `Tushy.2026.09.20` —— HasCode **刻意**不含
+func TestJavScrapeNumberWidenedShapes(t *testing.T) {
+	cases := map[string]string{
+		// 国产形状：无侧车、无 nfo，只能靠主干 + 形状判据。
+		"DYXO002": "DYXO002",
+		"XKG147":  "XKG147",
+		"RS034":   "RS034",
+		"XKVP116": "XKVP116",
+		"PMU002":  "PMU002",
+		"DYPE001": "DYPE001",
+		// 点分日期型：主干就是番号本体，**保留原大小写**（与 WesternCode 一致）。
+		"vixen.26.09.19":   "vixen.26.09.19",
+		"Tushy.2026.09.20": "Tushy.2026.09.20",
+		// 带质量后缀的点分型也要能拆。
+		"Tushy.2026.09.20-4K": "Tushy.2026.09.20",
+	}
+	for stem, want := range cases {
+		dir := t.TempDir()
+		mustWrite(t, filepath.Join(dir, stem+".strm"), "x")
+		if got := scrapeNumberInDir(t, dir, stem); got != want {
+			t.Errorf("%s → %q，期望 %q（以前判空 → 整部片静默计进「跳过」）", stem, got, want)
+		}
+	}
+}
+
+// TestNewJavSidecarDocCarriesTitle 钉住「新建侧车里有没有 `title` / `origin_title`」
+// —— 三处缺口之四。
+//
+// 缺口的表现：新建的侧车 json 里连这两个键都没有，于是 nfo 的 `<title>` /
+// `<originaltitle>` 永远空着（兜底通道只在「库里已经有中文标题」时才触发，
+// 新建那一次它不触发）。用户看到的是「一部片刮到了演员/标签/封面，标题栏却空着」。
+//
+// `scrapeOneJav` 端到端桩不了（`Service.jav` / `Service.strm` 都是**具体类型**，
+// 见 SetJavService 的注释），所以判据落在 doc 的构造上 —— 而这一层正是缺口的所在。
+func TestNewJavSidecarDocCarriesTitle(t *testing.T) {
+	fields := map[string]any{"summary": "上游来的简介", "score": 4.5}
+
+	doc := newJavSidecarDoc("IPZZ-909", fields, quality.Marks{Uncensored: true},
+		"中文标题", "日本語タイトル")
+	if doc["title"] != "中文标题" || doc["origin_title"] != "日本語タイトル" {
+		t.Fatalf("title=%v origin_title=%v，期望 中文标题 / 日本語タイトル", doc["title"], doc["origin_title"])
+	}
+
+	// 它必须是一份**合法侧车**：`emby.Parse` 的三条硬校验（schema / number / JSON）。
+	// 少写 schema 或 number，整份 json 会被当作「不是侧车」跳过 —— 那是更隐蔽的
+	// 失败（文件在那儿、界面上一片空白）。
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := emby.Parse(raw)
+	if err != nil {
+		t.Fatalf("新建的 doc 不是合法侧车：%v", err)
+	}
+	if parsed.Title != "中文标题" || parsed.OriginTitle != "日本語タイトル" {
+		t.Errorf("解析回来 title=%q origin_title=%q", parsed.Title, parsed.OriginTitle)
+	}
+
+	// `fields` 里的值照旧并进来（判据不变），并且**只补空**：上游若也给了 title，
+	// 以上游那份为准（`setIfEmptyPathAny` 的语义）。
+	merged := newJavSidecarDoc("IPZZ-909", map[string]any{
+		"summary": "上游来的简介",
+		"title":   "上游给的标题",
+	}, quality.Marks{}, "库里的标题", "原名")
+	if merged["summary"] != "上游来的简介" {
+		t.Errorf("上游字段没并进来：%v", merged["summary"])
+	}
+	if merged["title"] != "上游给的标题" {
+		t.Errorf("title = %v，上游给了就该以上游为准", merged["title"])
+	}
+
+	// 标题取不到时**连键都不写**（不是写一个空 title）—— 写空串会让读取方以为
+	// 「这份侧车说了标题是空」，而事实只是「库里查不到」。
+	empty := newJavSidecarDoc("IPZZ-909", nil, quality.Marks{}, "", "")
+	if _, ok := empty["title"]; ok {
+		t.Errorf("取不到标题时不该写 title 键，got %v", empty["title"])
+	}
+	if _, ok := empty["origin_title"]; ok {
+		t.Errorf("取不到原名时不该写 origin_title 键，got %v", empty["origin_title"])
+	}
+	// 空白串同等对待（`strings.TrimSpace` 那条判据）。
+	if _, ok := newJavSidecarDoc("X", nil, quality.Marks{}, "   ", "\t")["title"]; ok {
+		t.Error("全空白的标题不该写成键")
 	}
 }
 
@@ -83,7 +183,7 @@ func TestCollectJavScrapeTargetsWalks(t *testing.T) {
 	mustWrite(t, filepath.Join(movie, "IPZZ-909-U.json"), `{"number":"IPZZ-909"}`)
 	mustWrite(t, filepath.Join(movie, "IPZZ-909-U.strm"), "x")
 
-	targets := collectJavScrapeTargets(root)
+	targets := collectJavScrapeTargets(root, nil, nil)
 	if len(targets) != 1 {
 		t.Fatalf("扫到 %d 个目标，期望 1", len(targets))
 	}
@@ -107,7 +207,7 @@ func scrapeNumberInDir(t *testing.T, dir, stem string) string {
 		t.Fatal(err)
 	}
 	files, _ := splitJavDirEntries(entries)
-	targets := javScrapeTargetsInDir(dir, files)
+	targets := javScrapeTargetsInDir(dir, files, "", nil, nil)
 	for _, tg := range targets {
 		if tg.stem == stem {
 			return tg.number
@@ -234,7 +334,7 @@ func TestLocalJavRepairFixesNFOFromLocalSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	files, _ := splitJavDirEntries(entries)
-	targets := javScrapeTargetsInDir(dir, files)
+	targets := javScrapeTargetsInDir(dir, files, "", nil, nil)
 	if len(targets) != 1 {
 		t.Fatalf("扫出 %d 个目标", len(targets))
 	}
@@ -260,7 +360,7 @@ func TestLocalJavRepairGivesUpCleanly(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "X-1.strm"), "x")
 	entries, _ := os.ReadDir(dir)
 	files, _ := splitJavDirEntries(entries)
-	targets := javScrapeTargetsInDir(dir, files)
+	targets := javScrapeTargetsInDir(dir, files, "", nil, nil)
 	if len(targets) != 1 {
 		t.Fatalf("扫出 %d 个目标", len(targets))
 	}
@@ -351,3 +451,125 @@ func TestJavOnlineProgressReportsFinishedState(t *testing.T) {
 		t.Fatalf("跑着的时候读成没在跑 = %+v", p)
 	}
 }
+
+// —— 按档位选站点（2026-10-15 加）——
+
+// TestCollectJavScrapeTargetsCarriesCategory 钉住「一级目录名要一路带下去」。
+//
+// 为什么要它：改造前那个递归**只传 depth**，层级信息整个丢掉 —— 于是「这部片属于
+// 哪一类」在刮削这一侧无从得知，也就没法按档位选站点。真机后果就是 FC2 那 1426 部
+// 一直在走无码那条链（而那条链上没有一家有 FC2 数据），100% 补不上。
+func TestCollectJavScrapeTargetsCarriesCategory(t *testing.T) {
+	root := t.TempDir()
+	// 分类目录 → 作品目录 → .strm（海报墙的常规布局）。
+	mustMkdir(t, filepath.Join(root, "FC2", "FC2-4939195"))
+	mustMkdir(t, filepath.Join(root, "有码", "SSIS-001"))
+	mustWrite(t, filepath.Join(root, "FC2", "FC2-4939195", "FC2-4939195.strm"), "x")
+	mustWrite(t, filepath.Join(root, "有码", "SSIS-001", "SSIS-001.strm"), "x")
+	// 根目录下直接躺着的 .strm：category 必须是**空串**（与海报墙的
+	// `JavWallCategory{Name: ""}` 对齐），不是 "SSIS-002"。
+	mustWrite(t, filepath.Join(root, "SSIS-002.strm"), "x")
+
+	targets := collectJavScrapeTargets(root, nil, nil)
+	got := map[string]string{}
+	for _, tg := range targets {
+		got[tg.stem] = tg.category
+	}
+	want := map[string]string{
+		"FC2-4939195": "FC2",
+		"SSIS-001":    "有码",
+		"SSIS-002":    "", // 根目录散落的：没有分类层
+	}
+	for stem, w := range want {
+		if g, ok := got[stem]; !ok {
+			t.Errorf("没扫到 %q（扫出 %v）", stem, got)
+		} else if g != w {
+			t.Errorf("%q 的 category = %q，期望 %q", stem, g, w)
+		}
+	}
+}
+
+// TestJavScrapeRouteInputs 一次算好的路由线索要对得上每一档。
+//
+// 站名线索用**主干**（`091926-001-carib`），目录名当提示，MovieType 留空
+// （在线刮削这条路拿不到可信的 type，见 javScrapeRouteInputs 的注释）。
+func TestJavScrapeRouteInputs(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{
+		filepath.Join(root, "FC2", "FC2-4939195"),
+		filepath.Join(root, "无码", "091926-001-carib"),
+		filepath.Join(root, "有码", "SSIS-001"),
+		// 番号本体自带站名的两类（2026-10-16 加）：素人档**唯一**的路由入口。
+		filepath.Join(root, "无码", "HEYZO-3950"),
+		filepath.Join(root, "无码", "SIRO-5123"),
+	} {
+		mustMkdir(t, d)
+	}
+	mustWrite(t, filepath.Join(root, "FC2", "FC2-4939195", "FC2-4939195.strm"), "x")
+	mustWrite(t, filepath.Join(root, "无码", "091926-001-carib", "091926-001-carib.strm"), "x")
+	mustWrite(t, filepath.Join(root, "有码", "SSIS-001", "SSIS-001.strm"), "x")
+	mustWrite(t, filepath.Join(root, "无码", "HEYZO-3950", "HEYZO-3950.strm"), "x")
+	mustWrite(t, filepath.Join(root, "无码", "SIRO-5123", "SIRO-5123.strm"), "x")
+
+	svc := &Service{}
+	// 用 Service 那条路取 token（含素人名单）—— `collectJavScrapeTargets` 需要它
+	// 才能剥掉番号尾部的站名。厂牌表同一次 `Parse` 里一起出来（见 javScrapeStationTokens）。
+	tokens, brands := svc.javScrapeStationTokens()
+	targets := collectJavScrapeTargets(root, tokens, brands)
+	routes := svc.javScrapeRouteInputs(targets, tokens)
+	if len(routes) != len(targets) {
+		t.Fatalf("线索数 %d ≠ 目标数 %d（两边必须一一对应）", len(routes), len(targets))
+	}
+	byStem := map[string]javRouteInputView{}
+	for i, tg := range targets {
+		ri := routes[i]
+		if ri.MovieType != "" {
+			t.Errorf("%s: MovieType 该留空（扫盘这一刻还拿不到可信的 type），得到 %q", tg.stem, ri.MovieType)
+		}
+		if ri.Number != tg.number {
+			t.Errorf("%s: Number = %q，期望 %q", tg.stem, ri.Number, tg.number)
+		}
+		if ri.Category != tg.category {
+			t.Errorf("%s: Category = %q，期望 %q", tg.stem, ri.Category, tg.category)
+		}
+		byStem[tg.stem] = javRouteInputView{ri.Number, ri.Station, ri.Category}
+	}
+
+	// 站名要从主干里认出来（`091926-001-carib` → CARIB）—— 素人那档就靠它路由。
+	if v := byStem["091926-001-carib"]; v.station != "CARIB" {
+		t.Errorf("日期序号型没认出站名：%+v（素人那档就是靠它路由的）", v)
+	}
+	// 番号必须**剥掉站名**：`091926-001-carib` → `091926-001`。
+	// 带站名去搜上游必然搜不到（上游的番号是 `091926-001`），那一部会被静默
+	// 记成「上游没有这一部」—— 实测就是这么暴露出来的。
+	if v := byStem["091926-001-carib"]; v.number != "091926-001" {
+		t.Errorf("番号没剥站名：%q，期望 %q（带站名搜上游必搜不到）", v.number, "091926-001")
+	}
+
+	// 番号本体自带站名的那两类（2026-10-16 加）：站名是**从番号里**认出来的
+	// （`MatchStation` 的判据 C，靠 `jav.AmateurStationTokens` 那份裸 token 表），
+	// 而番号本身**原样**交给上游 —— 上游的番号就是 `HEYZO-3950`。
+	//
+	// 这条缺口以前的后果：认不出站名 → 走**有码链**（`RouteCensored`）而不是素人链，
+	// 而 HEYZO/SIRO/GANA 的料只在素人链那几家（caribbeancom/avsox/…）上 ——
+	// 整档一部都补不到，且统计里看不出来（它确实「跑过了」）。
+	for i, tg := range targets {
+		wantStation := map[string]string{"HEYZO-3950": "HEYZO", "SIRO-5123": "SIRO"}[tg.stem]
+		if wantStation == "" {
+			continue
+		}
+		if v := byStem[tg.stem]; v.station != wantStation {
+			t.Errorf("%s 没认出站名：%+v（素人那档就靠它路由）", tg.stem, v)
+		}
+		if v := byStem[tg.stem]; v.number != tg.stem {
+			t.Errorf("%s 的番号 = %q，应当**原样**交给上游（上游的番号就带站名）", tg.stem, v.number)
+		}
+		// 终点也要对：认出来的站名必须**真的把它路由到素人档** —— 这一条才是用户
+		// 会看到的东西。判据走 jav.RouteOf（纯函数），与生产那条路同源。
+		if got := jav.RouteOf(routes[i]); got != jav.RouteAmateur {
+			t.Errorf("%s 路由 = %q，期望素人档（认不出站名时会走有码链，那一档没有它的料）", tg.stem, got)
+		}
+	}
+}
+
+type javRouteInputView struct{ number, station, category string }

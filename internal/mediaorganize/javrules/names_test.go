@@ -861,3 +861,79 @@ func TestUserBrandDoesNotChangeNocodeFallback(t *testing.T) {
 		t.Error("改名那条路应当认这个厂牌")
 	}
 }
+
+// TestIsRecognizableNumber 钉住「这个名字能不能当番号用」那条**加法**判据。
+//
+// 它与 `HasCode` 的分工见 names.go 里那段注释：HasCode 是**改名闸门**（保守是
+// 优点，多认一种形态就多一批文件走进清理式改名），这一条服务的是**「值不值得
+// 拿去反查上游 / 认作侧车」**—— 漏判的代价是整部片静默消失（番号取不出来 →
+// 调用方直接跳过、连日志都没有）。所以它必须比 HasCode 宽，且宽度**有据可依**：
+//
+//	国产形状   `DYXO002`          —— HasCode 的国产判据是认厂牌，而厂牌没有上限
+//	国产形状   `XKG147` / `RS034` —— 同上（真机 `番号临时` 那 7 部里 4 部是这类）
+//	点分日期型 `Tushy.2026.09.20` / `vixen.26.09.19` —— HasCode **刻意**不含
+//
+// 两条路必须同源（`javplanner.parseSidecarName` 认侧车 与 `strmscrape.javScrapeNumber`
+// 拆主干反查上游），否则表现是「刮削认得出、整理认不出」这种最难查的不一致。
+func TestIsRecognizableNumber(t *testing.T) {
+	// ── 真番号：日式 / FC2 / 日期序号 / 国产厂牌（HasCode 那三条的功劳）──
+	hasCodeHits := []string{
+		"ABP-123", "SSIS-001", "MKD-S03",
+		"FC2PPV-1234567", "FC2-PPV-1234567", "FC2-4939195",
+		"091926-001", "041626_001",
+	}
+	// ── 真番号：HasCode **认不出**的那两类（这条判据存在的理由）──
+	widened := []string{
+		"DYXO002", "XKG147", "RS034", "XKVP116", // 国产形状
+		"Tushy.2026.09.20", "vixen.26.09.19", "RKPrime.26.09.21", // 欧美点分日期型
+		"Blacked.26.05.03", // 大小写混写
+	}
+	for _, n := range append(append([]string{}, hasCodeHits...), widened...) {
+		if !IsRecognizableNumber(n, nil) {
+			t.Errorf("IsRecognizableNumber(%q) = false，期望 true", n)
+		}
+	}
+
+	// 放宽的那两类**确实**是 HasCode 认不出的 —— 否则这条判据就是多余的，
+	// 而那意味着下面那段「为什么宽」的注释已经过时、有人在别处放宽了 HasCode。
+	for _, n := range widened {
+		if HasCode(n) {
+			t.Errorf("%q 现在 HasCode 也认了 —— IsRecognizableNumber 的放宽部分该重新审一遍", n)
+		}
+	}
+
+	// ── 不是番号：一个都不许收 ──
+	//
+	// 最后两个尤其要紧：`4K` / `notes` / `config` 这类名字**机械拆分**是拆得开的
+	// （`quality.ParseJavFileName` 对它们同样返回 ok），网盘上满地都是跟着视频
+	// 一起带的配置 json —— 少这道闸，一个 `readme-4K.json` 就会被当成侧车。
+	misses := []string{
+		"", "   ",
+		"random-movie-name", "普通家庭录像", "第一部",
+		"4K", "notes", "config", "readme-4K", "1080p.x264",
+		"192.168.31.4", // 点分型要求「字母段 + 数字」打头，纯数字不算
+	}
+	for _, n := range misses {
+		if IsRecognizableNumber(n, nil) {
+			t.Errorf("IsRecognizableNumber(%q) = true，期望 false（它不像番号）", n)
+		}
+	}
+
+	// 厂牌表这条路是**加法**：用户填的厂牌让原本认不出的形状变得认得出。
+	//
+	// 样本用 `ZZ4BRAND0001` 而不是 `ZZBRAND0001` —— 后者早就被那条「国产·形状」
+	// 规则（纯大写字母段直接接数字）收走了，测不出厂牌表的作用。名字里带个数字
+	// 就绕开了形状规则（`ZZ` 后面是 `4`、`BRAND` 前面是数字），只剩厂牌表认得出。
+	// 同一条样本用在 TestUserBrandDoesNotChangeNocodeFallback 里，那里有完整说明。
+	const brandSample = "ZZ4BRAND0001"
+	if IsRecognizableNumber(brandSample, nil) {
+		t.Fatalf("%q 不带厂牌时不该算番号（那正是要修的那个病）", brandSample)
+	}
+	if !IsRecognizableNumber(brandSample, []string{"ZZ4BRAND"}) {
+		t.Error("带上用户填的厂牌之后应当认得出来")
+	}
+	// 厂牌表也归一化（用户在设置页多半写成小写、可能带尾连字符）。
+	if !IsRecognizableNumber(brandSample, []string{"zz4brand-"}) {
+		t.Error("厂牌应当忽略大小写与尾连字符")
+	}
+}

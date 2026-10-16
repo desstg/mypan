@@ -14,6 +14,7 @@ import (
 	"litepan/internal/jav/emby"
 	"litepan/internal/jav/quality"
 	"litepan/internal/mediaorganize/javrules"
+	"litepan/internal/settings"
 	"litepan/internal/strm"
 )
 
@@ -42,6 +43,10 @@ import (
 //  2. **nfo 的 `<num>`**（生成器写的也是干净番号）；
 //  3. 都没有时用 `quality.ParseJavFileName` 拆主干 —— 它认 `-U` / `-C` / `-UC` /
 //     `-4K` / `-cdN` 那一套后缀，**与写侧 BuildJavFileName 同源**，不是另写一套正则。
+//     拆出来之后还要过 `javrules.IsRecognizableNumber` 那道闸（纯机械拆分对
+//     `4K` / `notes` 这种名字同样「拆得开」，而拿个随便的词去搜上游会白打一次请求，
+//     还被记成「上游没有这一部」）。那道闸比 `HasCode` 宽两条 —— 国产形状与欧美
+//     点分日期型 —— 理由见 javScrapeNumber 第 ③ 步。
 //
 // 三条都取不到就跳过那部片（不猜）。
 
@@ -113,7 +118,10 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc) (JavWal
 	root := src.Root
 	scopeKey := src.ScopeKey()
 
-	targets := collectJavScrapeTargets(root)
+	// 站名 token 与国产厂牌**只取一次**：扫盘时剥番号尾部的站名、认不认得出番号、
+	// 算路由线索，三处都用它们（见 javScrapeStationTokens）。
+	tokens, brands := s.javScrapeStationTokens()
+	targets := collectJavScrapeTargets(root, tokens, brands)
 	out.Total = len(targets)
 	if len(targets) == 0 {
 		return out, nil
@@ -127,12 +135,15 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc) (JavWal
 	// 网盘/代理这类中间层留余量，也让「用户关掉页面」能更快收手。
 	interval := 300 * time.Millisecond
 
+	// ② 路由线索**一次算好**（规则表只读一次，见 javScrapeRouteInputs）。
+	routes := s.javScrapeRouteInputs(targets, tokens)
+
 	for i, t := range targets {
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
 		s.setJavOnlineProgress(scopeKey, i+1, len(targets), "在线刮削："+t.stem)
-		scraped, failed := s.scrapeOneJav(ctx, t)
+		scraped, failed := s.scrapeOneJav(ctx, t, routes[i])
 		switch {
 		case failed:
 			out.Failed++
@@ -163,6 +174,26 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc) (JavWal
 		s.log.Warn("jav online scrape artwork failed", "source", scopeKey, "err", err)
 	}
 	return out, nil
+}
+
+// JavWallOnlineScrapeByTask 是「按任务 id 跑在线刮削」的入口（同步，跑完才返回）。
+//
+// 存在的理由：`JavWallOnlineScrape` 收的是**未导出**的 `*wallSrc`，于是包外
+// （`internal/app` 那个 live 联调测试）拿不到它。生产那条路走
+// `StartJavWallOnlineScrape(WallSourceRef{StrmTaskID: id})`（异步 + 进度轮询），
+// 而测试要的是「跑完就能断言产物」。
+//
+// ⚠️ **不要挂到 HTTP 上** —— 同步跑一百多部要十几分钟，中间那层反代等不了
+// （见 JavWallOnlineScrape 文件头那段 502 的说明）。
+func (s *Service) JavWallOnlineScrapeByTask(ctx context.Context, taskID int64) (JavWallOnlineScrapeResult, error) {
+	if taskID <= 0 {
+		return JavWallOnlineScrapeResult{}, domain.Errorf(domain.CodeValidation, "任务 id 无效")
+	}
+	src, err := s.resolveSource(ctx, WallSourceRef{StrmTaskID: taskID})
+	if err != nil {
+		return JavWallOnlineScrapeResult{}, err
+	}
+	return s.JavWallOnlineScrape(ctx, src)
 }
 
 // StartJavWallOnlineScrape 起一个**后台**在线刮削任务，立刻返回当前进度。
@@ -243,6 +274,65 @@ func javScrapeRelPaths(root string, targets []javScrapeTarget) []string {
 	return out
 }
 
+// javScrapeStationTokens 一次性给出扫盘要用的两张表：站名 token 与国产厂牌。
+//
+// 两个来源：
+//
+//	① 规则表 includes（`StationTokens` 只收纯字母数字的那些）；
+//	② 素人站名单（`jav.AmateurStationTokens`）—— `HEYZO-` / `SIRO-` 这类**带尾连字符**
+//	   的写法过不了 `StationTokens` 的 `isStationShape`（那个尾连字符会被
+//	   `wordBefore`/`wordAfter` 当分隔符吃掉，永远匹配不上紧贴番号的 `HEYZO`），
+//	   但去掉连字符的形态正是 `MatchStation` 要的。
+//
+// 厂牌表（第二条返回值）给取番号那道闸用（见 javScrapeNumber 第 ③ 步）：它要的
+// 是「这个名字能不能当番号用」，而国产厂牌是其中一条判据。**在这里一起算**而不是
+// 每个目标各算一次 —— `javrules.Parse` + `CNBrandsFromRules` 是 JSON 解析 + 正则
+// 编译 + 扫全表，108 部就是 108 遍，而结果与目标无关。
+func (s *Service) javScrapeStationTokens() (tokens []string, brands []string) {
+	rules := javrules.Parse("")
+	if s.settings != nil {
+		rules = javrules.Parse(s.settings.String(settings.KeyMOJavRules))
+	}
+	tokens = javrules.StationTokens(rules.ClassifyRules)
+	tokens = append(tokens, jav.AmateurStationTokens()...)
+	return tokens, javrules.CNBrandsFromRules(rules.ClassifyRules)
+}
+
+// javScrapeRouteInputs 一次算出全部目标的路由线索（**规则表只读一次**）。
+//
+// 为什么要提前算：`javrules.Parse` + `StationTokens` 每个目标各跑一次的话，
+// 108 部就是 108 次 JSON 解析 —— 而结果只依赖 (stem, category)，与目标无关。
+// 这里在循环之前算好，循环里只做纯函数调用。
+//
+// 站名线索（`MatchStation`）的输入是**磁盘上那个主干**：用户库里日期序号型的目录
+// 100% 带站名后缀（`091926-001-carib`，见 javrules/station.go 的实测），
+// 而 MatchStation 要求站名**紧贴番号**，所以喂 stem 比喂完整路径稳。
+//
+// 对「番号本体自带站名」的那类（`HEYZO-3950` / `200GANA-2931`），MatchStation 现在
+// 也认得出 —— 它的前缀判据是「切掉 token 之后剩下的还是不是番号形状」，
+// 见那里的注释。这一条正是素人档唯一的路由入口。
+//
+// 返回的下标与 targets 一一对应。
+func (s *Service) javScrapeRouteInputs(targets []javScrapeTarget, tokens []string) []jav.RouteInput {
+	out := make([]jav.RouteInput, len(targets))
+	for i, t := range targets {
+		out[i] = jav.RouteInput{
+			// t.number 已经在扫盘时**剥掉站名**了（见 stripScrapeStation）。
+			Number: t.number,
+			// 站名判据用**主干**（含站名后缀），不是 category。
+			Station: javrules.MatchStation(t.stem, t.number, tokens),
+			// 目录名只作提示（见 jav.RouteInput.Category）。
+			Category: t.category,
+			// ⚠️ MovieType **故意留空**：在线刮削走 `IngestByNumberFresh`，那条路
+			// 是「搜上游 → 抓详情」，扫盘这一刻还没查库、也没抓详情。而库里的 type
+			// 在「新片」场景下正是不可信的（见 jav.RouteInput.MovieType 那段）。
+			// 番号形状 + 站名 + 目录名三样已经够判；等发现某档路由不准时，
+			// 修法是在 `ingestMovie` 里用 `n.Type` 做二次修正，而不是在磁盘侧查库。
+		}
+	}
+	return out
+}
+
 // javScrapeTarget 是一个待补的作品目录。
 type javScrapeTarget struct {
 	absDir string
@@ -250,13 +340,26 @@ type javScrapeTarget struct {
 	flat   bool
 	names  emby.Names
 	number string // 归一化后的番号（空 = 取不出来，跳过）
+	// category 是一级目录名（海报墙的 tab 键，也是 javrules 的 TargetName 口径）。
+	//
+	// 它是**路由的线索之一**（不是依据）：用户在规则编辑器里随时能把
+	// 「有码」改名成「日本」，那时这里就命中不了路由表，退到默认链 ——
+	// 与加路由之前的行为一致，不会走错大类。见 jav.RouteInput.Category。
+	//
+	// 根目录下**直接躺着**的 `.strm` 那一类 category 为空串（与海报墙
+	// `JavWallCategory{Name: ""}` 对齐）。
+	category string
 }
 
 // collectJavScrapeTargets 扫盘列出所有作品目录（只读，与海报墙同一套深度上限）。
-func collectJavScrapeTargets(root string) []javScrapeTarget {
+//
+// ⚠️ **一级目录名要一路带下去**（2026-10-15 加的）：改造前这个递归只传 depth，
+// 层级信息整个丢掉，于是「这部片属于哪一类」在刮削这一侧无从得知 ——
+// 也就没法按档位选站点（FC2 那 1426 部就是这么一直在走无码那条链的）。
+func collectJavScrapeTargets(root string, tokens, brands []string) []javScrapeTarget {
 	var out []javScrapeTarget
-	var walk func(dir string, depth int)
-	walk = func(dir string, depth int) {
+	var walk func(dir, category string, depth int)
+	walk = func(dir, category string, depth int) {
 		if depth > javWallMaxDepth {
 			return
 		}
@@ -265,17 +368,22 @@ func collectJavScrapeTargets(root string) []javScrapeTarget {
 			return
 		}
 		files, subdirs := splitJavDirEntries(entries)
-		out = append(out, javScrapeTargetsInDir(dir, files)...)
+		out = append(out, javScrapeTargetsInDir(dir, files, category, tokens, brands)...)
 		for _, sub := range subdirs {
-			walk(filepath.Join(dir, sub.Name()), depth+1)
+			child := category
+			// depth==0 时这个子目录就是**一级目录**（= 分类）。
+			if depth == 0 {
+				child = sub.Name()
+			}
+			walk(filepath.Join(dir, sub.Name()), child, depth+1)
 		}
 	}
-	walk(root, 0)
+	walk(root, "", 0)
 	return out
 }
 
 // javScrapeTargetsInDir 把一个目录里直接躺着的 `.strm` 变成待补目标。
-func javScrapeTargetsInDir(absDir string, files map[string]os.DirEntry) []javScrapeTarget {
+func javScrapeTargetsInDir(absDir string, files map[string]os.DirEntry, category string, tokens, brands []string) []javScrapeTarget {
 	strmNames := make([]string, 0, 4)
 	for name := range files {
 		if strings.EqualFold(filepath.Ext(name), ".strm") {
@@ -294,11 +402,12 @@ func javScrapeTargetsInDir(absDir string, files map[string]os.DirEntry) []javScr
 		stem := strm.MediaStem(strmName)
 		names := emby.TargetNames(stem, flat)
 		out = append(out, javScrapeTarget{
-			absDir: absDir,
-			stem:   stem,
-			flat:   flat,
-			names:  names,
-			number: javScrapeNumber(absDir, files, names, stem),
+			absDir:   absDir,
+			stem:     stem,
+			flat:     flat,
+			names:    names,
+			number:   javScrapeNumber(absDir, files, names, stem, tokens, brands),
+			category: category,
 		})
 	}
 	return out
@@ -307,14 +416,18 @@ func javScrapeTargetsInDir(absDir string, files map[string]os.DirEntry) []javScr
 // javScrapeNumber 按**番号**取这部片的番号，绝不拿文件名当番号。
 //
 // 顺序见文件头那段说明。三条都取不到返回空串（调用方跳过）。
-func javScrapeNumber(absDir string, files map[string]os.DirEntry, names emby.Names, stem string) string {
+//
+// `tokens` 用来剥番号尾部的站名；`brands` 是用户填的国产厂牌，给第 ③ 步那道闸用
+// （见那里的说明）。
+func javScrapeNumber(absDir string, files map[string]os.DirEntry, names emby.Names, stem string, tokens, brands []string) string {
+	var number string
 	// ① 侧车 json 的 number 字段（本程序写的侧车里就是干净番号）。
-	if number := readJavNumberFromSidecar(absDir, files, stem); number != "" {
-		return number
+	if number = readJavNumberFromSidecar(absDir, files, stem); number != "" {
+		return stripScrapeStation(number, tokens)
 	}
 	// ② nfo 的 <num>。
-	if number := readJavNumberFromNFO(absDir, files, names); number != "" {
-		return number
+	if number = readJavNumberFromNFO(absDir, files, names); number != "" {
+		return stripScrapeStation(number, tokens)
 	}
 	// ③ 拆主干：`IPZZ-909-U` → `IPZZ-909`。
 	//    走 quality.ParseJavFileName —— **不要自己写正则**：后缀那套规则
@@ -324,14 +437,46 @@ func javScrapeNumber(absDir string, files map[string]os.DirEntry, names emby.Nam
 	//    ⚠️ **拆出来的还得再验一道**：`ParseJavFileName` 是纯机械拆分，
 	//    它自己就写着「不判断拆出来的是不是真的番号」（`ParseJavFileName("4K")`
 	//    会老实返回 `4K`）。拿一个随便的目录名去搜上游，白打一次请求还会被记成
-	//    「上游没有这一部」。判据用 javrules.HasCode —— 那是这个项目里**唯一权威**
-	//    的番号识别（注释里明写：不要另写一套，两套迟早分家）。
-	if number, _, ok := quality.ParseJavFileName(stem); ok {
-		if number = strings.TrimSpace(number); number != "" && javrules.HasCode(number) {
-			return number
+	//    「上游没有这一部」。
+	//
+	//    ⚠️⚠️ 判据必须是 `IsRecognizableNumber` 而**不是 `HasCode`**（2026-10-16 修的）。
+	//    原来只认 HasCode，于是**整两类番号在这里被判空**、
+	//    `scrapeOneJav` 第一行就 return（连日志都没有），静默计进「跳过」：
+	//      - 国产形状（`DYXO002` / `XKG147` / `RS034`）—— HasCode 的国产判据是
+	//        **认厂牌**，而这类片的厂牌一个都不在表里（见 javrules.cnShape）；
+	//      - 欧美点分日期型（`vixen.26.09.19`）—— HasCode **刻意**不含它。
+	//    同一个项目里 `javplanner.parseSidecarName` 早就用上那两条加法了，
+	//    这里是漏同步 —— 两处从此共用 `javrules.IsRecognizableNumber`。
+	if n, _, ok := quality.ParseJavFileName(stem); ok {
+		if n = strings.TrimSpace(n); n != "" && javrules.IsRecognizableNumber(n, brands) {
+			return stripScrapeStation(n, tokens)
 		}
 	}
 	return ""
+}
+
+// stripScrapeStation 把番号尾部粘着的**站名**剥掉（`091926-001-carib` → `091926-001`）。
+//
+// # 为什么必须剥（2026-10-15 实测出来的真 bug）
+//
+// 日期序号型番号（`091926-001`）本身不带任何站名信息，而它在用户库里
+// **几乎总是带站名后缀**（`091926-001-carib`）—— 那是目录整理时按用户要求拼上去的
+// （见 javrules/station.go：实测 FC2 目录 88 个日期序号型**全部**带站名）。
+//
+// 而这条链上三条取番号的判据都会把它原样带出来：
+// `ParseJavFileName("091926-001-carib")` **原样返回整个串**（实测），
+// `javrules.HasCode` 也因为里面有 `\d{6}-\d{3}` 而判真 —— 于是这个串被当成番号，
+// **拿去搜上游必然搜不到**（上游的番号是 `091926-001`），那一部就被静默记成
+// 「上游没有这一部」。侧车 json 与 nfo 里若也是带站名的形态，同样中招。
+//
+// `javrules.SplitStationSuffix` 正是为这件事写的（它的注释记着同一个坑：
+// 「侧车文件名也会被改成带站名的形态…若不拆回来，配对会失效」），
+// 所以这里直接复用它，不另写一套拆法。
+func stripScrapeStation(number string, tokens []string) string {
+	if base, station := javrules.SplitStationSuffix(number, tokens); station != "" {
+		return base
+	}
+	return number
 }
 
 // readJavNumberFromNFO 读同目录那份 nfo 的 `<num>`。
@@ -385,11 +530,14 @@ func readJavNumberFromSidecar(absDir string, files map[string]os.DirEntry, stem 
 // 写盘那一步复用 `internal/strm` 的 `writeFieldsIntoFile` / `fillNFOFieldsIfMissing`
 // —— 它们已经做完了「只补空、不覆盖用户的编辑」与「nfo 里元素存在就不动」这两条
 // 判据。这里再写一套的话，两条路的判据会分家。
-func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget) (bool, bool) {
+func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.RouteInput) (bool, bool) {
 	if strings.TrimSpace(t.number) == "" {
 		return false, false // 取不出番号：不猜
 	}
-	fields, ok := s.jav.FetchSidecarFieldsByNumber(ctx, t.number)
+	// 按**档位**选补缺链（FC2 走 FC2 那几家、有码走有码那几家）。
+	// 判据全在 jav.RouteOf 里（纯函数），这里只负责把线索传进去。
+	route := jav.RouteOf(ri)
+	fields, ok := s.jav.FetchSidecarFieldsByNumber(ctx, t.number, route)
 	if !ok || len(fields) == 0 {
 		// 上游没有这一部（国产厂牌 / 欧美片 / 日期序号型无码那批 —— 实测 116 里
 		// 有 13 部）。**不能就此什么都不做**：本地那份侧车 json 与 nfo 可能自己
@@ -427,39 +575,32 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget) (bool, bo
 		// 形状照写侧（`sidecarDoc`）：`schema` + `number` 是 emby.Parse 的两条硬
 		// 校验，缺一个这份 json 就会被当成「不是侧车」而跳过。其余字段走
 		// `fields`（上游那套点分键）。
-		doc := map[string]any{
-			"schema":       emby.SupportedSchema,
-			"number":       t.number,
-			"generated_at": time.Now().Format("2006-01-02T15:04:05-07:00"),
-			"fetched_at":   time.Now().UTC().Format(time.RFC3339),
-			"dest":         map[string]any{"added_at": time.Now().Format(time.RFC3339)},
-			"actors":       []any{},
-			"tags":         []any{},
-			"images":       map[string]any{"previews": []any{}},
-			"quality":      marksToJSON(marks),
-			"resource":     map[string]any{},
-			// `has_cnsub` 与 `quality.subtitle` 是**两个字段同一个事实**
-			// （见写侧 sidecarQualityJSON.Subtitle 的说明），从后缀推出来的中字
-			// 两边都要写 —— 只写一个会让「有 C 但没有中字标记」出现在界面上。
-			"has_cnsub":     marks.Subtitle,
-			"review":        "",
-			"magnets_count": 0,
-		}
-		for k, v := range fields {
-			setIfEmptyPathAny(doc, k, v)
-		}
-		// 后缀推出来的标记**最后合并**（`setIfEmptyPathAny` 只补空，所以上游若
-		// 明确给了 quality，以上游那份为准 —— 那是同一部片的另一条事实来源）。
-		mergeQualityMarks(doc, marks)
+		//
+		// 标题两栏（`title` / `origin_title`）**只在这一条新建分支里**给初始值：
+		// 已有侧车那条路一个字都不碰（理由见 newJavSidecarDoc 与
+		// jav.SidecarTitleByNumber 的注释）。
+		title, originTitle := s.jav.SidecarTitleByNumber(ctx, t.number)
+		doc := newJavSidecarDoc(t.number, fields, marks, title, originTitle)
 		if err := writeJSONFile(jsonPath, doc); err != nil {
 			return false, true
 		}
 		// 写完 json 之后用同一条路补 nfo（它有「元素存在就不动」的判据兜着）。
-		changed, err := strm.WriteFieldsIntoFile(jsonPath, fields)
-		if err != nil {
+		if _, err := strm.WriteFieldsIntoFile(jsonPath, fields); err != nil {
 			return false, true
 		}
-		_ = changed
+		// ⚠️ 上面那次回读**必然是「无改动」**：`fields` 里每一个非空的键都已经在
+		// 写盘前由 `setIfEmptyPathAny` 并进 doc 了，所以 `WriteFieldsIntoFile`
+		// 走的是 `!changed` 那条早退（见 strm/jav_metadata.go 里那段的说明），
+		// **根本到不了补 nfo 那一步**。
+		//
+		// 而 `title` / `origin_title` 正是我们刚塞进 doc、`fields` 里**没有**的两栏
+		// —— 不显式补一次的话，新建侧车这副「有标题」的元数据永远落不到 nfo 上
+		// （表现：卡片/Emby 里标题一直空着，而 json 里明明有）。
+		//
+		// nfo 名用 `emby.Names` 给的那份（与生成器**同源**）—— **不要按 json 名推**：
+		// 平铺布局下两者不同（`.strm` 多个时 nfo 名不是主干）。
+		// `FillNFOFieldsIfMissing` 的判据是「元素不存在才补」，重复调用幂等。
+		_ = s.strm.FillNFOFieldsIfMissing(filepath.Join(t.absDir, t.names.NFO), doc)
 		return true, false
 	}
 
@@ -511,6 +652,60 @@ func (s *Service) localJavRepair(t javScrapeTarget) bool {
 	// 跳过会让用户以为它被漏了。
 	_ = mergeQualityMarksIntoFile(jsonPath, javScrapeMarks(t.stem))
 	return true
+}
+
+// newJavSidecarDoc 拼一份**新建**侧车的 json 内容（在线刮削用）。
+//
+// 形状照写侧（`jav.sidecarDoc`）：`schema` + `number` 是 emby.Parse 的两条硬校验，
+// 缺一个这份 json 就会被当成「不是侧车」而跳过。其余字段走 `fields`（上游那套点分键），
+// 只补空（`setIfEmptyPathAny`），于是上游若明确给了同名的键，以上游那份为准。
+//
+// **抽成纯函数**是为了可测：`scrapeOneJav` 依赖 `s.jav` / `s.strm` 两个**具体类型**
+// （桩不了，见 SetJavService 的注释），端到端跑不到这条分支的判据上。而「新建的侧车
+// 里有没有 title / origin_title」正是四要钉住的东西，所以把它单独拎出来。
+//
+// `title` / `originTitle` 是**初始值**，只在这条新建分支上传进来（已有侧车那条路
+// 走替换通道，见 jav.SidecarTitleByNumber）。空串不写键 —— 写一个空 title 会让
+// emby 那边认为「这份侧车说了标题是空」，而它只是「我们不知道」。
+func newJavSidecarDoc(number string, fields map[string]any, marks quality.Marks, title, originTitle string) map[string]any {
+	doc := map[string]any{
+		"schema":       emby.SupportedSchema,
+		"number":       number,
+		"generated_at": time.Now().Format("2006-01-02T15:04:05-07:00"),
+		"fetched_at":   time.Now().UTC().Format(time.RFC3339),
+		"dest":         map[string]any{"added_at": time.Now().Format(time.RFC3339)},
+		"actors":       []any{},
+		"tags":         []any{},
+		"images":       map[string]any{"previews": []any{}},
+		"quality":      marksToJSON(marks),
+		"resource":     map[string]any{},
+		// `has_cnsub` 与 `quality.subtitle` 是**两个字段同一个事实**
+		// （见写侧 sidecarQualityJSON.Subtitle 的说明），从后缀推出来的中字
+		// 两边都要写 —— 只写一个会让「有 C 但没有中字标记」出现在界面上。
+		"has_cnsub":     marks.Subtitle,
+		"review":        "",
+		"magnets_count": 0,
+	}
+	for k, v := range fields {
+		setIfEmptyPathAny(doc, k, v)
+	}
+	// 标题两栏最后补（`setIfEmptyPathAny` 只补空）：上游那套字段里本来就没有这两个键，
+	// 所以这一句实际上就是「放进去」；写成补空是为了与上面同一条判据，将来上游若
+	// 真的开始推 title，也不会被这里覆盖掉。
+	//
+	// **空串连键都不写**（不是写一个空 title）—— 那会让读取方以为「这份侧车说了标题
+	// 是空」，而这里的事实只是「库里查不到」（番号还没入库、或那片没有标题）。
+	// 键不存在时读取方会走它自己的兜底（拿 `number` 当名），比空串正确。
+	if strings.TrimSpace(title) != "" {
+		setIfEmptyPathAny(doc, "title", title)
+	}
+	if strings.TrimSpace(originTitle) != "" {
+		setIfEmptyPathAny(doc, "origin_title", originTitle)
+	}
+	// 后缀推出来的标记**最后合并**（`setIfEmptyPathAny` 只补空，所以上游若
+	// 明确给了 quality，以上游那份为准 —— 那是同一部片的另一条事实来源）。
+	mergeQualityMarks(doc, marks)
+	return doc
 }
 
 // javScrapeMarks 从主干拆出质量标记（`IPZZ-909-U` → 破解；`-4K` → 4K）。

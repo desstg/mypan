@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { getApiErrorMessage } from "@/api/client";
 import { testMediaOrganizeTmdb } from "@/api/mediaOrganize";
 import {
@@ -12,7 +12,9 @@ import AppButton from "@/components/base/AppButton.vue";
 import AppInput from "@/components/base/AppInput.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import AppStateBlock from "@/components/base/AppStateBlock.vue";
+import SettingsBoolSegment from "@/components/admin/SettingsBoolSegment.vue";
 import SettingsCard from "@/components/admin/SettingsCard.vue";
+import SettingsCheckboxRow, { type CheckboxOption } from "@/components/admin/SettingsCheckboxRow.vue";
 import SettingsHelpTooltip from "@/components/admin/SettingsHelpTooltip.vue";
 import SettingsRow from "@/components/admin/SettingsRow.vue";
 import TmdbHostsHelpTip from "@/components/admin/TmdbHostsHelpTip.vue";
@@ -21,6 +23,12 @@ import { useSettingsLoad } from "@/composables/useSettingsLoad";
 import { toast } from "@/composables/useToast";
 
 const SCRAPE_SETTINGS_ACCENT = "#38bdf8";
+
+/** 「翻哪些字段」的两个选项（顺序即界面顺序）。 */
+const translateFieldOptions: CheckboxOption[] = [
+  { key: "summary", label: "简介" },
+  { key: "title", label: "标题" },
+];
 
 const tmdbLanguageOptions = [
   { value: "zh-CN", label: "简体中文" },
@@ -47,10 +55,33 @@ const {
 } = useSettingsForm<StrmScrapeSettings>({
   write_mode: "missing_only",
   tmdb_api_key: "",
+  theporndb_key: "",
+  // 只读的回读字段：后端告诉界面「key 配了没」，供输入框 placeholder 用。
+  // 必须出现在初始草稿里（类型是必填）—— 但**它不参与保存**（后端自己算）。
+  theporndb_key_set: false,
+  flaresolverr_url: "",
+  translate_enabled: false,
+  translate_fields: ["summary"] as string[],
+  translate_prompt: "",
   tmdb_language: "zh-CN",
   tmdb_api_host: "https://api.themoviedb.org",
   tmdb_image_host: "https://image.tmdb.org",
   tmdb_request_interval_ms: 300,
+});
+
+/**
+ * 「翻哪些字段」的勾选桥：界面用 `Record<string, boolean>`（SettingsCheckboxRow 的形状），
+ * 接口用 `string[]`。两边的形状不同是刻意的 —— 那个组件是全项目复选框的统一形态
+ * （与「番号元数据六项」共用），不该为一个字段改成数组。
+ */
+const translateFieldChecks = computed({
+  get: () => ({
+    summary: settings.translate_fields.includes("summary"),
+    title: settings.translate_fields.includes("title"),
+  }),
+  set: (v: Record<string, boolean>) => {
+    settings.translate_fields = ["summary", "title"].filter((k) => v[k]);
+  },
 });
 
 async function loadSettings(opts?: { silent?: boolean }) {
@@ -83,6 +114,10 @@ async function saveSettings() {
       ...settings,
       write_mode: (data.write_mode as StrmScrapeWriteMode) || settings.write_mode,
       tmdb_api_key: data.tmdb_api_key || settings.tmdb_api_key,
+      // 密钥**回过就清空输入框**：后端从不回传它，留在框里会让人以为「又存了一遍」，
+      // 而且下次保存会把它再当改动提交一次。保存成功即视为「已配置」。
+      theporndb_key: "",
+      theporndb_key_set: data.theporndb_key_set || Boolean(settings.theporndb_key),
     });
     snapshotBaseline();
     toast.success("刮削设置已保存");
@@ -175,6 +210,103 @@ defineExpose(
             />
           </template>
         </SettingsRow>
+        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('theporndb_key')">
+          <template #info>
+            <div class="settings-row__label">ThePornDB API Key</div>
+            <SettingsHelpTooltip title="刮削欧美片站点的 API">
+              补<strong>欧美片</strong>的简介 / 演员 / 时长 / 片商 / 标签。
+              欧美片的剧情 JAVDB 基本不给（实测 471 部里 470 部缺简介），这一家是目前唯一补得上的。
+              key 到 theporndb.net 注册后获取。
+              <br /><br />
+              <strong>留空 = 不修改</strong>。没配时只有欧美那一档少一家源，其它档不受影响。
+            </SettingsHelpTooltip>
+          </template>
+          <template #control>
+            <AppInput
+              v-model="settings.theporndb_key"
+              type="password"
+              :placeholder="settings.theporndb_key_set ? '已配置（留空 = 不修改）' : '粘贴 ThePornDB 的 API Key'"
+              :ignore-autofill="true"
+            />
+          </template>
+        </SettingsRow>
+        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('flaresolverr_url')">
+          <template #info>
+            <div class="settings-row__label">FlareSolverr 地址</div>
+            <SettingsHelpTooltip title="破解站点防护（Cloudflare 盾 / 年龄确认墙）">
+              有些站点普通请求过不去：<code>freejavbt</code> 要过 Cloudflare 盾、
+              <code>dmm</code> 要过年龄确认墙。填上 FlareSolverr 的地址后，刮削会在
+              「直连 → 代理」都失败时**最后**请它用真浏览器去取（一次几十秒，所以是最后一段）。
+              <br /><br />
+              格式：<code>http://主机:8191</code>（FlareSolverr 默认端口 8191）。
+              <strong>留空 = 不启用</strong> —— 那两家站补不上，其它档不受影响。
+            </SettingsHelpTooltip>
+          </template>
+          <template #control>
+            <AppInput v-model="settings.flaresolverr_url" placeholder="http://127.0.0.1:8191" :ignore-autofill="true" />
+          </template>
+        </SettingsRow>
+        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('translate_enabled')">
+          <template #info>
+            <div class="settings-row__label">AI 翻译简介 / 标题</div>
+            <SettingsHelpTooltip title="把日文翻成中文">
+              刮削抓回来的简介绝大多数是<strong>日文</strong>（DMM / avsox 那些站的原文），标题也大面积是日文。
+              打开这一项后，刮削会在补到元数据之后用 AI 翻成中文再落库。
+              <br /><br />
+              <strong>已经是中文的不会翻</strong>（按汉字/假名占比判），免得白花额度还把通顺的中文改写坏。
+              <br /><br />
+              AI 本身（地址 / 密钥 / 模型）在<strong>「辅助工具 → 增强工具 → AI 辅助识别」</strong>
+              那张卡片里配 —— 这里只管「刮削时要不要用它翻」。
+              <br /><br />
+              ⚠️ 那个卡片要<strong>同时</strong>开着开关、并填好一条配置（API 地址 / 模型 / API Key，
+              且勾上「默认激活」），这里才会真的翻；否则静默不生效。
+            </SettingsHelpTooltip>
+          </template>
+          <template #control>
+            <SettingsBoolSegment v-model="settings.translate_enabled" label="启用" />
+          </template>
+        </SettingsRow>
+        <SettingsRow v-if="settings.translate_enabled" :show-changed-badge="true" :changed="isFieldChanged('translate_fields')">
+          <template #info>
+            <div class="settings-row__label">翻译哪些字段</div>
+            <SettingsHelpTooltip title="简介 / 标题">
+              <strong>简介</strong>：译文覆盖简介，<strong>原文留在库里</strong>（`summary_original` 那一列）——
+              翻错了或想换模型重翻时，原文是唯一依据。<br /><br />
+              <strong>标题</strong>：译文写进「中文标题」那一栏（`title_zh`），
+              <strong>不动</strong> JAVDB 那行原文 —— nfo 里会自动取中文标题。
+            </SettingsHelpTooltip>
+          </template>
+          <template #control>
+            <!-- ⚠️ `:missing-checked="false"`：缺项 = **不翻**（与「番号元数据六项」
+                 那条默认全开相反 —— 这里是「没勾就不花额度」）。 -->
+            <SettingsCheckboxRow
+              v-model="translateFieldChecks"
+              :options="translateFieldOptions"
+              :missing-checked="false"
+            />
+          </template>
+        </SettingsRow>
+        <SettingsRow v-if="settings.translate_enabled" :show-changed-badge="true" :changed="isFieldChanged('translate_prompt')">
+          <template #info>
+            <div class="settings-row__label">翻译提示词</div>
+            <SettingsHelpTooltip title="自定义提示词（可留空）">
+              留空 = 用内置那份（「翻成简体中文、只输出译文、已是中文则原样返回、保留人名番号」）。
+              <br /><br />
+              想加要求就写在这里，例如「翻成台湾用语」或「人名保留原文不音译」。
+              <br /><br />
+              ⚠️ 别去掉「<strong>只输出译文</strong>」那条 —— 模型多说一句「以下是翻译：」
+              就会永久留在你的 nfo 里。
+            </SettingsHelpTooltip>
+          </template>
+          <template #control>
+            <textarea
+              v-model="settings.translate_prompt"
+              class="scrape-settings__textarea"
+              rows="4"
+              placeholder="留空 = 用内置提示词"
+            />
+          </template>
+        </SettingsRow>
         <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('tmdb_language')">
           <template #info>
             <div class="settings-row__label">搜索语言</div>
@@ -240,6 +372,22 @@ defineExpose(
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+.scrape-settings__textarea {
+  width: 420px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+.scrape-settings__textarea:focus {
+  outline: none;
+  border-color: var(--brand);
 }
 .settings-row__label {
   display: inline-flex;

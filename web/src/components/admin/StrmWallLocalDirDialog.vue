@@ -164,7 +164,7 @@ async function remove(dir: WallLocalDir) {
             <AppButton variant="secondary" @click="browseOpen = true">浏览…</AppButton>
           </div>
           <p class="wall-dir__hint">
-            ⚠️ 这里列的是「容器内路径」—— 跑 LitePan 那个进程能看到的目录（挂在容器里的那个）。
+            ⚠️ 这里列的是「容器内路径」—— 跑 MyPan 那个进程能看到的目录（挂在容器里的那个）。
           </p>
           <div class="wall-dir__row">
             <AppInput v-model="formName" :placeholder="namePlaceholder" />

@@ -134,16 +134,21 @@ type Service struct {
 	// 那个是单部（补缺链跑完那一刻推）。两个都要有，理由写在 SidecarSyncSink 的注释里。
 	sidecarSyncSink SidecarSyncSink
 
-	// synopsisSrcs 是「补剧情简介」的来源（JAVDB 大面积没给，见 synopsis 包）。
-	// nil 表示不补 —— 与「设置没配就不抓」的取向一致。
-	synopsisMu   sync.Mutex
-	synopsisSrcs []synopsis.Source
-	synopsisKey  string
-	enricherList []synopsis.Enricher
-	enricherKey  string
-	// titleEnricherList 是「补中文标题」的来源（与 enricherList 分开的理由见
-	// titleEnrichers 的注释：一个补缺、一个另存，判据完全不同）。
-	titleEnricherList []synopsis.Enricher
+	// translator 是 AI 翻译那条路（把日文简介/标题转中文）。nil = 不翻译。
+	// 由 Options.Translator 注入，见 translate.go。
+	translator Translator
+
+	// synopsisMu 保护下面那批**全量站点客户端**与它的构造指纹。
+	synopsisMu sync.Mutex
+	// siteEnrichers 是**全量站点客户端**（按站点 id 索引），构造一次、按路由挑切片。
+	//
+	// 为什么不按路由各建一份：synopsis 的 conn 内建 per-conn 的限速器，
+	// 按路由复制会让同一个站被 N 份限速器同时打（见 ensureSiteClients 的注释）。
+	// 站点 id 与 routes.go 的 routeSiteTable 逐字对应。
+	siteEnrichers map[string]synopsis.Enricher
+	// enricherKey 是构造这批客户端时的设置指纹（gap / timeout / javbus 基址 / 代理），
+	// 变了整批重建 —— 改了代理不重建就等于「设置保存了但没生效」。
+	enricherKey string
 
 	// hydrate 是详情页的「后台补这一部」队列（见 hydrate.go）。
 	// 用 once 惰性建：它只在 Start 之后才有人用，而单测不调 Start。
@@ -251,6 +256,7 @@ func New(opts Options) *Service {
 	}
 	return &Service{
 		rankCache:  map[string]rankCacheEntry{},
+		translator: opts.Translator,
 		movies:     opts.Movies,
 		magnets:    opts.Magnets,
 		reviews:    opts.Reviews,
@@ -481,119 +487,265 @@ func (s *Service) javdbClient() (JavdbClient, error) {
 	return client, nil
 }
 
-// enrichers 返回「补字段」的来源列表（按优先级）。
+// ensureSiteClients 构造**全部**站点客户端（一次性）。
 //
-// 顺序即优先级，也是「先问哪家最划算」。2026-09-27 重排过一次，依据是实测
-// （对着内网那台 MDC-NG 的字段优先级 + 自己逐站打过一遍）：
+// # 为什么全都建、而不是按路由各建一份（2026-10-15 改造）
 //
-//	missav     slug 就是番号，og:description 是**一段真简介**（实测 93~136 字）；FC2/素人那批 404
-//	jav321     有码覆盖不错，但命中判定偏窄（同一部片换个体位就漏）
-//	caribbeancom 无码/素人（日期序号型）的简介
-//	javbus     前几家都没有的：导演、时长、类别、发行日期（它**没有简介**）
+// synopsis 的 conn 内建 `throttler{gap}`，而 `throttler.lastReq` 是**客户端自己的
+// 状态**。按路由各建一份 = 同一个站被 N 份限速器同时打 —— 对
+// `adult.contents.fc2.com` 这种有反爬的站，等于自毁节流。
+// 所以这里**只建一份**，路由只是从里面**挑切片**（见 pickSiteEnrichers）。
 //
-// ⚠️ **airav 不在这条链里**：它给的是「一行标题」不是剧情简介（详情页没有简介区块，
-// 只有 `<title>` 里那行中文标题 + 演员名）。放进简介链会把真正的简介挡掉
-// （Enrich 是首个非空胜）—— 实测就是这么把 missav 那段 136 字的简介挡成 14 字标题的。
-// 它只作为**中文标题**的来源，见 titleEnrichers()。
+// 构造很便宜（一个 *http.Client + 一个 conn），唯一贵的是 timeouts，不占资源。
 //
-// ⚠️ **javbus 从第一档挪到了最后**：它是日式**有码站**的库，无码 / 欧美 / 素人
-// 那几类它基本没有 —— 排在前面会把「无码欧美补不上」变成常态（实测每部只剩它
-// 一个响应，其它全空）。而简介为空的大头恰恰是那几类。
-func (s *Service) enrichers() []synopsis.Enricher {
-	// 单测注入点：真实现要打外网，用例里换成桩（见 catalog_test.go 的 fixture）。
-	if s.testEnrichers != nil {
-		return s.testEnrichers
-	}
+// 缓存键与改造前**同一组**（gap / timeout / javbus 基址 / 代理）—— 改了代理不重建
+// 就等于「设置保存了但没生效」。
+func (s *Service) ensureSiteClients() {
 	if s.settings == nil {
-		return nil
+		return
 	}
 	proxy := s.proxyURL()
 	key := strings.Join([]string{
 		strconv.Itoa(s.settings.Int(settings.KeyJavRequestGapMS)),
 		strconv.Itoa(s.settings.Int(settings.KeyJavTimeoutSec)),
 		s.settings.StringAllowEmpty(settings.KeyJavJavbusBase),
-		// 代理也要进 key：改了代理不重建客户端，就等于「设置保存了但没生效」。
 		proxy,
 	}, "|")
 	s.synopsisMu.Lock()
 	defer s.synopsisMu.Unlock()
-	if s.enricherList != nil && s.enricherKey == key {
-		return s.enricherList
+	if s.siteEnrichers != nil && s.enricherKey == key {
+		return
 	}
 	gap := time.Duration(s.settings.Int(settings.KeyJavRequestGapMS)) * time.Millisecond
 	timeout := s.timeout()
-	// ProxyURL 传的是**兜底**：synopsis 那边的策略是「先直连，连不上才走它」
-	// （见 synopsis/conn）。所以这里给的是「万一直连不通时的出路」，不是「必须走代理」。
-	s.enricherList = []synopsis.Enricher{
-		synopsis.NewMissav(synopsis.MissavOptions{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
-		synopsis.NewJav321(synopsis.Jav321Options{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
-		synopsis.NewCaribbeancom(synopsis.CaribbeancomOptions{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
-		synopsis.NewJavbus(synopsis.JavbusOptions{
-			BaseURL:    s.settings.StringAllowEmpty(settings.KeyJavJavbusBase),
-			Timeout:    timeout,
-			RequestGap: gap,
-			ProxyURL:   proxy,
-		}),
-	}
+	s.siteEnrichers = buildSiteEnrichers(siteOptions{
+		Timeout:      timeout,
+		Gap:          gap,
+		JavbusBase:   s.settings.StringAllowEmpty(settings.KeyJavJavbusBase),
+		ThePornDBKey: s.settings.StringAllowEmpty(settings.KeyJavThePornDBKey),
+		// FlareSolverr 地址在「海报墙 → 设置」里配（刮削设置都归那一页）。
+		FlareSolverrURL: s.settings.StringAllowEmpty(settings.KeyStrmFlareSolverrURL),
+		ProxyURL:        proxy,
+	})
 	s.enricherKey = key
-	return s.enricherList
 }
 
-// titleEnrichers 返回**中文标题**的来源（顺序即优先级）。
+// siteOptions 是构造全部站点客户端需要的设置。
+type siteOptions struct {
+	Timeout time.Duration
+	Gap     time.Duration
+	// JavbusBase 是 JAVBUS 的站基址（它家域名常换，所以是设置项）。
+	JavbusBase string
+	// ThePornDBKey 是欧美那档的 theporndb API key。空 = 这一家不可用（见 theporndb.go）。
+	ThePornDBKey string
+	// FlareSolverrURL 是第三段出口（破 CF 盾 / 年龄墙）。空 = 不启用。见 flaresolverr.go。
+	FlareSolverrURL string
+	// ProxyURL 是**兜底**代理：synopsis 那边是「先直连，连不上才走它」。
+	//
+	// ⚠️ 这不是可有可无的一格 —— 2026-10-15 逐站实测：这批站**直连几乎全不通、
+	// 走代理才通**（`fc2`/`avsox`/`freejavbt`/`dmm` 直连要么 000 要么超时，
+	// 走用户配的 `http://192.168.31.9:7890` 全部 200）。
+	ProxyURL string
+}
+
+// buildSiteEnrichers 构造**全部**站点客户端（纯函数，便于测试）。
+//
+// ⚠️ 返回的 map 的键必须与 routes.go 的 routeSiteTable 里写的**逐字一致**。
+// 这两处分家的表现是「路由表里排了这家、实际却静默跳过」—— 不报错，只是那一段
+// 顺序白排。`TestRouteSiteIDsAreImplemented` 盯着这件事。
+func buildSiteEnrichers(o siteOptions) map[string]synopsis.Enricher {
+	base := siteOptions{
+		Timeout:  o.Timeout,
+		Gap:      o.Gap,
+		ProxyURL: o.ProxyURL,
+	}
+	out := map[string]synopsis.Enricher{
+		"missav": synopsis.NewMissav(synopsis.MissavOptions{
+			Timeout: base.Timeout, RequestGap: base.Gap, ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		"jav321": synopsis.NewJav321(synopsis.Jav321Options{
+			Timeout: base.Timeout, RequestGap: base.Gap, ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		"caribbeancom": synopsis.NewCaribbeancom(synopsis.CaribbeancomOptions{
+			Timeout: base.Timeout, RequestGap: base.Gap, ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		"javbus": synopsis.NewJavbus(synopsis.JavbusOptions{
+			BaseURL:    o.JavbusBase,
+			Timeout:    base.Timeout,
+			RequestGap: base.Gap,
+			ProxyURL:   base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		"airav": synopsis.NewAirav(synopsis.AiravOptions{
+			Timeout: base.Timeout, RequestGap: base.Gap, ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		// FC2 官方站 —— 覆盖库里那 1426 部（接它之前简介缺失 100%）。
+		"fc2": synopsis.NewFC2(synopsis.FC2Options{
+			Timeout: base.Timeout, RequestGap: base.Gap, ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		// 国产（麻豆系）—— 国产那 1140 部里 99% 缺演员、99% 缺简介、
+		// 96% 缺系列与剧照，而**没有一家能当权威源**，只能靠几家拼（见 madouqu.go）。
+		"madouqu": synopsis.NewMadouqu(synopsis.MadouquOptions{
+			Timeout: base.Timeout, RequestGap: base.Gap, ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		// 无码（avsox.click）—— **JSON 接口，字段比 JAVDB 还全**（简介/演员/标签/
+		// 时长/系列/片商/剧照），能填无码那档 92% 的简介缺口。见 avsox.go。
+		"avsox": synopsis.NewAvsox(synopsis.AvsoxOptions{
+			Timeout: base.Timeout, RequestGap: base.Gap, ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		// 欧美（theporndb 官方 API）—— 那档 471 部里 470 部缺简介，而 mdc-ng
+		// 的欧美链**只有这一家**。⚠️ **要 key**：没配 key 时它的 `Enrich` 会
+		// **立刻返回**（一个 HTTP 都不发，见 theporndb.go），所以这里照常注册 ——
+		// 让它在链里占着位子，用户一填上 key 下一轮就生效，不必重启。
+		// 而「表里有站点、实际跳过」的守护由 TestRouteSiteIDsAreImplemented 盯着。）
+		"theporndb": synopsis.NewThePornDB(synopsis.ThePornDBOptions{
+			APIKey: o.ThePornDBKey, Timeout: base.Timeout, RequestGap: base.Gap, ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		// dmm（FANZA）—— 有码那一档最值钱的一家（mdc-ng 把它排在有码链第一位）。
+		// ⚠️ **它需要日本出口**（实测没切日本节点时返回地区封锁页，那不是 Cloudflare、
+		// FlareSolverr 破不了）。用户把代理设成日本节点即可 —— 走的就是 ProxyURL 那一段。
+		"dmm": synopsis.NewDMM(synopsis.DMMOptions{
+			Timeout: base.Timeout, RequestGap: base.Gap,
+			ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+		// freejavbt —— **聚合站**，有码 / 无码 / FC2 / 欧美四类都收（实测一次给
+		// 中文片名 / 封面 / 日期 / 时长 / 导演 / 类别 / 演员七项，见 freejavbt.go）。
+		// 它在**六个档位**的链里，是撬动面最大的一家。
+		// 它有 Cloudflare，但实测普通请求能拿到真内容（200 / 128KB）；
+		// 万一哪天开始拦，上面的 FlareSolverrURL 会自动兜住。
+		"freejavbt": synopsis.NewFreeJavBT(synopsis.FreeJavBTOptions{
+			Timeout: base.Timeout, RequestGap: base.Gap,
+			ProxyURL: base.ProxyURL, FlareSolverrURL: o.FlareSolverrURL}),
+	}
+	return out
+}
+
+// pendingSiteIDs 是**路由表里列了、但还没实现**的站点 id。
+//
+// 为什么显式列出来而不是让它默默缺失：路由表本身就是「我们打算照 mdc-ng 那张表走」
+// 的可审计记录，抹掉会让「为什么无码第二家是 avsox 而不是别的」这种问题无法回答；
+// 而完全不记录又会让「表里有、实际跳过」变成静默的。
+// 有了这份名单，`TestRouteSiteIDsAreImplemented` 就能把两边钉死：
+// routeSiteTable 里出现的每个 id 必须**要么**有实现、**要么**在这份名单里。
+// pendingSiteIDs 是**路由表里列了、但还没实现**的站点 id。
+//
+// ✅ **2026-10-15：已清空** —— 路由表里的站点全部有实现。
+// 这份名单留着不删：以后加新站（mdc-ng 表里还有 avbase / avmoo / hbox_jp /
+// javlibrary / mgstage / mmtv / madou / madouqu 系的其它家 / 7mmtv / xiao_huang_shu）
+// 时，先登记在这里、再实现，守护用例会盯着「表里有、实际跳过」。
+var pendingSiteIDs = map[string]string{}
+
+// pickSiteEnrichers 按路由从**全量站点**里挑出这条链（顺序 = 路由表顺序）。
+//
+// 表里列了而 ensureSiteClients 没建的 id（未实现的站）在这里被跳过 ——
+// 「静默」这件事由 TestRouteSiteIDsAreImplemented 兜着。
+func (s *Service) pickSiteEnrichers(route JavRoute) []synopsis.Enricher {
+	// 单测注入点：真实现要打外网，用例里换成桩（见 catalog_test.go 的 fixture）。
+	if s.testEnrichers != nil {
+		return s.testEnrichers
+	}
+	s.ensureSiteClients()
+	s.synopsisMu.Lock()
+	defer s.synopsisMu.Unlock()
+	sites := RouteSites(route)
+	out := make([]synopsis.Enricher, 0, len(sites))
+	for _, id := range sites {
+		if e, ok := s.siteEnrichers[id]; ok && e != nil {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// enrichers 返回「补字段」的来源列表（按路由选链、顺序即补缺优先级）。
+//
+// # 顺序的语义
+//
+// `synopsis.Enrich` 是「**只在当前为空的项上填一个值**」，所以顺序 = 「先问哪家
+// 最划算」，**不是**「谁更权威」。这层语义被 mdc-ng 的界面原文印证过：
+// 「进行多源数据聚合时，最终结果**根据优先级进行选取**」。
+//
+// ⚠️⚠️ **JAVDB 永远是唯一的主源**，它**不在**任何一条补缺链里（已经给过了）。
+// 见 routes.go 文件头那段警告 —— 要改表里的顺序，理由必须是「哪家补得更准/更快」。
+//
+// # 那几段实测结论（改表之前务必读完）
+//
+//	missav     slug 就是番号，og:description 是**一段真简介**（实测 93~136 字）；FC2/素人那批 404
+//	jav321     有码覆盖不错，但命中判定偏窄（同一部片换个体位就漏）
+//	caribbeancom 无码/素人（日期序号型）的简介，且只认 `^\d{6}-\d{2,4}$` 那一种番号
+//	javbus     前几家都没有的：导演、时长、类别、发行日期（它**没有简介**），且是**有码站**的库
+//
+// ⚠️ **airav 不在补缺链里**：它给的是「一行标题」不是剧情简介（详情页没有简介区块，
+// 只有 `<title>` 里那行中文标题 + 演员名）。放进简介链会把真正的简介挡掉
+// （Enrich 是首个非空胜）—— 实测就是这么把 missav 那段 136 字的简介挡成 14 字标题的。
+// 它只作为**中文标题**的来源，见 titleEnrichers()。
+//
+// （mdc-ng 把这两件事分成两个字段：`Outline`（一行简介）与 `Plot`（完整剧情）。
+//
+//	airav 的产出是它的 `Outline`。我们没有 Outline 这一列，所以把它放进 `title_zh`。）
+func (s *Service) enrichers(route JavRoute) []synopsis.Enricher {
+	return s.pickSiteEnrichers(route)
+}
+
+// titleFieldSites 是「中文标题」这个**字段**的专属优先级（照 mdc-ng 的「优先级设置(字段)」）。
+//
+// mdc-ng 有两套**互相独立**的优先级：
+//   - 「优先级设置(全局)」= 类型 → 站点（= 我们的 routeSiteTable）
+//   - 「优先级设置(字段)」= 字段 → 站点（= 这一份）
+//
+// 它界面上写着两者怎么配合：「当字段优先级中的刮削源未获取到数据时，
+// **会使用全局优先级中的刮削源进行补充**」。所以这里返回的是
+// 「字段专属优先 + 全局路由链」的**拼接**（见 titleEnrichers）。
+//
+// mdc-ng 那一栏「标题 (Title)」配的就是 `Airav_io` 单独一家 ——
+// 与本项目「airav 给的是干净的一行中文标题」那条实测结论一致。
+var titleFieldSites = []string{"airav"}
+
+// titleEnrichers 返回**中文标题**的来源（字段优先 → 路由链，顺序即优先级）。
 //
 // 与 enrichers() 分开是刻意的：那边补的是「缺的字段」（JAVDB 有就不动），
 // 这边是**另存一行**（title 不动，中文标题写进 title_zh）—— 两件事的判据、
 // 落点、失败容忍都不同，塞在一条链里两边都会被对方带偏。
 //
 // 顺序按实测的产出质量：**airav 给的是干净的一行中文标题**，missav 那行带着
-// 演员名与站点尾巴（`… - 持野蓬 - M`），所以 airav 在前。
-func (s *Service) titleEnrichers() []synopsis.Enricher {
+// 演员名与站点尾巴（`… - 持野蓬 - M`），所以 airav 在前 —— 这也是 mdc-ng
+// 「标题」字段优先级里只有 airav 一家的原因。
+func (s *Service) titleEnrichers(route JavRoute) []synopsis.Enricher {
 	// 单测注入点同 enrichers()：真实现要打外网。
 	if s.testEnrichers != nil {
 		return s.testEnrichers
 	}
-	if s.settings == nil {
-		return nil
-	}
+	s.ensureSiteClients()
 	s.synopsisMu.Lock()
 	defer s.synopsisMu.Unlock()
-	gap := time.Duration(s.settings.Int(settings.KeyJavRequestGapMS)) * time.Millisecond
-	timeout := s.timeout()
-	proxy := s.proxyURL()
-	// 复用 enrichers() 那份缓存键：设置一样就是同一批客户端。这里单独建一份
-	// 是因为**顺序不同**（enrichers 里没有 airav）。两个列表都很小，不值得共享。
-	s.titleEnricherList = []synopsis.Enricher{
-		synopsis.NewAirav(synopsis.AiravOptions{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
-		synopsis.NewMissav(synopsis.MissavOptions{Timeout: timeout, RequestGap: gap, ProxyURL: proxy}),
+	// 字段专属优先 + 路由链，去重（顺序即优先级，先到先得）。
+	seen := map[string]struct{}{}
+	out := make([]synopsis.Enricher, 0, len(titleFieldSites)+len(RouteSites(route)))
+	add := func(id string) {
+		if _, dup := seen[id]; dup {
+			return
+		}
+		if e, ok := s.siteEnrichers[id]; ok && e != nil {
+			seen[id] = struct{}{}
+			out = append(out, e)
+		}
 	}
-	return s.titleEnricherList
+	for _, id := range titleFieldSites {
+		add(id)
+	}
+	for _, id := range RouteSites(route) {
+		add(id)
+	}
+	return out
 }
 
-// synopsisSources 返回「补简介」的来源列表（按优先级）。
+// synopsisSources 返回「补简介」的来源列表（按路由选链）。
 //
-// 顺序是有意的：**jav321 管有码**（库里的大头，也最快），**caribbeancom 管无码/素人**。
-// 两家都不接欧美与国产 —— 实测没有可用的源（见 synopsis 包的说明）。
-func (s *Service) synopsisSources() []synopsis.Source {
-	if s.settings == nil {
-		return nil
+// ⚠️ **当前全项目没有调用点**（2026-10-15 核实：只有它自己的定义）。
+// 保留它并让它走路由，是为了将来若有「只要简介、不要其它字段」的轻量路径时
+// 拿到的是路由感知的那一份；而不是把它删掉之后被人重新硬编码一份。
+// 若下一次清理时它还是没人用，就删掉 —— 留一个没人调的函数本身也是一种误导。
+//
+// 它**复用 enrichers 的同一批客户端实例**（不是另建）—— 顺带修掉一个真 bug：
+// 改造前这条链的两家构造函数**没传 ProxyURL**（enrichers 那两份传了），
+// 而实测这批站直连几乎全不通，所以那条链在代理网络下本该是废的。
+func (s *Service) synopsisSources(route JavRoute) []synopsis.Source {
+	out := make([]synopsis.Source, 0, 4)
+	for _, e := range s.pickSiteEnrichers(route) {
+		if src, ok := e.(synopsis.Source); ok {
+			out = append(out, src)
+		}
 	}
-	key := strings.Join([]string{
-		strconv.Itoa(s.settings.Int(settings.KeyJavRequestGapMS)),
-		strconv.Itoa(s.settings.Int(settings.KeyJavTimeoutSec)),
-	}, "|")
-	s.synopsisMu.Lock()
-	defer s.synopsisMu.Unlock()
-	if s.synopsisSrcs != nil && s.synopsisKey == key {
-		return s.synopsisSrcs
-	}
-	gap := time.Duration(s.settings.Int(settings.KeyJavRequestGapMS)) * time.Millisecond
-	timeout := s.timeout()
-	s.synopsisSrcs = []synopsis.Source{
-		synopsis.NewJav321(synopsis.Jav321Options{Timeout: timeout, RequestGap: gap}),
-		synopsis.NewCaribbeancom(synopsis.CaribbeancomOptions{Timeout: timeout, RequestGap: gap}),
-	}
-	s.synopsisKey = key
-	return s.synopsisSrcs
+	return out
 }
 
 // fillMissingFields 在 JAVDB 没给的字段上去别的站补。**不改动已经有的值** ——
@@ -615,7 +767,7 @@ func (s *Service) synopsisSources() []synopsis.Source {
 // 到点之后的语义是**用手上已经拿到的**：synopsis.Enrich 每进一个源之前检查 ctx，
 // 取消时把已经攒好的 patch 一起返回（见 synopsis.go 的循环），下面照常应用它。
 // 所以截断只会「少补几个字段」，不会把前面的成果丢掉。
-func (s *Service) fillMissingFields(ctx context.Context, n *javdb.NormalizedMovie) {
+func (s *Service) fillMissingFields(ctx context.Context, n *javdb.NormalizedMovie, route JavRoute) {
 	if n == nil || s.testDisableEnrich {
 		return
 	}
@@ -631,11 +783,18 @@ func (s *Service) fillMissingFields(ctx context.Context, n *javdb.NormalizedMovi
 		Director:    strings.TrimSpace(n.DirectorName) == "",
 		Maker:       strings.TrimSpace(n.MakerName) == "",
 		Tags:        len(n.Tags) == 0,
+		// ⚠️ Cover 与 Actors 刻意**不含**（2026-10-15 核实）：
+		//   - Actors：别站给的**只有名字**（javbus 的 star id 与 JAVDB 不是一套），
+		//     而库里的演员是关联表、要 actor id —— 拿名字硬建关联会让详情页的
+		//     头像指到别人，宁可不补。
+		//   - Cover：jav321 的 Enrich **确实会填** CoverURL，但那个封面是它的
+		//     图床地址、与 JAVDB 的口径不同；而封面这一列还有 `javdb_url` 那套
+		//     由站基址拼出来的机制跟着。放开它等于让别站覆盖主源的封面口径。
 	}
 	if !missing.Any() {
 		return
 	}
-	srcs := s.enrichers()
+	srcs := s.enrichers(route)
 	if len(srcs) == 0 {
 		return
 	}
@@ -655,7 +814,7 @@ func (s *Service) fillMissingFields(ctx context.Context, n *javdb.NormalizedMovi
 	// （missing.Summary 为 false），但它还缺中文标题 —— 那时简介链一个字段都不取，
 	// patch 是空的，中文标题就被这条 return 吞掉了。实测就是这么漏的。
 	if missing.TitleZH {
-		tp, terr := synopsis.Enrich(ctx, n.Number, synopsis.Missing{TitleZH: true}, s.titleEnrichers()...)
+		tp, terr := synopsis.Enrich(ctx, n.Number, synopsis.Missing{TitleZH: true}, s.titleEnrichers(route)...)
 		if tp.TitleZH != "" && patch.TitleZH == "" {
 			patch.TitleZH = tp.TitleZH
 			if patch.Source == "" {

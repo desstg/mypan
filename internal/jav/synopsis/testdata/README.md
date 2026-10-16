@@ -4,7 +4,7 @@
 实际吐出来的东西，手写样本会把真实结构里的坑（换域名 301、404 回首页、番号带前缀、
 全角空格导致下标错位）全部绕过。
 
-抓取日期：2026-09-27。抓取方式（带浏览器 UA，这几家对默认 UA 不友好）：
+抓取日期：2026-09-27（fc2 那份是 2026-10-15 补的）。抓取方式（带浏览器 UA，这几家对默认 UA 不友好）：
 
 ```bash
 curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36" \
@@ -21,6 +21,7 @@ curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 | `carib_real.html` | caribbeancom 详情页 | **euc-jp 编码**（转码那一步的活证据）、多段固定文案里挑最长的一段 |
 | `airav_detail.html` | airav `WAAA-697` | `<title>` 与 meta description 里的「番号 + 标题」、**带前缀番号**（`300MIUM-…`）、信息表（女优/标籤/厂商） |
 | `missav_detail.html` | missav `MIUM-1415` | `og:description` 是**一段纯简介且不含番号**（判据不能用番号把关的活证据） |
+| `fc2_detail.html` | FC2 官方 `article/4983582` | **JSON-LD（`@type: Product`）**、`sku` 当命中判据、`image` 是 `{"url": …}` **对象**（不是字符串）、`brand.name` 是 **null**、販売日是 `2026/09/27` 要归一 |
 
 ## 实测到的结构要点（改解析器前先看这里）
 
@@ -37,3 +38,10 @@ curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
   站点标语写进剧情简介。
 - 这两家给的都可能是**一行标题**（不是剧情梗概），所以 `minIntroRunes` 放到了 8；
   要真正的长篇简介得靠别的源。
+- **FC2 官方站有两个真实形态差点被漏掉**（2026-10-15 实测）：`image` 是
+  `{"url": …}` **对象**（不是字符串），`brand.name` 是 **null**。前者漏了的表现是
+  「封面静默为空」，后者漏了会得到 `maker: "null"` 这种垃圾值。
+  **教训**：最初的用例夹具把 `image` 写成了字符串，于是用例全绿、真页面上封面一个
+  都取不到 —— 夹具的形状错了，用例就只是在验一个不存在的世界。改夹具请对着真页面抄。
+- **FC2 的番号是纯数字**（`4983582`），所以命中判据必须是**相等**而不是包含
+  （`airav` 那套 `foldKey` 包含匹配在纯数字上必然误命中邻号，会把别人的剧情写进来）。

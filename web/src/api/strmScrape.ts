@@ -88,6 +88,18 @@ export interface StrmScrapeSettings {
   tmdb_api_host: string;
   tmdb_image_host: string;
   tmdb_request_interval_ms: number;
+  /** **欧美片**刮削源（theporndb）的 API key。留空 = 不修改。 */
+  theporndb_key: string;
+  /** 只回「配没配」，供输入框 placeholder 用（密钥本身从不回传）。 */
+  theporndb_key_set: boolean;
+  /** FlareSolverr 地址（破 Cloudflare 盾 / 年龄墙）。不是密钥，原样回传。空 = 不启用。 */
+  flaresolverr_url: string;
+  /** AI 翻译总开关：把**非中文**的简介 / 标题翻成中文。 */
+  translate_enabled: boolean;
+  /** 翻哪些字段：`summary` / `title`。 */
+  translate_fields: string[];
+  /** 自定义翻译提示词。空 = 用内置那份。 */
+  translate_prompt: string;
 }
 
 export interface StrmScrapeItemListQuery {

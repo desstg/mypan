@@ -337,6 +337,37 @@ func HasCodeWithBrands(name string, brands []string) bool {
 		reCodeDateSeq.MatchString(stem)
 }
 
+// IsRecognizableNumber 报告一个主名是不是「能当番号用」的形态。
+//
+// # 与 HasCode 的分工（这是一条**加法**）
+//
+// `HasCode` 是**改名闸门**：返回 false 时 `RenameFilename` 原样返回，所以它必须
+// 保守 —— 多认一种形态就会多一批文件走进「删汉字/转大写」那套清理。而这里的用途是
+// **「这个名字值不值得拿去反查上游 / 认作侧车」**，漏判的代价是整部片静默消失
+// （番号取不出来 → 调用方直接跳过、连日志都没有）。两件事的代价不对称。
+//
+// 所以它比 HasCode 宽，多认两条 HasCode **刻意**不含的形态：
+//   - `LooksLikeCNNumber`：国产形状（`DYXO002` / `RS034`）。HasCode 的国产判据是
+//     **认厂牌**，而国产厂牌没有上限 —— 新厂牌一个都不在表里；
+//   - `IsWesternCode`：欧美点分日期型（`Tushy.2026.09.20`）。HasCode **刻意**不含它
+//     （并进去会让这类片走进清理式改名，见 IsWesternCode 的注释）—— 但那不意味着
+//     它不能当番号用，侧车名与上游番号本来就是这一串。
+//
+// 顺序按代价：上面那个是三条已编译正则；后面两条各一道正则。
+//
+// 调用方（两条路必须**同源**，否则表现是「刮削认得出、整理认不出」）：
+//   - `javplanner.parseSidecarName`（认侧车）
+//   - `strmscrape.javScrapeNumber` 第 ③ 步（拆主干当番号反查上游）
+func IsRecognizableNumber(name string, brands []string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	return HasCodeWithBrands(name, brands) || // 日式 / FC2 / 日期序号 / 国产厂牌表
+		LooksLikeCNNumber(name) || // 国产形状（HasCode 只认厂牌，认不出新厂牌）
+		IsWesternCode(name) // 欧美点分日期型（HasCode 刻意不含）
+}
+
 // ExtractCode 从名字里提取番号本体，提取不到返回空串。
 //
 // 不参与改名（改名走 RenameFilename 那套完整清理），只用于：

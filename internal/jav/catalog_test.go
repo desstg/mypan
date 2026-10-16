@@ -1504,3 +1504,121 @@ func TestUserActivityGate(t *testing.T) {
 		t.Error("负窗口不该命中")
 	}
 }
+
+// TestOnlineScrapeDoesNotDropMovieFromBackfillQueue 钉住**在线刮削不动记账**这条设计决定。
+//
+// # 为什么这条最关键
+//
+// 后台补缺队列的候选判据是 `WHERE enriched_at IS NULL AND summary_attempts < N`
+// （见 store 的 PendingSummaryMovieIDs）。所以只要在线刮削调了 `MarkEnriched`，
+// 那批片就**从此再也不会被后台补第二次** —— 而用户当时点「在线刮削」很可能
+// 只是因为上游恰好在限流、什么都没补到。那正是 loops 里那句
+// 「记了就等于这部再也不问了」的同一个坑（它当年让几百部空简介卡死）。
+//
+// 用户手点的语义是「**现在再试一次**」，不是「以后别再试了」。
+//
+// 判据只走**可观测量**：这部片还在不在后台候选里。
+// （`summary_attempts` 那一列没有导出的读法，而它涨没涨其实无关紧要 ——
+//
+//	真正会让片子永远补不上的是 `enriched_at`。）
+func TestOnlineScrapeDoesNotDropMovieFromBackfillQueue(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	f.svc.testDisableEnrich = false
+
+	inQueue := func(id string) bool {
+		ids, err := f.st.JavMovies.PendingSummaryMovieIDs(ctx, 100)
+		if err != nil {
+			t.Fatalf("PendingSummaryMovieIDs: %v", err)
+		}
+		for _, got := range ids {
+			if got == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 三部片，分别对应三种情形。
+	for _, m := range []struct{ id, num string }{
+		{"q1", "SSIS-001"}, {"q2", "SSIS-002"}, {"q3", "SSIS-003"},
+	} {
+		if err := f.st.JavMovies.Upsert(ctx, &domain.JavMovie{
+			ID: m.id, Number: m.num, Title: "日文标题",
+		}); err != nil {
+			t.Fatalf("seed %s: %v", m.id, err)
+		}
+		if !inQueue(m.id) {
+			t.Fatalf("前提变了：%s 应该先在后台补缺队列里", m.id)
+		}
+	}
+
+	// ① 在线刮削、**什么都没补到**（上游没有 / 限流）—— 最危险的那种情形。
+	f.svc.testEnrichers = []synopsis.Enricher{stubSynopsisEnricher{patch: synopsis.FieldPatch{}}}
+	if _, err := f.svc.BackfillLibraryMovie(ctx, "q1", RouteCensored, 0); err != nil {
+		t.Fatalf("BackfillLibraryMovie q1: %v", err)
+	}
+	if !inQueue("q1") {
+		t.Error("在线刮削（没补到）把片子从后台队列摘掉了 —— 用户点一次「现在再试一次」，" +
+			"不该等于「以后别再试了」")
+	}
+
+	// ② 在线刮削、**补到了东西** —— 也必须留在队列里（enriched_at 一样不能写）。
+	f.svc.testEnrichers = []synopsis.Enricher{
+		stubSynopsisEnricher{patch: synopsis.FieldPatch{
+			Summary: "在线补到的", Filled: []string{"summary"},
+		}},
+	}
+	if _, err := f.svc.BackfillLibraryMovie(ctx, "q2", RouteCensored, 0); err != nil {
+		t.Fatalf("BackfillLibraryMovie q2: %v", err)
+	}
+	if !inQueue("q2") {
+		t.Error("在线刮削（补到了）把片子从后台队列摘掉了 —— 后台那条循环还要继续维护它" +
+			"（各站覆盖率会变、上游会补料）")
+	}
+
+	// ③ 后台那条路：补到东西时记 `enriched_at`，于是**离开**队列。
+	if _, err := f.svc.backfillSummary(ctx, "q3"); err != nil {
+		t.Fatalf("backfillSummary q3: %v", err)
+	}
+	if inQueue("q3") {
+		t.Error("后台补到东西之后该记一笔 enriched_at（那是「下轮别再问」的意思）")
+	}
+}
+
+// TestOnlineScrapeAppliesFoundFields 在线刮削那条路真的把补到的字段写进库。
+func TestOnlineScrapeAppliesFoundFields(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	f.svc.testDisableEnrich = false
+	f.svc.testEnrichers = []synopsis.Enricher{
+		stubSynopsisEnricher{patch: synopsis.FieldPatch{
+			Summary: "在线补到的简介", Director: "导演甲", DurationMin: 123,
+			Tags: []string{"标签A"}, Filled: []string{"summary", "director", "duration", "tags"},
+		}},
+	}
+	if err := f.st.JavMovies.Upsert(ctx, &domain.JavMovie{
+		ID: "q2", Number: "SSIS-002", Title: "日文标题",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := f.svc.BackfillLibraryMovie(ctx, "q2", RouteCensored, 0); err != nil {
+		t.Fatalf("BackfillLibraryMovie: %v", err)
+	}
+	got, err := f.st.JavMovies.Get(ctx, "q2")
+	if err != nil || got == nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Summary != "在线补到的简介" {
+		t.Errorf("简介没落库：%q", got.Summary)
+	}
+	if got.DirectorName != "导演甲" {
+		t.Errorf("导演没落库：%q", got.DirectorName)
+	}
+	if got.Duration != 123 {
+		t.Errorf("时长没落库：%d", got.Duration)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "标签A" {
+		t.Errorf("标签没落库：%v", got.Tags)
+	}
+}

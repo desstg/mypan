@@ -101,6 +101,33 @@ type Settings struct {
 	TmdbAPIHost           string `json:"tmdb_api_host"`
 	TmdbImageHost         string `json:"tmdb_image_host"`
 	TmdbRequestIntervalMS int    `json:"tmdb_request_interval_ms"`
+
+	// ThePornDBKey 是**欧美片**刮削源（theporndb 官方 API）的密钥。
+	//
+	// 它为什么在这页而不是番号设置里：**刮削相关的设置都归「海报墙 → 设置」**。
+	// 它与 `TmdbAPIKey` 是同一类东西（一个外部源要的凭据），所以并排。
+	//
+	// ⚠️ 回读时只回 `ThePornDBKeySet`（**绝不回密钥本身**，同 TMDB 那条规矩）。
+	ThePornDBKey string `json:"theporndb_key"`
+	// ThePornDBKeySet 只告诉界面「配没配」，供输入框的 placeholder 用。
+	ThePornDBKeySet bool `json:"theporndb_key_set"`
+
+	// FlareSolverrURL 是 FlareSolverr 的地址（破 Cloudflare 盾 / 年龄墙的第三段出口）。
+	//
+	// 它不是密钥（一般是内网地址），所以**原样回传**，不像 TMDB / theporndb 那样只回「配没配」。
+	// 空 = 不启用；启用了才能补 `freejavbt`（CF 盾）与 `dmm`（年龄墙）。
+	FlareSolverrURL string `json:"flaresolverr_url"`
+
+	// —— AI 翻译（把非中文的简介/标题翻成中文）——
+	//
+	// TranslateEnabled 是总开关；TranslateFields 是翻哪几个（`summary` / `title`）；
+	// TranslatePrompt 是用户自定义提示词（空 = 用内置那份）。
+	//
+	// ⚠️ AI 本身（地址/密钥/模型/开关）在「系统设置 → AI 整理」里配 ——
+	// 这里只管「刮削时要不要用它翻」。
+	TranslateEnabled bool     `json:"translate_enabled"`
+	TranslateFields  []string `json:"translate_fields"`
+	TranslatePrompt  string   `json:"translate_prompt"`
 }
 
 type RunRequest struct {

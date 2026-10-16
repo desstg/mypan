@@ -304,18 +304,22 @@ func sameNumber(a, b string) bool {
 // （它们确实就是「没有标记的主名」），而网盘上顺带带着的配置 json 满地都是 ——
 // 少这道闸，一个 `readme-4K.json` 就会被当成侧车，拿 `readme` 去改视频名、建目录。
 //
-// 判据复用 javrules.HasCodeWithBrands 而不是在这里另写一套：那是这个项目里唯一
-// 权威的番号识别，设置页的试跑预览走的也是它。两套判据迟早分家，而分家的表现是
-// 「同一份文件在预览里认得出、整理时不认」。
+// 判据走 `javrules.IsRecognizableNumber`（不在这里另写一套）：那是这个项目里
+// 唯一权威的「这个名字能不能当番号用」，设置页的试跑预览与**在线刮削拆主干**
+// 走的也是它。两套判据迟早分家，而分家的表现是「同一份文件在预览里认得出、
+// 整理时不认」。
 //
-// **`LooksLikeCNNumber` 是第二道的加法**（2026-10-03）：厂牌表永远列不全，而国产
-// 番号的**形状**能定性。真机实测 `/mypan影库/番号临时` 那 7 部里有 4 部的 json
-// 主名（`XKG147` / `RS034` / `DYXO002` / `XKVP116`）过不了 HasCode —— 分类靠
-// 「国产·形状」进了「国产」，视频却完全不改名，两条路对不上。用户要求：
-// 国产目录里新进来的文件和目录，直接改成与 json 同名。
+// 它比 `HasCode` 宽两条，两条都是真机挖出来的：
+//   - **`LooksLikeCNNumber`（国产形状）**（2026-10-03）：厂牌表永远列不全，而国产
+//     番号的**形状**能定性。真机实测 `/mypan影库/番号临时` 那 7 部里有 4 部的 json
+//     主名（`XKG147` / `RS034` / `DYXO002` / `XKVP116`）过不了 HasCode —— 分类靠
+//     「国产·形状」进了「国产」，视频却完全不改名，两条路对不上。用户要求：
+//     国产目录里新进来的文件和目录，直接改成与 json 同名。
+//   - **`IsWesternCode`（欧美点分日期型）**（2026-10-16）：`Tushy.2026.09.20.json`
+//     以前认不出（HasCode 刻意不含这类，见 IsWesternCode 的注释）→ 那份侧车在整理
+//     那条路上等于不存在。而它确实就是上游给的番号形态（改名那条路也产出同名）。
 //
-// 只放宽「无连字符的国产番号」：日式番号（`ABP-123`）本来就走 HasCode 过闸，
-// 不受影响；全小写的 `readme` / `config` 因大小写敏感被挡住（见 cnShape）。
+// 全小写的 `readme` / `config` 仍被挡住：cnShape 大小写敏感、点分型要求日期段三段。
 //
 // `brands` 是用户填的国产厂牌：不带上它的话，用户在设置页新加一个国产厂牌之后，
 // **分类**按规则命中进了「国产」，而推送写出的 `ZZBRAND0001.json` 却不被当成侧车
@@ -329,7 +333,7 @@ func parseSidecarName(name string, brands []string) (string, quality.Marks, bool
 	if !ok {
 		return "", quality.Marks{}, false
 	}
-	if !javrules.HasCodeWithBrands(number, brands) && !javrules.LooksLikeCNNumber(number) {
+	if !javrules.IsRecognizableNumber(number, brands) {
 		return "", quality.Marks{}, false
 	}
 	return number, marks, true

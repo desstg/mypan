@@ -224,12 +224,34 @@ const (
 	// （`/v1/lists/{id}` 只给元数据、`/v1/lists/{id}/movies` 是 404），
 	// 而按清单名去搜是**模糊匹配影片标题**、搜出来的根本不是清单成员 ——
 	// 只能去官网的清单页抓 HTML，与源码同一条路。
-	KeyJavSiteBase      = "jav_site_base"
-	KeyJavAPINodes      = "jav_api_nodes"
-	KeyJavJavbusBase    = "jav_javbus_base"
-	KeyJavUseProxy      = "jav_use_proxy"
-	KeyJavMinIntervalMS = "jav_min_interval_ms"
-	KeyJavRequestGapMS  = "jav_request_gap_ms"
+	KeyJavSiteBase   = "jav_site_base"
+	KeyJavAPINodes   = "jav_api_nodes"
+	KeyJavJavbusBase = "jav_javbus_base"
+	// KeyJavThePornDBKey 是 theporndb（**欧美片**的官方 API）的密钥。
+	//
+	// 键名留在 jav_ 下是因为它确实是番号刮削的键；但**它只在「海报墙 → 设置 →
+	// STRM 刮削设置」里露出**（与 TMDB API Key 并排）—— 刮削相关的设置都归那一页。
+	// 没配 = 欧美那档少一家源（那档本来就几乎全空：471 部里 470 部缺简介）。
+	KeyJavThePornDBKey = "jav_theporndb_key"
+	// KeyStrmFlareSolverrURL 是 FlareSolverr 的地址（第三段出口：破 Cloudflare 盾 / 年龄墙）。
+	//
+	// 与刮削其它设置一样，**只在「海报墙 → 设置」里露出**。
+	// 空 = 不启用（那两个站就补不上，其余档不受影响）。
+	KeyStrmFlareSolverrURL = "strm_flaresolverr_url"
+	// KeyJavTranslateEnabled 控制刮削时要不要用 AI 把**非中文**的简介/标题翻成中文。
+	//
+	// 与 FlareSolverr / theporndb 一样，**只在「海报墙 → 设置」里露出**（刮削设置都归那一页）。
+	KeyJavTranslateEnabled = "jav_translate_enabled"
+	// KeyJavTranslateFields 是「翻哪些字段」（JSON 字符串数组，如 `["summary","title"]`）。
+	//
+	// 用 JSON 数组而不是逗号串：全不选时逗号串是空串，而空串会被设置层当「没存过」
+	// 回落默认值 —— 于是「一个都不翻」存不下去（与 KeyStrmJavMetaItems 同一个坑）。
+	KeyJavTranslateFields = "jav_translate_fields"
+	// KeyJavTranslatePrompt 是用户自定义的翻译提示词。空 = 用内置那份。
+	KeyJavTranslatePrompt = "jav_translate_prompt"
+	KeyJavUseProxy        = "jav_use_proxy"
+	KeyJavMinIntervalMS   = "jav_min_interval_ms"
+	KeyJavRequestGapMS    = "jav_request_gap_ms"
 	// KeyJavImageGapMS 是**图片**那一条通道的间隔，与 request_gap 分开。
 	//
 	// # 为什么不复用 request_gap_ms
@@ -728,6 +750,15 @@ func defaultSpecs() []Spec {
 		// 三个官方镜像。域名被墙时换一个，或在这里改 Base。
 		{Key: KeyJavAPINodes, Type: TypeString, Default: `[{"name":"jdforrepam.com","base":"https://jdforrepam.com/api"},{"name":"apidd.spthgb.com","base":"https://apidd.spthgb.com/api"},{"name":"apidd.czssdgz.com","base":"https://apidd.czssdgz.com/api"}]`, Hidden: true},
 		{Key: KeyJavJavbusBase, Type: TypeString, Default: "https://www.javbus.com", Hidden: true},
+		// 欧美片刮削源的 API key。**Sensitive**：它是密钥，下发时要掩码（见 secretSpec
+		// 那段警告：前端把掩码当改动回写就会把字面量 ****** 存进库）。
+		{Key: KeyJavThePornDBKey, Type: TypeString, Default: "", Sensitive: true, Hidden: true},
+		// FlareSolverr 地址（内网地址，不是密钥，所以不 Sensitive）。
+		{Key: KeyStrmFlareSolverrURL, Type: TypeString, Default: "", Hidden: true},
+		// AI 翻译三个键（开关 / 字段 / 提示词）。
+		{Key: KeyJavTranslateEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyJavTranslateFields, Type: TypeString, Default: `["summary"]`, Hidden: true},
+		{Key: KeyJavTranslatePrompt, Type: TypeString, Default: "", Hidden: true},
 		// 官网地址。上游给的清单分享链接里指向的是 javdb580.com 这类镜像，但镜像
 		// 不稳（实测同一条链接一会儿 200 一会儿 EOF），所以做成可改的配置。
 		{Key: KeyJavSiteBase, Type: TypeString, Default: "https://javdb.com", Hidden: true},

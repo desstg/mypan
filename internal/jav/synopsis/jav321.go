@@ -40,6 +40,9 @@ type Jav321Options struct {
 	RequestGap time.Duration
 	// ProxyURL 是兜底代理：直连不通时才走它（见 conn）。空串 = 只直连。
 	ProxyURL string
+	// FlareSolverrURL 是第三段出口（Cloudflare 挑战 / 年龄墙）。空 = 不启用。
+	// 见 flaresolverr.go —— 它慢（10~60 秒），只在直连与代理都过不去时才用。
+	FlareSolverrURL string
 }
 
 // NewJav321 构造 jav321 来源。
@@ -52,7 +55,7 @@ func NewJav321(opts Jav321Options) *Jav321 {
 	if gap == 0 {
 		gap = defaultGap
 	}
-	c := newConn(httpOptions{Timeout: opts.Timeout, ProxyURL: opts.ProxyURL})
+	c := newConn(httpOptions{Timeout: opts.Timeout, ProxyURL: opts.ProxyURL, FlareSolverrURL: opts.FlareSolverrURL})
 	c.thr = throttler{gap: gap}
 	// 保留每次请求的 cookie（① 拿到的那个），与 javbus 那边用 AddCookie 不同：
 	// 这里的 cookie 是服务端发的，得让 http.Client 自己记。**两条出口各一份 jar** ——

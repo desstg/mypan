@@ -253,7 +253,7 @@ func (s *Service) warnStructureMaybeChanged(ctx context.Context) {
 	s.notify.Notify(ctx, "warn", domain.NotificationCategoryTGSubscribeWarn,
 		"TG 频道抓取可能已失效",
 		"本轮所有频道都没有抓到任何帖子。若频道本身仍在更新，可能是 Telegram 改了网页结构 —— "+
-			"请把 LitePan 升级到最新版本。",
+			"请把 MyPan 升级到最新版本。",
 		0, 0)
 }
 
@@ -323,7 +323,7 @@ func describePreviewError(err error) string {
 	case errors.Is(err, preview.ErrNotPublic):
 		return "这个频道没有公开网页预览（可能不存在、是私有频道或邀请频道）。请核对地址后重新校验。"
 	case errors.Is(err, preview.ErrStructureChanged):
-		return "t.me 页面里找不到预期的帖子结构，Telegram 可能改了页面 —— 请升级 LitePan。"
+		return "t.me 页面里找不到预期的帖子结构，Telegram 可能改了页面 —— 请升级 MyPan。"
 	}
 	var httpErr *preview.HTTPError
 	if errors.As(err, &httpErr) {

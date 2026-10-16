@@ -154,7 +154,7 @@ func cleanLocalRoot(raw string) (string, error) {
 	}
 	root = filepath.Clean(root)
 	if !filepath.IsAbs(root) {
-		return "", domain.Errorf(domain.CodeValidation, "必须是绝对路径（这里要填的是跑 LitePan 的那个进程能看到的路径）")
+		return "", domain.Errorf(domain.CodeValidation, "必须是绝对路径（这里要填的是跑 MyPan 的那个进程能看到的路径）")
 	}
 	info, err := os.Stat(root)
 	if err != nil {

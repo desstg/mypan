@@ -172,6 +172,8 @@ func TestParseRealFixtures(t *testing.T) {
 		{"carib_real.html", ParseCaribbeancomIntro, "ランジェリー", "euc-jp"},
 		{"airav_detail.html", func(p string) string { return ParseAiravIntro(p, "WAAA-697") }, "结衣", "utf-8"},
 		{"missav_detail.html", func(p string) string { return ParseMissavIntro(p, "MIUM-1415") }, "传销", "utf-8"},
+		// fc2 的解析要额外传「请求的那个号」（命中判据要用它），所以包一层闭包。
+		{"fc2_detail.html", func(p string) string { return ParseFC2Detail(p, "4983582").Summary }, "返済", "utf-8"},
 	} {
 		path := filepath.Join("testdata", c.file)
 		data, err := os.ReadFile(path)

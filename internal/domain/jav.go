@@ -143,7 +143,15 @@ type JavMovie struct {
 	TitleZHSource string
 	// SummarySource 是这段简介的来源（javdb / jav321 / caribbeancom）。
 	// 空串表示上游没给、我们也还没补到。
-	SummarySource    string
+	SummarySource string
+	// SummaryOriginal 是 **AI 翻译前的简介原文**（2026-10-15 加，迁移 0057）。
+	//
+	// 为什么单独留一列而不是就地覆盖：原文是**唯一能核「AI 翻得对不对」的依据**，
+	// 也是「换个模型想重翻」时的输入。翻错了却没有原文，就只能重新打一次上游。
+	// 与 `OriginTitle` / `TitleZH` 那条「两行并存、谁也不是谁的替补」同一个道理。
+	//
+	// 空 = 没翻过（原文与译文同体，或本来就没简介）。
+	SummaryOriginal  string
 	Review           string
 	DirectorID       string
 	DirectorName     string

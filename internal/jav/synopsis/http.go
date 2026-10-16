@@ -34,6 +34,18 @@ var errHTTPNotFound = errors.New("HTTP 404")
 // httpOptions 构造一个抓取客户端。
 type httpOptions struct {
 	Timeout time.Duration
+	// Lang 见 conn.lang。空串 = 默认（中文优先）。
+	Lang string
+	// FlareSolverrURL 是第三段出口（见 flaresolverr.go）。空 = 不启用。
+	FlareSolverrURL string
+	// ForceProxy 让**第一次就用代理**（不先直连）。
+	//
+	// ⚠️ 只有「直连会被**内容层**挡掉、而那个响应是 200」的站才需要它 ——
+	// `conn.do` 的回落判据是**传输层失败**（连不上/超时/EOF），
+	// 而 dmm 的地区封锁页是**HTTP 200 + 一段说明文字**，属于「连上了、也回话了，
+	// 只是不给你内容」。那种情况回落永远不触发（实测：dmm 的代理一直没被用上，
+	// 表现是「dmm 什么都补不到」且不报错）。
+	ForceProxy bool
 	// ProxyURL 是**兜底**代理：直连不通时才走它。空串 = 只有直连。
 	ProxyURL string
 }
@@ -55,13 +67,31 @@ type conn struct {
 	direct   *http.Client
 	viaProxy *http.Client
 	thr      throttler
+	// lang 是 `Accept-Language` 的值；空串用默认（中文优先）。
+	//
+	// ⚠️ **它不是可有可无的一格**（2026-10-15 实测）：默认的 `zh-CN,zh;q=0.9,ja;q=0.8`
+	// 会让**多语言站点返回中文版页面**，而中文版的字段常常是缺的 ——
+	// FC2 官方站就是活例：中文版页面 `上架时间`/`商品ID`/`预览图片`，且
+	// **JSON-LD 的 description 是空串**；日文版同一个 URL 有完整简介。
+	// 表现是「封面补上了、简介一片空白」—— 不报错，最难查。
+	// 要日文原文的源（FC2 / DMM 这类日站）必须显式传 `langJapanese`。
+	lang string
+	// fs 是第三段出口：连直连与代理都过不去时，请它用真浏览器去破盾
+	// （Cloudflare 挑战 / 年龄墙）。nil = 没配。见 flaresolverr.go。
+	fs *flareSolverr
 }
 
 func newConn(opts httpOptions) *conn {
 	direct := newHTTPClient(opts.Timeout, nil)
-	c := &conn{direct: direct, viaProxy: direct}
+	c := &conn{direct: direct, viaProxy: direct, lang: opts.Lang,
+		fs: newFlareSolverr(opts.FlareSolverrURL, opts.Timeout)}
 	if raw := strings.TrimSpace(opts.ProxyURL); raw != "" {
 		c.viaProxy = newHTTPClient(opts.Timeout, httpx.ProxyFunc(raw))
+	}
+	// 强制走代理的站（见 ForceProxy）：把第一段出口**换成**代理，
+	// 于是连「先直连」这一步都不做 —— 那种站直连拿回来的 200 是假的。
+	if opts.ForceProxy && c.viaProxy != c.direct {
+		c.direct = c.viaProxy
 	}
 	return c
 }
@@ -151,18 +181,67 @@ func (c *conn) fetch(ctx context.Context, rawURL, referer, encoding string, cook
 		if err != nil {
 			return nil, err
 		}
-		setCommonHeaders(req, referer, cookies)
+		setCommonHeaders(req, referer, cookies, c.lang)
 		return req, nil
 	})
 	if err != nil {
+		// 网络层两条出口都不通 → 请第三段（FlareSolverr）。它对「站点被墙但浏览器
+		// 能过」的情况也可能有用（比如某些站只放行真实浏览器指纹）。
+		if html, ferr := c.viaFlareSolverr(ctx, rawURL); ferr == nil {
+			return html, nil
+		}
 		return "", err
+	}
+	// 403 / 503 是两类东西：**Cloudflare 挑战**（请 FS 能过）与**这站就是不给你**
+	// （请 FS 也白请，一次几十秒）。所以先读正文判一道，别一律送 FS。
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusServiceUnavailable {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		_ = resp.Body.Close()
+		if isCloudflareChallenge(resp, data) {
+			if html, ferr := c.viaFlareSolverr(ctx, rawURL); ferr == nil {
+				return html, nil
+			}
+		}
+		return bodyOrStatus(resp.StatusCode, data, encoding)
 	}
 	return readBody(resp, encoding)
 }
 
-func setCommonHeaders(req *http.Request, referer string, cookies []*http.Cookie) {
+// viaFlareSolverr 请第三段出口去取（没配就报错，由调用方忽略）。
+func (c *conn) viaFlareSolverr(ctx context.Context, rawURL string) (string, error) {
+	if c.fs == nil {
+		return "", fmt.Errorf("flaresolverr 未配置")
+	}
+	return c.fs.get(ctx, rawURL)
+}
+
+// bodyOrStatus 在**正文已经读过**之后按 readBody 那套规矩收尾
+// （404 → 哨兵、非 200 → 错误、否则解码）。给上面那条 CF 分支用。
+func bodyOrStatus(status int, data []byte, encoding string) (string, error) {
+	if status == http.StatusNotFound {
+		return "", errHTTPNotFound
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d", status)
+	}
+	return decodeBody(data, encoding)
+}
+
+// langDefault 与 langJapanese 是两档 Accept-Language。
+//
+// 默认中文优先（历史行为，现有几个源都跑在这个上面）；日站要日文原文时用 langJapanese，
+// 理由见 conn.lang 的注释（FC2 中文版的简介是空的）。
+const (
+	langDefault  = ""
+	langJapanese = "ja,en;q=0.8"
+)
+
+func setCommonHeaders(req *http.Request, referer string, cookies []*http.Cookie, lang string) {
 	req.Header.Set("User-Agent", browserUA)
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7")
+	if lang == "" {
+		lang = "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7"
+	}
+	req.Header.Set("Accept-Language", lang)
 	if referer != "" {
 		req.Header.Set("Referer", referer)
 	}
@@ -214,7 +293,7 @@ func (c *conn) postForm(ctx context.Context, rawURL string, form url.Values, ref
 		if err != nil {
 			return nil, err
 		}
-		setCommonHeaders(req, referer, cookies)
+		setCommonHeaders(req, referer, cookies, c.lang)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		return req, nil
 	})

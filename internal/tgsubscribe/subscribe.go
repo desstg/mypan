@@ -436,7 +436,7 @@ func (s *Service) ProbeChannel(ctx context.Context, input string) (*ChannelProbe
 	}
 	if page.ChannelID == 0 {
 		return nil, domain.Errorf(domain.CodeValidation,
-			"能打开 t.me/s/%s，但页面里解析不出频道 ID —— Telegram 可能改了页面结构，请升级 LitePan。", ref.Username)
+			"能打开 t.me/s/%s，但页面里解析不出频道 ID —— Telegram 可能改了页面结构，请升级 MyPan。", ref.Username)
 	}
 	if len(page.Posts) == 0 {
 		return nil, domain.Errorf(domain.CodeValidation,

@@ -24,8 +24,11 @@ import (
 //
 // 这条过滤把「素人」规则里那批**带尾连字符的番号前缀**挡在外面：
 // `FC2-` / `HEYZO-` / `LUXU-` / `SIRO-` / `GANA-` / `PEEP-` / `DEBZ-`。
-// 它们长在番号**里面**（`HEYZO-3837` 的 `HEYZO-` 就是番号的一部分），
-// 当成站名去拼只会得到 `HEYZO-3837-HEYZO` 这种垃圾。
+//
+// 为什么它们不能当 token：那个尾连字符会被 `wordBefore`/`wordAfter` 当成**分隔符**
+// 吃掉，于是 `HEYZO-` 永远匹配不上紧贴番号的 `HEYZO`（`HEYZO-3950` 里 `HEYZO`
+// 后面紧跟的是 `-`，不是 token 里的那个 `-`）。它们该用的是**不带连字符**的形态，
+// 由 `jav.AmateurStationTokens` 另外提供（见那里的说明）。
 func isStationShape(token string) bool {
 	if token == "" {
 		return false
@@ -58,7 +61,7 @@ func isStationShape(token string) bool {
 // MatchStation 要求 token **紧贴在番号前后**才认。
 //
 // 注意 `FC2PPV` 这类 token 过滤留不住（它只含字母数字），要靠 MatchStation 里
-// 那道「不许出现在番号里」的闸挡，见那里的注释。
+// `prefixIsCode` 那道「token 自己就是番号形态的一律不算」挡住，见那里的注释。
 func StationTokens(rules []ClassifyRule) []string {
 	out := make([]string, 0, 8)
 	seen := map[string]struct{}{}
@@ -249,20 +252,33 @@ const stationSeparators = "-_. []()@+"
 
 // MatchStation 从名字里找出紧贴在番号前后的站名，找不到返回空串。
 //
-// 两种形态都认（用户描述的就是这两条）：
+// 用户描述的形态是前两条，第三条是同一件事在「番号自带站名」那类上的形态：
 //
 //	前缀+番号    Carib-082410-462-        → CARIB
 //	番号+后缀    091926-001-carib.mp4     → CARIB
+//	番号自带     HEYZO-3950 / 200GANA-2931 → HEYZO / GANA
 //
 // **相邻性是这个函数的核心判据**，也是它不会误伤的原因：名单里既有 4 个素人站名
 // 又有「国外」那 27 个片商名，但只有**紧贴番号**的那个才认。日期序号型的名字里
 // 不可能出现 `Tushy.2026.09.20` 那种「片商在番号位置」的写法，所以这条足够。
 //
-// 两条闸：
-//  1. token 必须出现在名字里，且**不在番号内部** —— `FC2PPV` 是唯一靠这条挡住的
-//     （它是合法形状、过滤留不住，但它整个就是番号，再拼一次会得到
-//     `FC2PPV-4750465-FC2PPV`）。
-//  2. token 必须与番号**相邻**（只隔分隔符）。
+// 归纳成三条判据（前两条看的是「名字里 token 与番号相邻」，第三条看的是**番号自己**）：
+//
+//	A 后缀一侧：token 紧贴番号**后**，且它**不在番号里**。
+//	   最后那半句的用处：`FC2PPV-4750465` + `FC2PPV` 会得到
+//	   `FC2PPV-4750465-FC2PPV`。这条与 `StationTokens` 的 `isStationShape`
+//	   互补：后者只滤得掉带连字符的（`HEYZO-`），纯字母数字的 `FC2PPV` 留不住。
+//	B 前缀一侧：token 紧贴番号**前**，且它**不在番号里**（`Carib-082410-462-`）。
+//	C 厂的番号段：token 是**番号厂牌段**的一部分（`HEYZO-3950` / `200GANA-2931` /
+//	   `259LUXU-1234`）。判据见 prefixIsCode。**这一条不看名字** —— 线索就在番号
+//	   里面，而 `HEYZO` 恰恰也在番号里面，所以 A/B 那两句「不许在番号里」在这里
+//	   必须反过来。
+//
+// ⚠️ C 是 2026-10-16 加的。原先前缀一侧只有 B，而 B 里那句「不在番号里」把
+// **整个「番号本体自带站名」的类别**挡在素人档外 —— `HEYZO-3950` / `SIRO-5123` /
+// `200GANA-2931` 一个都认不出站名，于是走有码链而不是素人链（而 HEYZO/SIRO/GANA
+// 的料只在素人链那几家上）。换成形状判据之后误判面更小：光出现不算，
+// 得是**厂牌段**才认。
 func MatchStation(name, number string, tokens []string) string {
 	if len(tokens) == 0 {
 		return ""
@@ -279,16 +295,94 @@ func MatchStation(name, number string, tokens []string) string {
 	head, tail := upper[:idx], upper[idx+len(num):]
 
 	for _, token := range tokens {
-		// 闸 1：番号自己就含这个 token → 它不是站名，是番号的一部分。
-		if strings.Contains(num, token) {
-			continue
+		// A：站名挂在番号后面。
+		if !strings.Contains(num, token) && wordAfter(tail) == token {
+			return token
 		}
-		// 闸 2：紧贴在番号前 / 后。
-		if wordBefore(head) == token || wordAfter(tail) == token {
+		// B：站名挂在番号前面，且不是番号的一部分。
+		if !strings.Contains(num, token) && wordBefore(head) == token {
+			return token
+		}
+		// C：站名就是番号的厂牌段本身。**不能**套 A/B 那句「不许在番号里」——
+		// 那种形态恰恰要求它在。
+		if prefixIsCode(num, token) {
 			return token
 		}
 	}
 	return ""
+}
+
+// prefixIsCode 判断「这个 token 是不是番号**厂牌段**里的一部分」。
+//
+// 厂牌段 = 番号里第一个分隔符之前那一段。认得两种写法：
+//
+//	HEYZO-3950     段 `HEYZO`      = token 本身                       ✓
+//	SIRO-5123      段 `SIRO`       = token 本身                       ✓
+//	200GANA-2931   段 `200GANA`    = 数字前缀 + token（实测最多的形态） ✓
+//	259LUXU-1234   段 `259LUXU`    = 数字前缀 + token                 ✓
+//
+// 反例（都必须为假）：
+//
+//	123-HEYZO      段是 `123`，与 token 无关                        ✗
+//	HEYZO          根本没有分隔符，不是番号形状                       ✗
+//	HEYZO3950      同上（粘连形态更像一个普通词）                     ✗
+//	FC2PPV-4750465 token 自己就是番号 → 不认（见下）                  ✗
+//	SSIS-001       token 若是用户加的 `SS`：段是 `SSIS`，token 前面
+//	               那截是字母不是数字 → 不认                        ✗
+//
+// 最后那条是为什么要「数字前缀」而**不是**「段以 token 结尾」就够：国产厂牌
+// 是用户随手加的（`SS`、`M`），宽松规则会让 `SSIS-001` 突然多出一个站名。
+//
+// 剩下那段（第一个分隔符之后）必须还是番号形状，走 `HasCode` 而不是自己写正则
+// —— 番号识别在这个项目里只有那一处权威（见 names.go 顶部那条规定）。
+//
+// **token 自身是番号形态的一律不算站名**，这条挡的是 FC2 系（`FC2PPV` / `FC2-PPV`）。
+// 它们是唯一能「既通过 StationTokens 的形状过滤、又出现在番号里」的 token
+// （见 isStationShape 的说明），而 FC2 有它自己那一档（`jav.RouteOf` 第 ① 步按
+// 前缀就判走了）—— 再给它们补一个站名，`WorkNumber()` 会拼出
+// `FC2PPV-4750465-FC2PPV` 那种垃圾（这条正是老闸 1 守着的，不能丢）。
+func prefixIsCode(num, token string) bool {
+	if token == "" || IsRecognizableNumber(token, nil) {
+		return false
+	}
+	sep := strings.IndexAny(num, stationSeparators)
+	if sep <= 0 {
+		return false // 没有分隔符，或者番号以分隔符开头
+	}
+	seg := num[:sep]
+	if len(seg) < len(token) || !strings.EqualFold(seg[len(seg)-len(token):], token) {
+		return false
+	}
+	// token 前面那一段（厂牌段里除去 token 的剩余）必须是空的或纯数字：
+	// 挡住「`SSIS-001` + 用户加的厂牌 `SS`」这类误判。
+	if prefix := seg[:len(seg)-len(token)]; !isDigitsOrEmpty(prefix) {
+		return false
+	}
+	rest := strings.TrimLeft(num[sep:], stationSeparators)
+	if rest == "" {
+		return false
+	}
+	return isAllDigits(rest) || HasCode(rest)
+}
+
+// isDigitsOrEmpty 报告整串是不是纯数字（**空串算**，与 isAllDigits 的唯一区别）。
+//
+// 空串在这里是合法输入：厂牌段就是 token 本身（`HEYZO-3950`）时，它前面没有东西。
+func isDigitsOrEmpty(s string) bool {
+	return s == "" || isAllDigits(s)
+}
+
+// isAllDigits 报告整串是不是纯数字（空串不算）。
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // wordBefore 取「番号前面那一段」紧邻的单词：先剥掉分隔符，再回退到上一个分隔符。

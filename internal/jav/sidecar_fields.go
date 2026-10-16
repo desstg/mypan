@@ -184,8 +184,24 @@ func (s *Service) sidecarFieldsForMovie(ctx context.Context, movie *domain.JavMo
 // 用户的诉求是「打上游补齐」。抓回来入库是顺带的收益：以后详情页/影库那边也能
 // 看到这些片，而且下一轮后台回写会自己维护它们。
 //
+// # ⚠️ 2026-10-15：这里以前**不跑补缺链**，是最大的一处缺口
+//
+// 入库走的是 `ingestMovie(ctx, id, enrich=false)`（那是给「用户敲了个番号、等着看
+// 结果」用的，补缺链 60~148 秒会把请求拖死）。于是这条路**只拿得到 JAVDB 一家**的
+// 数据 —— 真机后果：16811 部里 FC2 那 1426 部**100% 缺简介**、`director_name`
+// 空 10100，根目录那份 `CAWD-987-U.nfo` 连 `director`/`runtime`/`maker` 全缺。
+// 用户在界面上点的是「在线刮削」（一个明确会联网、明确要补齐的动作），
+// 拿到的却只有主源那份 —— 那不是「上游没有」，是**这条路从来没问过别家**。
+//
+// 现在入库之后再跑一次补缺（`BackfillLibraryMovie`），档位由调用方给
+// （磁盘侧能算出站名与目录名线索）。预算收紧到 `onlineScrapeEnrichBudget`
+// （60 秒/部）—— 理由见那里：108 部 × 3 分钟 = 5.4 小时，不可接受。
+//
 // ok=false 表示上游没有这一部（或番号无效）—— 调用方跳过，不算失败。
-func (s *Service) FetchSidecarFieldsByNumber(ctx context.Context, number string) (map[string]any, bool) {
+//
+// `route` 为空串时**跳过补缺**（只入库），与改造前的行为一致 —— 这样
+// 其它调用方（若有）不传档位时不会突然多花 60 秒。
+func (s *Service) FetchSidecarFieldsByNumber(ctx context.Context, number string, route JavRoute) (map[string]any, bool) {
 	number = strings.TrimSpace(number)
 	if number == "" || s.movies == nil {
 		return nil, false
@@ -200,9 +216,54 @@ func (s *Service) FetchSidecarFieldsByNumber(ctx context.Context, number string)
 		}
 		return nil, false
 	}
+	// 入库之后再补缺（顺序不能反：JAVDB 那份必须先落库，见 ingestMovie 的注释）。
+	if route != "" {
+		if _, berr := s.BackfillLibraryMovie(ctx, movie.ID, route, onlineScrapeEnrichBudget); berr != nil {
+			// 补缺失败**不算整部失败**：主源那份已经入库了，如实打包即可。
+			s.logWarn("jav online scrape enrich failed", "number", number, "err", berr)
+		}
+	}
+	// ⚠️ 必须**重新读一次** movie —— 补缺在上一步写回了库（director / duration / tags…），
+	// 而手上这个 movie 是入库那一刻的快照，拿它打包会把刚补到的字段丢掉。
+	if fresh, gerr := s.movies.Get(ctx, movie.ID); gerr == nil && fresh != nil {
+		movie = fresh
+	}
 	fields, ok := s.sidecarFieldsForMovie(ctx, movie)
 	if !ok {
 		return nil, false
 	}
 	return fields, len(fields) > 0
+}
+
+// SidecarTitleByNumber 取「该写进侧车的那份标题」与日文原名（按番号查**本地库**）。
+//
+// # 为什么单独一个函数（`sidecarFieldsFor` 里刻意没有 title）
+//
+// 标题走的是**替换通道**（`ApplySidecarTitleZHByNumber` → `writeFieldIntoFile`，
+// 无条件替换 title），因为侧车里那份 title 是「中文优先」的口径，而库里
+// `JAVDB` 的原文不能被覆盖 —— 见 sidecar.go 里 buildSidecar 的注释。
+// 所以 `sidecarFieldsFor` 的清单里**不能**放 title：那条路是「只补空」的，
+// 放进去等于给同一个字段两套判据。
+//
+// 但**新建**侧车时那份 json 里连 `title` 这个键都没有 —— 替换通道只在
+// 「库里已经有中文标题」时才触发（见 pushTitleZHToSidecar），于是兜底通道不触发时
+// nfo 的 `<title>` / `<originaltitle>` 就永远是空的。真机表现：一部片刮到了
+// 演员/标签/封面，标题两栏却一直空着。
+//
+// 所以这个函数只服务**一个**场景：在线刮削**新建**侧车时给它一个初始值。
+// 它不参与任何回写，已有侧车那条路一个字都不碰。
+//
+// 判据与写侧 buildSidecar **同一条**（`pickTitleZH`，见 sidecar.go:302 与那里的
+// 「只动 Title 这一路、OriginTitle 原样留着」说明），不是第二份实现。
+// 查不到影片时返回两个空串（调用方不写这两个键）。
+func (s *Service) SidecarTitleByNumber(ctx context.Context, number string) (title, originTitle string) {
+	number = strings.TrimSpace(number)
+	if number == "" || s.movies == nil {
+		return "", ""
+	}
+	movie, err := s.movies.GetByNumber(ctx, number)
+	if err != nil || movie == nil {
+		return "", ""
+	}
+	return pickTitleZH(movie.TitleZH, movie.Title), movie.OriginTitle
 }
