@@ -11,6 +11,7 @@ import {
   type JavWallItem,
   type JavWallListResult,
   type JavWallOnlineScrapeProgress,
+  type JavWallScrapeItem,
 } from "@/api/strmJavWall";
 import AppButton from "@/components/base/AppButton.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
@@ -118,10 +119,10 @@ function publishHiddenDirs() {
  */
 async function load(options: { append?: boolean } = {}) {
   if (!props.source) {
-    result.value = null;
-    hasMore.value = false;
-    total.value = 0;
-    publishHiddenDirs();
+    // ⚠️ 守卫里也要把 loading 收掉。`resetAndLoad` 是同步置 `loading=true` 再调这里的，
+    // 没有 source 时就早退了 —— 不收的话那一份「加载中」会永远挂在屏上
+    // （换数据源的那一瞬可达）。它原来就漏了，这里顺手补上（纯修 bug，与批量选择无关）。
+    loading.value = false;
     return;
   }
   const append = Boolean(options.append);
@@ -174,6 +175,116 @@ async function load(options: { append?: boolean } = {}) {
   }
 }
 
+// —— 批量选择（只刮选中的那几部）——
+//
+// 用户提的：整根扫一遍太慢，只想补几部新片。开着的时候点卡片 = 勾选（不是开详情），
+// 卡片正中出勾选圈；页头那颗按钮显示已选部数，再点「在线刮削」就只刮这几部。
+//
+// 选中集合**自己存 `rel_dir` + `stem`**，不存 `item.id`：
+//   * 切分类 tab 要**保留已选、跨分类累加**（用户拍板）—— 而 `id` 是
+//     `pathToItemID(joinRel(relDir, stem))` 哈希来的，从 id 反推不回 rel_dir；
+//   * 换源之后旧的勾选没有意义（路径按源算），所以要能被整体清掉。
+
+const batchMode = ref(false);
+/** key = pickKey(item) → 「点名刮这一部」的那两个字段。 */
+const picked = ref(new Map<string, JavWallScrapeItem>());
+
+/**
+ * 这一部在选择集里的键。
+ *
+ * ⚠️ **不要用 `item.id`**：那是 `pathToItemID(joinRel(relDir, stem))`，分源不唯一，
+ * 而且切 tab 之后从它反推不回 `rel_dir`（提交时服务端要的正是 rel_dir + stem）。
+ */
+function pickKey(item: JavWallItem): string {
+  return `${item.rel_dir}\u0000${item.stem}`;
+}
+
+const pickedCount = computed(() => picked.value.size);
+
+/** 这一张卡选上了没。 */
+function isPicked(item: JavWallItem): boolean {
+  return picked.value.has(pickKey(item));
+}
+
+/**
+ * 「提交那一刻」冻结下来的部数 —— 按钮上那个 `刮削选中（N）`。
+ *
+ * 为什么冻结：提交成功时会**立刻**清掉选择集（用户看得到的收尾），而轮询要跑好几分钟
+ * —— 文案里那个 N 得是「你提交了几部」，不是「现在还剩几部」（后者恒为 0）。
+ */
+const submittedCount = ref(0);
+
+/**
+ * 这一轮提交的是哪几部（**没提交就是 null**）。
+ *
+ * 为什么要这个「我到底起没起任务」的硬信号：服务端同一数据源不能并发，已在跑时
+ * 它返回的是**别人那轮**的进度。若不区分，别人整根任务跑完会把用户当前的选择集
+ * 当成本次提交的结果吃掉（选择被清空了，却一部都没刮）。
+ *
+ * 普通 `let`（不是 ref）—— 它不参与渲染，照 `adoptInFlight` 的写法。
+ */
+let pendingBatchItems: JavWallScrapeItem[] | null = null;
+
+/** 收回「这一轮是我起的」这个标记（三条收尾分支都要走一次）。 */
+function clearPendingBatch(): JavWallScrapeItem[] | null {
+  const items = pendingBatchItems;
+  pendingBatchItems = null;
+  submittedCount.value = 0;
+  return items;
+}
+
+/** 退出批量选择：顺手把选择集清掉（用户点「取消」时不该留着一堆看不见的勾）。 */
+function exitBatchMode() {
+  batchMode.value = false;
+  picked.value = new Map();
+  submittedCount.value = 0;
+}
+
+function toggleBatchMode() {
+  // 刮削期间不许退出：收尾要靠这份选择集来清场，中途退了会留下一堆
+  // 「看不见但仍在选中」的条目。页头那颗按钮同时也禁用了，这里再兜一道。
+  if (onlineScraping.value) return;
+  if (batchMode.value) exitBatchMode();
+  else batchMode.value = true;
+}
+
+function togglePick(item: JavWallItem) {
+  const next = new Map(picked.value);
+  const key = pickKey(item);
+  if (next.has(key)) next.delete(key);
+  else next.set(key, { rel_dir: item.rel_dir, stem: item.stem });
+  picked.value = next;
+}
+
+/**
+ * 点卡片：批量选择开着时是**勾选**，否则开详情。
+ *
+ * 所有点击路径（鼠标 / Enter / Space）都收敛到这一个函数，判据只有一份。
+ */
+function onCardClick(item: JavWallItem) {
+  if (batchMode.value) togglePick(item);
+  else wall.openJav(props.source, item);
+}
+
+// —— 本页全选 ——
+//
+// 放在墙自己的工具条里（分类 tab 那一行右侧），因为它管的是「眼下这一页」——
+// 跨分类累加要靠用户自己切 tab 再点一次，语义清楚。
+
+const pageAllPicked = computed(
+  () => items.value.length > 0 && items.value.every((it) => isPicked(it)),
+);
+
+function togglePageAll() {
+  const next = new Map(picked.value);
+  if (pageAllPicked.value) {
+    for (const it of items.value) next.delete(pickKey(it));
+  } else {
+    for (const it of items.value) next.set(pickKey(it), { rel_dir: it.rel_dir, stem: it.stem });
+  }
+  picked.value = next;
+}
+
 // —— 在线刮削（打上游补齐缺的元数据）——
 
 /**
@@ -187,28 +298,36 @@ const onlineScraping = ref(false);
 let onlinePollTimer: number | undefined;
 
 /**
- * 在线刮削：打上游把目录下**缺的**元数据补齐，写回 json 与 nfo。
+ * 在线刮削：打上游把**缺的**元数据补齐，写回 json 与 nfo。
  *
- * 与「刷新元数据」的区别：那一条只重读本地磁盘，这一条会联网。
+ * 两种口径（用户拍板）：
+ *   * **批量选择没开** → 整根 + 确认弹窗（老行为逐字不变）；
+ *   * **开着** → 只刮勾中的那几部（勾选本身就是明确表达，不再弹确认）。
+ *     开着但一部没勾时按钮是禁用的，这里再兜一道守卫。
  */
 async function onlineScrape() {
   if (!props.source || onlineScraping.value) return;
-  try {
-    await confirm({
-      title: "在线刮削",
-      message:
-        "将按番号打上游（JAVDB），把本任务下**缺的**元数据补齐，并写入侧车 JSON 与 NFO。只补空：已有的值（包括你在编辑器里改过的）一律不动。数量多时请耐心等待 —— 期间墙可以正常使用。",
-      icon: "info",
-      confirmText: "开始刮削",
-      danger: false,
-    });
-  } catch {
-    return;
+  const batch = batchMode.value;
+  const pickedItems = batch ? [...picked.value.values()] : [];
+  if (batch && pickedItems.length === 0) return; // 按钮已禁用，防误触
+  if (!batch) {
+    try {
+      await confirm({
+        title: "在线刮削",
+        message:
+          "将按番号打上游（JAVDB），把本任务下**缺的**元数据补齐，并写入侧车 JSON 与 NFO。只补空：已有的值（包括你在编辑器里改过的）一律不动。数量多时请耐心等待 —— 期间墙可以正常使用。",
+        icon: "info",
+        confirmText: "开始刮削",
+        danger: false,
+      });
+    } catch {
+      return;
+    }
   }
   // 先读一次**当前进度**，把「已经在跑」这种情况分开处理。
   //
   // 两个理由：
-  //   1. **认领**：后端同一任务不能并发（已在跑就直接返回当前进度）。上次跑完
+  //   1. **认领**：后端同一数据源不能并发（已在跑就直接返回当前进度）。上次跑完
   //      没来得及收尾、或者换了页面回来而服务端还在跑，这时点按钮该做的是
   //      「接上那条轮询」，不是再发一次注定被拒的起任务请求。
   //   2. **对表**：把这一次读到的「跑之前」的进度状态（含收没收到 result）交给
@@ -226,6 +345,10 @@ async function onlineScrape() {
   }
   if (alreadyRunning) {
     // 已经在跑：只接管轮询，不再弹一次确认、也不发那个会被拒的起任务请求。
+    //
+    // ⚠️ **绝不设 `pendingBatchItems`**：跑着的那条可能是**别人**（另一个页面）起的
+    // 整根任务，不是这一轮的选择。设了的话，它跑完会把用户的选择集当成本次提交
+    // 的结果消费掉 —— 选择没了，却一部都没刮。
     onlineScraping.value = true;
     startOnlinePoll(alreadyRunning);
     return;
@@ -233,12 +356,32 @@ async function onlineScrape() {
   onlineScraping.value = true;
   try {
     // **起任务**（接口立刻返回，活在后头跑）。结果从进度里读 —— 见 startOnlinePoll。
-    await onlineScrapeJavWall(props.source);
+    // http.post 的第二参是 body、第三参才是 query（见 onlineScrapeJavWall）。
+    const res = await onlineScrapeJavWall(props.source, batch ? pickedItems : undefined);
+    if (res?.not_started) {
+      // 服务端那边已经有一条在跑（读进度与这次 POST 之间被人插了一脚）——
+      // 这一轮的选择**根本没提交**，如实说清楚，并且**不认领**那条任务的收尾。
+      toast.info("已有一个刮削任务在跑（可能是另一个页面起的），本次选择没有提交");
+      onlineScraping.value = true;
+      startOnlinePoll(undefined, baseline);
+      return;
+    }
+    // 真的起了自己的任务：记下「这一轮刮的是我提交的那几部」，收尾时据此清场。
+    if (batch) {
+      pendingBatchItems = pickedItems;
+      submittedCount.value = pickedItems.length;
+      // 立刻清掉选择集与选择态：选择属于「提交前」，
+      // 而收尾那几条分支靠 `pendingBatchItems` 这份独立副本，不依赖这里的勾。
+      batchMode.value = false;
+      picked.value = new Map();
+    }
     // 不在这里等：轮询那条路会在 running 变 false 时弹结果并收尾。
     startOnlinePoll(undefined, baseline);
   } catch (error) {
     toast.error(getApiErrorMessage(error, "在线刮削失败"));
     onlineScraping.value = false;
+    // 起任务失败：这一轮根本没提交，别让收尾把选择集当成本次的结果吃掉。
+    clearPendingBatch();
     stopOnlinePoll();
   }
 }
@@ -296,12 +439,30 @@ function startOnlinePoll(
       // 跑完了（或失败）：弹结果并收尾。
       stopOnlinePoll();
       onlineScraping.value = false;
+      // **先**把「这一轮是不是我提交的那批」取出来并原地清空 —— 三条收尾分支
+      // （有 result / 只有 message / 两样都没有）都要消费它，谁先走都得清，
+      // 否则下一次整根任务收尾时会拿着一份过期的标记去清用户新勾的选择。
+      const submitted = clearPendingBatch();
       if (p.result) {
-        const parts = [`补到 ${p.result.scraped} 部`];
-        if (p.result.images) parts.push(`补图 ${p.result.images} 张`);
-        if (p.result.skipped) parts.push(`跳过 ${p.result.skipped} 部`);
-        if (p.result.failed) parts.push(`失败 ${p.result.failed} 部`);
-        toast.success(`在线刮削完成：${parts.join("，")}`);
+        const r = p.result;
+        const parts = [`补到 ${r.scraped} 部`];
+        if (r.images) parts.push(`补图 ${r.images} 张`);
+        if (r.skipped) parts.push(`跳过 ${r.skipped} 部`);
+        if (r.failed) parts.push(`失败 ${r.failed} 部`);
+        // 报名（0 部）那两档单独说，别报「补到 0 部」—— 那读起来像「一切正常」。
+        // ⚠️ 判据从**服务端**来（见 JavWallOnlineScrapeResult.matched）：
+        // 前端手上只有当前分类这一页，跨分类勾选时它自己数必然误判。
+        if (r.matched === 0) {
+          toast.error(
+            r.total > 0
+              ? `在线刮削完成：提交的 ${r.total} 部一部都没找到（可能已重命名或删除），没有补到任何东西`
+              : "在线刮削结束：这个数据源目录里没有扫到任何番号影片",
+          );
+        } else {
+          const missed = Math.max(0, r.total - r.matched);
+          if (missed > 0) parts.push(`${missed} 部已不在墙上（可能已重命名或删除）`);
+          toast.success(`在线刮削完成：${parts.join("，")}`);
+        }
       } else if (p.message) {
         // 没有 result 但有 message = 跑挂了（后端把错误写在 message 里）。
         toast.error(p.message);
@@ -310,6 +471,16 @@ function startOnlinePoll(
         // 内存里那份进度跟着没了）。这时如实说一句，别默认成「失败」——
         // 这条路上正常跑完一定会带 result。
         toast.error("在线刮削已中断：服务端没有留下这次的记录（可能刚重启过）");
+      }
+      // 点名的这一轮跑完了：选择态与选择集一并归零（提交那一刻已经清过一次，
+      // 这里是**兜底** —— 万一将来有别的路子在刮削期间把批量选择打开了，
+      // 收尾时也得把它关掉，不能留一堆「看不见但仍被选中」的条目）。
+      //
+      // ⚠️ **放在 `await load()` 之前**：刷新会换掉墙上的 `rel_dir` / `stem`，
+      // 之后再去清就留下一堆配不上任何卡片的幽灵条目。
+      if (submitted) {
+        batchMode.value = false;
+        picked.value = new Map();
       }
       await load();
     } catch {
@@ -334,11 +505,35 @@ function stopOnlinePoll() {
 }
 
 const onlineProgress = ref<{ done: number; total: number } | null>(null);
-/** 按钮文案：有进度就带上 `(n/m)`。 */
+/**
+ * 「在线刮削」那颗按钮的文案。
+ *
+ * 批量选择开着且勾了 N 部 → 「刮削选中（N）」。N 取**提交那一刻冻结**的那个值
+ * （`submittedCount`）：提交成功后选择集就清了，实时数会立刻掉成 0，
+ * 而那几部正在后头刮着 —— 按钮上写着「刮削选中（0）」是自相矛盾的。
+ */
 const onlineScrapeLabel = computed(() => {
-  if (!onlineScraping.value) return "在线刮削";
+  if (!onlineScraping.value) {
+    return pickedCount.value > 0 ? `刮削选中（${pickedCount.value}）` : "在线刮削";
+  }
   const p = onlineProgress.value;
-  return p && p.total > 0 ? `刮削中… (${p.done}/${p.total})` : "刮削中…";
+  if (p && p.total > 0) return `刮削中… (${p.done}/${p.total})`;
+  if (submittedCount.value > 0) return `刮削中… (0/${submittedCount.value})`;
+  return "刮削中…";
+});
+
+/**
+ * 「在线刮削」在**批量选择开着但一部没勾**时禁用。
+ *
+ * 用户拍板的口径：这时点它既不该整根（那是没开批量选择时的行为），也不该什么都不做
+ * ——禁用 + title 说清「勾几部，或关掉批量选择」比一个点了没反应的按钮好。
+ */
+const onlineScrapeDisabled = computed(() => batchMode.value && pickedCount.value === 0);
+
+/** 页头「批量选择」那颗按钮的文案（开了显示已选部数）。 */
+const batchModeLabel = computed(() => {
+  if (!batchMode.value) return "批量选择";
+  return pickedCount.value > 0 ? `批量选择（已选 ${pickedCount.value} 部）` : "批量选择（点卡片勾选）";
 });
 
 /** 认领请求在飞时不重复发 —— onMounted 与「窗口重新可见」可能挨着触发。 */
@@ -464,8 +659,19 @@ function askDelete(item: JavWallItem) {
 }
 
 function onDeleted() {
-  const id = deleting.value?.id;
+  const removed = deleting.value;
   deleting.value = null;
+  const id = removed?.id;
+  // 删掉的那一部不该留在选择集里 —— 留着的话「刮削选中（N）」会比墙上能勾到的多一部，
+  // 提交后服务端报「N 部里有一部没找到」，看着像刮削出了问题，其实只是这一部没了。
+  if (removed && picked.value.size) {
+    const key = pickKey(removed);
+    if (picked.value.has(key)) {
+      const next = new Map(picked.value);
+      next.delete(key);
+      picked.value = next;
+    }
+  }
   if (!id || !result.value) return;
   const idx = result.value.items.findIndex((it) => it.id === id);
   if (idx < 0) return;
@@ -721,6 +927,13 @@ watch(() => props.source, () => {
   // 上一个源的「刮削中…」。
   stopOnlinePoll();
   onlineScraping.value = false;
+  // 选择集是**按源算的路径**（rel_dir + stem），换源之后一个都对不上 —— 全清。
+  // `pendingBatchItems` 也一起清：它装的是上一个源的路径，换源后那条任务若跑完，
+  // 拿它去清场是清了个寂寞（而且会让用户看着「选择态莫名退出」）。
+  batchMode.value = false;
+  picked.value = new Map();
+  pendingBatchItems = null;
+  submittedCount.value = 0;
   void adoptRunningScrape();
 });
 // 重列：换任务 / 换分类 / 换排序都走这一条。
@@ -808,7 +1021,26 @@ onUnmounted(() => {
 // 卡片点击 → 详情抽屉 → 从抽屉里播放。**卡片上不再有播放键**（用户要求）。
 const wall = useWallDetail();
 
-defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabel });
+defineExpose({
+  refreshMeta,
+  load,
+  onlineScrape,
+  onlineScraping,
+  onlineScrapeLabel,
+  // 批量选择：页头那颗按钮要按 `isJavSource` 长在番号墙这一侧
+  // （见 AuxToolsManagement 里那个 v-else-if 模板）。
+  //
+  // ⚠️ 包 `computed(() => ...)` 而不是把 ref 直接抛出去：模板里那颗按钮是
+  // `:disabled="pickedCount === 0"`，Vue 对**模板里用到的** ref 会自动解包，
+  // 但经 `defineExpose` 传给父组件之后**不会** —— 抛裸 ref 的话父组件拿到的是
+  // 一个对象，判据恒为真（按钮永远禁用）。`onlineScrapeLabel` 那种 computed
+  // 本来就是值，所以上面那几个不用包。
+  batchMode: computed(() => batchMode.value),
+  batchModeLabel,
+  pickedCount: computed(() => picked.value.size),
+  toggleBatchMode,
+  onlineScrapeDisabled,
+});
 </script>
 
 <template>
@@ -842,8 +1074,19 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
       </div>
 
       <!-- 搜索与排序都挪到页头那两个按钮上了（与 tmdb 那套外观一致、功能各是各的），
-           这里只留视图切换。 -->
+           这里只留视图切换。批量选择开着时补一颗「全选本页」——
+           一排一排地点太慢（一页 200 张），而它管的就是「眼下这一页」：
+           跨分类累加要靠用户自己切 tab 再点一次，语义清楚。 -->
       <div class="jav-wall__tools">
+        <button
+          v-if="batchMode"
+          type="button"
+          class="jav-wall__pickall"
+          :disabled="!items.length"
+          @click="togglePageAll"
+        >
+          {{ pageAllPicked ? "取消本页全选" : `全选本页（${items.length}）` }}
+        </button>
         <div class="jav-wall__view" role="group" aria-label="视图切换">
           <button
             type="button"
@@ -885,13 +1128,19 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
         v-for="(item, index) in items"
         :key="item.id"
         class="jav-card jav-card--wall"
+        :class="{ 'jav-card--picking': batchMode, 'jav-card--picked': batchMode && isPicked(item) }"
         role="button"
         tabindex="0"
-        :title="`《${item.number || item.title}》· 点开详情`"
-        @click="wall.openJav(props.source, item)"
-        @keydown.enter.prevent="wall.openJav(props.source, item)"
+        :title="batchMode ? `《${item.number || item.title}》· 点击选择` : `《${item.number || item.title}》· 点开详情`"
+        :aria-pressed="batchMode ? isPicked(item) : undefined"
+        @click="onCardClick(item)"
+        @keydown.enter.prevent="onCardClick(item)"
+        @keydown.space.prevent="onCardClick(item)"
       >
-        <div class="jav-card__cover" :class="{ 'jav-card__cover--poster': view === 'poster' }">
+        <div
+          class="jav-card__cover"
+          :class="{ 'jav-card__cover--poster': view === 'poster', 'jav-card__cover--picked': batchMode && isPicked(item) }"
+        >
           <!-- 两个视图各自的 URL；都没有或加载失败 → 统一占位图。
                这里给 lazy=false 并自己按视口决定「发不发」——见 imgWindow。 -->
           <MediaImage
@@ -905,7 +1154,41 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
                「暂无封面」上，看起来就是「一直加载不出来」（用户 2026-10-17 报的）。 -->
           <div v-if="imagePending(item, index)" class="jav-card__skeleton" />
 
-          <div class="jav-card__hover">
+          <!-- 批量选择开着时，卡片**正中**那个圈（视觉照 TMDB 订阅那套勾选圈）。
+               未选 = 圈里一个加号；已选 = 打勾。
+
+               ⚠️ 这个圈是**纯装饰**：`pointer-events: none`（见样式）。
+               让它自己收点击的话，圈上停一次、article 上再翻一次 —— 等于永远选不上。 -->
+          <span
+            v-if="batchMode"
+            class="jav-card__pick"
+            :class="{ 'jav-card__pick--on': isPicked(item) }"
+            aria-hidden="true"
+          >
+            <svg viewBox="0 0 24 24" width="26" height="26" focusable="false">
+              <template v-if="isPicked(item)">
+                <path
+                  d="M5 12.5l4.2 4.2L19 7"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </template>
+              <template v-else>
+                <path
+                  d="M12 6.5v11M6.5 12h11"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.2"
+                  stroke-linecap="round"
+                />
+              </template>
+            </svg>
+          </span>
+
+          <div v-if="!batchMode" class="jav-card__hover">
             <AppButton type="button" size="sm" variant="secondary" @click.stop="openEditor(item)">编辑</AppButton>
             <AppButton
               type="button"
@@ -923,6 +1206,7 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
                指过去才出现（触屏上常显，否则永远点不到），点开的是确认弹窗、
                不是直接删 —— 弹窗里会列出具体会删掉什么。 -->
           <button
+            v-if="!batchMode"
             type="button"
             class="jav-card__del"
             title="删除这一部（本地文件与网盘那一份）"
@@ -1068,4 +1352,54 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
 /* 还没轮到取图的卡片：占住封面那块位置，免得图到之前高度塌下去、
    滚动位置跟着跳（那比多下几张图更难受）。 */
 .jav-card__skeleton { position: absolute; inset: 0; background: var(--surface-sunken); }
+
+/* ————————————————— 批量选择 —————————————————
+
+   圈的位置是**卡片正中**（用户要求），视觉照 TMDB 订阅那套勾选圈
+   （web/src/styles/tg-subscribe.css 的 .tg-card__check）。
+
+   ⚠️ **不照抄那几条显隐**：那边挂在 `.tg-card:hover` 上（指过去才出现），
+   而这里批量选择开着就该**常驻** —— 用户要从一排圈里点，圈得先看得见。
+   ⚠️ **`pointer-events: none` 是必须的**：点击统一走 article（onCardClick），
+   让圈自己收一次点击再冒泡到 article 就是勾了又取消 —— 表现成「永远选不上」。 */
+.jav-card__pick {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 4;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  pointer-events: none;
+  color: #fff;
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 1px 6px rgba(15, 23, 42, 0.45);
+  transition: background 0.12s, border-color 0.12s, transform 0.12s;
+}
+/* 选中：亮色实心 + 打勾。用 brand 而不是纯白，扫一眼就能把「选中的那几部」分出来。 */
+.jav-card__pick--on {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.jav-card--picked .jav-card__cover--picked { outline: 2px solid var(--brand); outline-offset: -2px; }
+/* 键盘用户：卡片本身是 role=button + tabindex，聚焦时给一圈可见的焦点环。 */
+.jav-card--picking:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* 「全选本页」：与右边那组视图切换同高（都是 12px 字），摆在它左边。 */
+.jav-wall__pickall {
+  padding: 5px 12px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.jav-wall__pickall:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+.jav-wall__pickall:disabled { opacity: 0.5; cursor: default; }
 </style>

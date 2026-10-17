@@ -311,6 +311,13 @@ export interface JavWallOnlineScrapeResult {
   failed: number;
   /** 补出来的图片 / 字幕文件数（封面、海报、剧照、字幕）。 */
   images: number;
+  /**
+   * 「提交的那几部里真的有几步在磁盘上找到了」。
+   *
+   * 整根刮削时等于 `total`。⚠️ **不要用本地的卡片列表自己算**：手上只有当前分类
+   * 这一页，跨分类勾选时会把别的 tab 上那几部误判成「已经不在墙上了」。
+   */
+  matched: number;
 }
 
 /** 在线刮削的进度（前端按钮上的「刮削中…」）。 */
@@ -324,6 +331,27 @@ export interface JavWallOnlineScrapeProgress {
   message: string;
   /** 跑完之后的汇总（running 变 false 时才有）。 */
   result?: JavWallOnlineScrapeResult;
+  /**
+   * 这一轮是**点名刮削**（用户勾了几部）还是整根。
+   *
+   * 注意：判断「跑完的这轮是不是我提交的那批」**不能**只看它 —— 同一数据源上
+   * 跑着的可能是另一个页面起的整根任务。前端靠的是**自己**在起任务成功后记下的
+   * 那份清单（见墙里那个 pendingBatchItems），那才是「我提交了没有」的硬信号。
+   */
+  scoped?: boolean;
+  /**
+   * **只在起任务接口的响应里**为真：已有一条（别人的）任务在跑，这一轮没提交。
+   *
+   * 那种情况下响应里是**别人那轮**的进度。不区分的话，会拿别人整根任务跑完的结果
+   * 去消费自己的选择集 —— 选择被清空了，却一部都没刮。
+   */
+  not_started?: boolean;
+}
+
+/** 「点名刮这一部」：相对数据源根的目录（空 = 根目录）+ 主干。 */
+export interface JavWallScrapeItem {
+  rel_dir: string;
+  stem: string;
 }
 
 /**
@@ -332,12 +360,19 @@ export interface JavWallOnlineScrapeProgress {
  * **后台任务**：接口立刻返回进度，跑完的汇总从进度接口的 `result` 里读
  * （同步跑十几分钟会被反代 502）。
  *
+ * `items` **不给**（undefined）= 整根，老行为不变；给了非空数组 = 只刮这几部；
+ * 给了空数组服务端会回 400（绝不静默退化成整根 —— 那是十几分钟的白等）。
+ *
  * 与「刷新元数据」的区别：那一条只重读本地磁盘（不联网），这一条会联网。
  * 番号按 **nfo 的 `<num>` → 侧车 json 的 number → 拆主干**（去掉 `-U`/`-C`/`-4K`
  * 那些质量后缀）三条取，**不拿文件名当番号**。
  */
-export function onlineScrapeJavWall(ref: number | WallSourceRef) {
-  return http.post<JavWallOnlineScrapeProgress>("/admin/strm-scrape/jav-wall/online-scrape", sourceParams(ref));
+export function onlineScrapeJavWall(ref: number | WallSourceRef, items?: JavWallScrapeItem[]) {
+  const body: Record<string, unknown> = { ...sourceParams(ref) };
+  // ⚠️ 键**只在真有 items 时才出现**：带上一个空数组会被服务端判成 400。
+  if (items?.length) body.items = items;
+  // http.post 的第二参是 body、第三参才是 query。
+  return http.post<JavWallOnlineScrapeProgress>("/admin/strm-scrape/jav-wall/online-scrape", body);
 }
 
 export function fetchJavWallOnlineScrapeProgress(ref: number | WallSourceRef) {

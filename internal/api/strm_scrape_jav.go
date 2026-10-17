@@ -291,29 +291,53 @@ func (h *Handler) rebuildJavWallItem(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, out)
 }
 
-// refreshJavWallItem 只重读这一部（保存后刷一张卡）。
-// onlineScrapeJavWall 「在线刮削」：打上游把目录下缺的元数据补齐，写回 json 与 nfo。
+// onlineScrapeJavWall 「在线刮削」：打上游把缺的元数据补齐，写回 json 与 nfo。
 //
 // 与「刷新元数据」的区别：那一条只重读本地磁盘（不联网）。
+//
+// # items 的三态（批量选择）
+//
+//   - **不带这个键**（老前端 / curl）→ 整根，老行为逐字不变；
+//   - **带了、非空** → 只刮点名的这几部；
+//   - **带了、空数组** → **校验错误**，绝不静默退化成整根 ——
+//     用户明明说「一部都没选」，服务端却把整个库跑一遍，那是十几分钟的白等。
 func (h *Handler) onlineScrapeJavWall(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	var body javWallRef
+	// ⚠️ items **必须内嵌在外层**：解内嵌字段的话它会变成 unknown field
+	// （见 javWallRef 上方那段说明）。
+	var body struct {
+		javWallRef
+		Items *[]strmscrape.JavWallScrapeItem `json:"items"`
+	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeErr(w, err)
 		return
 	}
-	srcRef, _, _, err := body.normalize()
+	srcRef, _, _, err := body.javWallRef.normalize()
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	var items []strmscrape.JavWallScrapeItem
+	if body.Items != nil {
+		items = *body.Items
+		if len(items) == 0 {
+			writeErr(w, domain.Errorf(domain.CodeValidation, "没有选中任何一部"))
+			return
+		}
+		if len(items) > strmscrape.MaxJavWallScrapeItems {
+			writeErr(w, domain.Errorf(domain.CodeValidation,
+				"一次最多刮削 %d 部，当前选中 %d 部", strmscrape.MaxJavWallScrapeItems, len(items)))
+			return
+		}
 	}
 	// **后台任务**：立刻返回进度，活在后头跑（前端轮询进度那条接口）。
 	//
 	// 原来是同步跑完再返回 —— 108 部要十几分钟，群晖那层反代等不了就回 502
 	// （实测跑到 20 部左右）。见 StartJavWallOnlineScrape 的说明。
-	out, err := h.strmScrape.StartJavWallOnlineScrape(r.Context(), srcRef)
+	out, err := h.strmScrape.StartJavWallOnlineScrape(r.Context(), srcRef, items)
 	if err != nil {
 		writeErr(w, err)
 		return

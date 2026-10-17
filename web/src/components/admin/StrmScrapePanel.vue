@@ -197,6 +197,13 @@ const javWallRef = ref<{
   onlineScrape?: () => void;
   onlineScraping?: boolean;
   onlineScrapeLabel?: string;
+  // 批量选择（只刮勾中的那几部）也住在墙里：勾选状态、勾了几部、能不能点，
+  // 都是一面墙自己的事，页头只做入口。
+  batchMode?: boolean;
+  batchModeLabel?: string;
+  pickedCount?: number;
+  toggleBatchMode?: () => void;
+  onlineScrapeDisabled?: boolean;
 } | null>(null);
 // 番号墙「整档隐藏的目录」：那份名单是**全局**的（不按任务存），但入口在墙上。
 const javHiddenOpen = ref(false);
@@ -1054,6 +1061,13 @@ defineExpose({
   onlineScrape: () => javWallRef.value?.onlineScrape?.(),
   onlineScraping: computed(() => Boolean(javWallRef.value?.onlineScraping)),
   onlineScrapeLabel: computed(() => javWallRef.value?.onlineScrapeLabel ?? "在线刮削"),
+  // 批量选择：按钮长在页头（辅助工具页那边），状态与动作都在番号墙里。
+  // 「开着但一部没勾 → 禁用」的判据也只有实现那一侧有（它才知道勾了几部）。
+  batchMode: computed(() => Boolean(javWallRef.value?.batchMode)),
+  batchModeLabel: computed(() => javWallRef.value?.batchModeLabel ?? "批量选择"),
+  pickedCount: computed(() => javWallRef.value?.pickedCount ?? 0),
+  toggleBatchMode: () => javWallRef.value?.toggleBatchMode?.(),
+  onlineScrapeDisabled: computed(() => Boolean(javWallRef.value?.onlineScrapeDisabled)),
   // 父组件（辅助工具页）要用它决定页头那几个按钮显不显示：番号那面跑 TMDB 刮削
   // 会往同一批目录写 nfo，而「标记为正常」那一步会把 thumb/poster 删掉。
   // ⚠️ 对外叫 `isJavSource`：它同时涵盖**任务**与**本地目录**两种源（判据是

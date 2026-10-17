@@ -138,10 +138,33 @@ async function handleDrawerSave() {
              在番号任务上**不能出现**：那套会往同一批目录写 nfo，而「标记为正常」
              那一步的正则正好命中 thumb.jpg / poster.jpg，会把番号生成的图删掉。 -->
         <template v-else-if="isScrapeTab && scrapePanelRef?.isJavSource">
+          <!-- 批量选择：只刮勾中的那几部（原来那颗按钮只会整根扫，补几部新片也要跑全库）。
+               开态用 primary 高亮，与右边那颗「在线刮削」区分开「我现在在哪一档」。
+
+               ⚠️ 刮削期间禁用：收尾要靠这份选择集清场，中途退出会留下一堆
+               「看不见但仍被选中」的条目（墙里也有同一道守卫，这里是可见的那一道）。 -->
+          <AppButton
+            type="button"
+            :variant="scrapePanelRef?.batchMode ? 'primary' : 'secondary'"
+            :disabled="scrapePanelRef?.onlineScraping"
+            :title="
+              scrapePanelRef?.batchMode
+                ? '点卡片勾选要刮的影片，再点右边的按钮开始；再点一次退出'
+                : '只刮选中的影片，不再整目录扫一遍'
+            "
+            @click="scrapePanelRef?.toggleBatchMode()"
+          >
+            {{ scrapePanelRef?.batchModeLabel ?? "批量选择" }}
+          </AppButton>
           <AppButton
             type="button"
             variant="primary"
-            :disabled="scrapePanelRef?.onlineScraping"
+            :disabled="scrapePanelRef?.onlineScraping || scrapePanelRef?.onlineScrapeDisabled"
+            :title="
+              scrapePanelRef?.onlineScrapeDisabled
+                ? '先在卡片上勾几部，或关掉批量选择刮整个目录'
+                : undefined
+            "
             @click="scrapePanelRef?.onlineScrape()"
           >
             {{ scrapePanelRef?.onlineScrapeLabel ?? "在线刮削" }}

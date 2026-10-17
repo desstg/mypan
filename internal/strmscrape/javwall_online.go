@@ -61,12 +61,35 @@ func (s *Service) SetJavService(j *jav.Service) {
 
 // JavWallOnlineScrapeResult 是一次在线刮削的结果。
 type JavWallOnlineScrapeResult struct {
-	Total   int `json:"total"`   // 扫到的作品数
+	Total   int `json:"total"`   // 真的扫到的作品数（点名刮削时 = 在磁盘上找到的那几部）
 	Scraped int `json:"scraped"` // 真的补到了东西的
 	Skipped int `json:"skipped"` // 已经齐了 / 取不到番号 / 上游没有
 	Failed  int `json:"failed"`  // 写盘失败
 	Images  int `json:"images"`  // 补出来的图片/字幕文件数
+	// Matched 是「点名刮削时，提交的那几部里真的有几步在磁盘上找到了」。
+	//
+	// 整根那条路等于 Total（提交的就是扫出来的）。⚠️ **必须由后端算**：
+	// 前端手上只有当前分类 tab 的这一页，跨分类勾选时它自己算会把别的 tab 上
+	// 那几部误判成「已经不在墙上了」。
+	Matched int `json:"matched"`
 }
+
+// JavWallScrapeItem 是「点名刮这一部」。
+//
+// `RelDir` 是相对**数据源根**的目录（"/" 分隔，空 = 根目录），`Stem` 是主干。
+// 与海报墙列表侧、单品接口（javWallRef）同一套坐标，所以前端能直接拿卡片上的
+// (rel_dir, stem) 填进来。
+type JavWallScrapeItem struct {
+	RelDir string `json:"rel_dir"`
+	Stem   string `json:"stem"`
+}
+
+// MaxJavWallScrapeItems 是一次点名刮削的部数上限（handler 也要用它做校验，故导出）。
+//
+// 存在的理由不是性能（点名刮削本来就只扫点到的目录），而是**别让一次请求把整库
+// 当 items 送进来**：那与整根无异，却绕过了「整根」这个语义。真要点全库，把
+// items 留空即走整根那条路。
+const MaxJavWallScrapeItems = 2000
 
 // JavOnlineScrapeProgress 是在线刮削的进度（前端轮询「刮削中…」用）。
 //
@@ -87,9 +110,23 @@ type JavOnlineScrapeProgress struct {
 	// 拿 —— 响应在任务**开始**时就返回了。所以把结果挂在进度上，前端轮询到
 	// running=false 就读它。
 	Result *JavWallOnlineScrapeResult `json:"result,omitempty"`
+	// Scoped 表示这一轮是**点名刮削**（用户勾了几部），而不是整根。
+	//
+	// 有了它，轮询到的这份进度自己就说清了「正在跑的是哪一种」——
+	// 与 `result.matched / result.total` 那两个数配套读（点名时 total = 提交了几部）。
+	// 前端判断「跑完的这轮是不是我提交的那批」靠的是**它自己那份标记**
+	// （起任务成功后记下的清单），不是这个字段：同一数据源上跑着的可能是
+	// 另一个页面起的整根任务，而那个标记是「我提交了没有」的硬信号。
+	Scoped bool `json:"scoped,omitempty"`
+	// NotStarted **只在起任务接口的响应里**为真：已有一条（别人的）任务在跑，
+	// 这一轮没有提交。
+	//
+	// 为什么要这个硬信号：那种情况下接口返回的是**别人那轮的进度**，前端若不区分，
+	// 会拿别人整根任务跑完的结果去消费自己的选择集（选择被清、却什么都没刮）。
+	NotStarted bool `json:"not_started,omitempty"`
 }
 
-// JavWallOnlineScrape 打上游补齐这个任务下所有作品的元数据。
+// JavWallOnlineScrape 打上游补齐元数据（**同步**那条路，跑完才返回）。
 //
 // # 为什么「用户可以正常操作」
 //
@@ -101,13 +138,15 @@ type JavOnlineScrapeProgress struct {
 //
 // 全程不碰墙的快照缓存，所以墙照常翻页、点卡片照常开详情；只有被补到的那几部
 // 的文件变了，用户下次刷新自然看到。
-// JavWallOnlineScrape 是**同步**那条路（跑完才返回）。
+//
+// `items` 为空 = **整根**（扫出源根下所有作品，老行为逐字不变）；非空 = **点名**
+// （只刮这几部，见 javScrapeTargetsForItems）。
 //
 // ⚠️ **不要把它挂到 HTTP 上**：108 部要跑十几分钟，中间那层反代等不了就回 502
 // （群晖上实测：跑到 20 部左右就 502，把图片间隔调大只会更早 —— 因为更慢）。
 // HTTP 走 StartJavWallOnlineScrape（后台任务 + 轮询进度），这个方法留给
 // 测试与将来可能的后台联动。
-func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc) (JavWallOnlineScrapeResult, error) {
+func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc, items []JavWallScrapeItem) (JavWallOnlineScrapeResult, error) {
 	var out JavWallOnlineScrapeResult
 	if s.jav == nil {
 		return out, domain.Errorf(domain.CodeInternal, "番号服务未装配")
@@ -121,8 +160,26 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc) (JavWal
 	// 站名 token 与国产厂牌**只取一次**：扫盘时剥番号尾部的站名、认不认得出番号、
 	// 算路由线索，三处都用它们（见 javScrapeStationTokens）。
 	tokens, brands := s.javScrapeStationTokens()
-	targets := collectJavScrapeTargets(root, tokens, brands)
-	out.Total = len(targets)
+	var routes []jav.RouteInput
+	var targets []javScrapeTarget
+	if len(items) == 0 {
+		targets = collectJavScrapeTargets(root, tokens, brands)
+		out.Total = len(targets)
+		out.Matched = out.Total
+		// 路由线索**一次算好**（规则表只读一次，见 javScrapeRouteInputs）。
+		routes = s.javScrapeRouteInputs(targets, tokens)
+	} else {
+		targets = javScrapeTargetsForItems(root, items, tokens, brands)
+		// Total 是**提交**了几部、Matched 是**真的找到**几部 —— 两者不等时前端要如实
+		// 告诉用户「其中几部已不在墙上」，而不是把「提交了 3 部、补到 0 部」读成失败。
+		out.Total = len(items)
+		out.Matched = len(targets)
+		// 点名这条路的每个目标自己带线索（见 javScrapeTarget.routeHint）。
+		routes = make([]jav.RouteInput, len(targets))
+		for i, t := range targets {
+			routes[i] = t.routeHint
+		}
+	}
 	if len(targets) == 0 {
 		return out, nil
 	}
@@ -134,9 +191,6 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc) (JavWal
 	// 限流：上游那边自己也有间隔（`jav_min_interval_ms`），这里再加一道是给
 	// 网盘/代理这类中间层留余量，也让「用户关掉页面」能更快收手。
 	interval := 300 * time.Millisecond
-
-	// ② 路由线索**一次算好**（规则表只读一次，见 javScrapeRouteInputs）。
-	routes := s.javScrapeRouteInputs(targets, tokens)
 
 	for i, t := range targets {
 		if err := ctx.Err(); err != nil {
@@ -193,7 +247,7 @@ func (s *Service) JavWallOnlineScrapeByTask(ctx context.Context, taskID int64) (
 	if err != nil {
 		return JavWallOnlineScrapeResult{}, err
 	}
-	return s.JavWallOnlineScrape(ctx, src)
+	return s.JavWallOnlineScrape(ctx, src, nil)
 }
 
 // StartJavWallOnlineScrape 起一个**后台**在线刮削任务，立刻返回当前进度。
@@ -210,9 +264,16 @@ func (s *Service) JavWallOnlineScrapeByTask(ctx context.Context, taskID int64) (
 //
 // # 并发
 //
-// **同一个任务**已在跑时直接返回当前进度（不报错、不排队）—— 用户连点两次不该
-// 起两个任务去抢上游通道。不同任务之间互不影响（进度是 per-task 的）。
-func (s *Service) StartJavWallOnlineScrape(ctx context.Context, ref WallSourceRef) (JavOnlineScrapeProgress, error) {
+// **同一个数据源**已在跑时直接返回当前进度（不报错、不排队）—— 用户连点两次不该
+// 起两个任务去抢上游通道。不同数据源之间互不影响（进度是 per-source 的）。
+//
+// ⚠️ 这条「已在跑」的分支**必须让调用方认得出**：返回的进度是**别人那轮**的，
+// 而这一轮的选择**根本没提交**。所以在这份副本上置 `NotStarted = true` ——
+// 少了它，前端会拿别人整根任务跑完的结果去消费自己那份选择集（选择被清空了，
+// 却一部都没刮，用户完全看不懂）。见 `JavOnlineScrapeProgress.NotStarted`。
+//
+// `items` 为空 = 整根；非空 = 只刮点名的这几部（上限见 MaxJavWallScrapeItems）。
+func (s *Service) StartJavWallOnlineScrape(ctx context.Context, ref WallSourceRef, items []JavWallScrapeItem) (JavOnlineScrapeProgress, error) {
 	// 守卫放**起任务之前**：进去之后错误只能落在进度里，调用方拿不到。
 	if s.jav == nil {
 		return JavOnlineScrapeProgress{}, domain.Errorf(domain.CodeInternal, "番号服务未装配")
@@ -226,22 +287,28 @@ func (s *Service) StartJavWallOnlineScrape(ctx context.Context, ref WallSourceRe
 	}
 	scopeKey := src.ScopeKey()
 	if s.javOnlineRunning(scopeKey) {
-		return s.JavOnlineScrapeProgressOf(scopeKey), nil // 已在跑：返回当前进度
+		// 已在跑：返回当前进度，并**明确标记这一轮没提交**（见上面那段 ⚠️）。
+		out := s.JavOnlineScrapeProgressOf(scopeKey)
+		out.NotStarted = true
+		return out, nil
 	}
 
 	// 进度先立起来（前端下一次轮询就能看到 running=true 与总数）。
 	s.javOnlineMu.Lock()
-	s.javOnline = &JavOnlineScrapeProgress{TaskID: src.TaskID, SourceKey: scopeKey, Running: true, Message: "准备中…"}
+	s.javOnline = &JavOnlineScrapeProgress{
+		TaskID: src.TaskID, SourceKey: scopeKey, Running: true, Message: "准备中…",
+		Scoped: len(items) > 0,
+	}
 	s.javOnlineMu.Unlock()
 
 	// **不随请求结束**：这条 HTTP 请求马上就返回了，任务得自己活着。
 	runCtx := context.Background()
 	go func() {
-		res, runErr := s.JavWallOnlineScrape(runCtx, src)
+		res, runErr := s.JavWallOnlineScrape(runCtx, src, items)
 		s.javOnlineMu.Lock()
 		defer s.javOnlineMu.Unlock()
 		if s.javOnline == nil || s.javOnline.SourceKey != scopeKey {
-			return // 被别的任务顶掉了：不留残影
+			return // 被别的数据源顶掉了：不留残影
 		}
 		if runErr != nil {
 			s.javOnline.Running = false
@@ -250,7 +317,19 @@ func (s *Service) StartJavWallOnlineScrape(ctx context.Context, ref WallSourceRe
 		}
 		out := res
 		s.javOnline.Running = false
-		s.javOnline.Message = "在线刮削完成"
+		// 收尾那句话按**这一轮是什么**分开说，三种都别让人读错：
+		switch {
+		case len(items) > 0 && res.Matched == 0:
+			// 点名刮削却一部都没在磁盘上找到：你选的那几部可能已经重命名 / 删除了，
+			// 该去核对的是**选择**，不是刮削。说「完成」会让人以为只是没料。
+			s.javOnline.Message = "选中的片子一部都没找到（可能已重命名或删除）"
+		case res.Total == 0:
+			// 整根扫下来一个目标都没有：输出目录是空的（或扫盘深度内没有 .strm）。
+			// 别报「在线刮削完成」—— 那读起来像「跑过了、库里那些都齐了」。
+			s.javOnline.Message = "没有扫到任何番号影片"
+		default:
+			s.javOnline.Message = "在线刮削完成"
+		}
 		s.javOnline.Result = &out
 	}()
 	return s.JavOnlineScrapeProgressOf(scopeKey), nil
@@ -349,6 +428,14 @@ type javScrapeTarget struct {
 	// 根目录下**直接躺着**的 `.strm` 那一类 category 为空串（与海报墙
 	// `JavWallCategory{Name: ""}` 对齐）。
 	category string
+	// routeHint 是这条目标的路由线索，**只有点名那条路会填**。
+	//
+	// 为什么整根那条路不用它：那边在循环之前用 `javScrapeRouteInputs(targets, tokens)`
+	// 一次算好（避免每个目标各解析一遍规则表）。而点名这条路**手上只有这几部**，
+	// 无需为它们展开整根去凑规则表 —— 三个字段（Number / Station / Category）都齐了，
+	// 而 `jav.RouteOf` 与 `javrules.MatchStation` 都是**纯函数**（不读盘、不联网），
+	// 所以这里直接算出来即可，与整根那条路走的是同一套判据。
+	routeHint jav.RouteInput
 }
 
 // collectJavScrapeTargets 扫盘列出所有作品目录（只读，与海报墙同一套深度上限）。
@@ -379,6 +466,127 @@ func collectJavScrapeTargets(root string, tokens, brands []string) []javScrapeTa
 		}
 	}
 	walk(root, "", 0)
+	return out
+}
+
+// javScrapeTargetsForItems 把「点名刮这几部」变成待补目标（只读点到的目录）。
+//
+// # 为什么要单独一条（而不是整根扫完再筛）
+//
+// 它正是「别再整目录扫」这个需求的落点：数据源可以是网盘 / SMB，
+// `collectJavScrapeTargets` 会把整根递归读一遍（实测 242 次 stat 串行 7.1s），
+// 而用户只想补 3 部。这里**按目录去重后各 ReadDir 一次**，200 个条目从 200 次
+// 往返压成「几个目录几次」。
+//
+// # 路径安全（逐字照抄 resolveJavItem 那三道）
+//
+//  1. `normalizeJavRelDir` 归一化 —— **不要自己 filepath.Clean**：那个函数才是
+//     与列表侧、单品侧同源的口径（统一 `/`、拒绝 `..` 与绝对路径）。它返回空串
+//     有两种含义（"根目录" 与 "非法"），靠「原文非空」区分；
+//  2. stem 必须是个名字：空 / 含 `/\` / `"."` / `".."` 一律丢；
+//  3. `isInside(root, absDir)` 最后兜一道。
+//
+// # 只筛不重建
+//
+// 回来的 target 里 `stem` 必须是**磁盘上那一份**（先精确、后 EqualFold 比对），
+// 与 `resolveJavItem:104-116` 同一条规矩：拿请求里的 `ssis-001` 去拼文件名，
+// 在 Windows 上能配到 `SSIS-001.strm` 却写出 `ssis-001.nfo`，Linux 上那就是两份文件。
+// 所以这里是**筛**（用现成的 javScrapeTargetsInDir 产出，再挑出点名的），不是重建。
+//
+// category 取**一级目录名**（`rel` 的第一段），与列表侧同源 ——
+// `buildJavWallSnapshot` 在两种布局下都给每张卡发一级目录名（javwall.go:317），
+// 根目录直接躺着的 `.strm` 为空串。
+func javScrapeTargetsForItems(root string, items []JavWallScrapeItem, tokens, brands []string) []javScrapeTarget {
+	// ① 按归一化后的 relDir 分组（组内按 stem 去重），顺手把非法条目丢掉。
+	type bucket struct {
+		absDir string
+		stems  []string
+		seen   map[string]bool // 小写 stem → 已收：同一部被重复点名不该刮两次
+	}
+	var (
+		order []string // 保持首次出现的顺序，输出才可预测（用例断言的就是这个）
+		byRel = map[string]*bucket{}
+	)
+	for _, it := range items {
+		rel := normalizeJavRelDir(it.RelDir)
+		if rel == "" && strings.TrimSpace(it.RelDir) != "" {
+			continue // 非法 rel_dir（归一化后为空但原文非空）
+		}
+		stem := strings.TrimSpace(it.Stem)
+		if stem == "" || strings.ContainsAny(stem, `/\`) || stem == "." || stem == ".." {
+			continue
+		}
+		b, ok := byRel[rel]
+		if !ok {
+			absDir := root
+			if rel != "" {
+				absDir = filepath.Join(root, filepath.FromSlash(rel))
+			}
+			if !isInside(root, absDir) {
+				continue
+			}
+			b = &bucket{absDir: absDir, seen: map[string]bool{}}
+			byRel[rel] = b
+			order = append(order, rel)
+		}
+		key := strings.ToLower(stem)
+		if b.seen[key] {
+			continue
+		}
+		b.seen[key] = true
+		b.stems = append(b.stems, stem)
+	}
+
+	var out []javScrapeTarget
+	for _, rel := range order {
+		b := byRel[rel]
+		entries, err := os.ReadDir(b.absDir)
+		if err != nil {
+			continue // 目录没了（或读不到）：这一组整体跳过，与整根那条路的容错一致
+		}
+		files, _ := splitJavDirEntries(entries)
+		// category 与列表侧同口径：一级目录名（rel 的第一段）。
+		category := ""
+		if i := strings.Index(rel, "/"); i >= 0 {
+			category = rel[:i]
+		} else {
+			category = rel
+		}
+		// 先精确、后 EqualFold；两者都按**磁盘上的** stem 输出（见上面「只筛不重建」）。
+		//
+		// 先建一张「磁盘上有什么」的表（含 number / flat / names —— 那几个都靠
+		// javScrapeNumber 读同目录的侧车与 nfo 才能算出来，不能凭空拼），再按点名挑。
+		// 多建的那一份索引是内存里的（一页最多 200 个条目），换来的是**一次 ReadDir
+		// 服务整组**，这正是这条路存在的理由（SMB / 网盘上每层目录都是一次往返）。
+		exact := map[string]javScrapeTarget{}
+		fold := map[string]javScrapeTarget{}
+		for _, t := range javScrapeTargetsInDir(b.absDir, files, category, tokens, brands) {
+			if _, dup := exact[t.stem]; !dup {
+				exact[t.stem] = t
+			}
+			k := strings.ToLower(t.stem)
+			if _, dup := fold[k]; !dup {
+				fold[k] = t
+			}
+		}
+		for _, want := range b.stems {
+			t, ok := exact[want]
+			if !ok {
+				t, ok = fold[strings.ToLower(want)]
+			}
+			if !ok {
+				continue // 磁盘上没这一部（被重命名/删了）：不算错，只是找不着
+			}
+			// 路由线索随目标一起算出来（见 routeHint 的说明：RouteOf / MatchStation
+			// 都是纯函数，与整根那条路同一套判据）。
+			t.routeHint = jav.RouteInput{
+				Number:   t.number,
+				Station:  javrules.MatchStation(t.stem, t.number, tokens),
+				Category: t.category,
+			}
+			out = append(out, t)
+		}
+	}
 	return out
 }
 

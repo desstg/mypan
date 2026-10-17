@@ -381,7 +381,7 @@ func TestStartJavWallOnlineScrapeRunsInBackground(t *testing.T) {
 
 	svc := &Service{strm: &strm.Service{}}
 	// jav 为 nil：守卫要在**起任务之前**返回错误（进去之后错误只能落在进度里）。
-	if _, err := svc.StartJavWallOnlineScrape(context.Background(), WallSourceRef{StrmTaskID: 1}); err == nil {
+	if _, err := svc.StartJavWallOnlineScrape(context.Background(), WallSourceRef{StrmTaskID: 1}, nil); err == nil {
 		t.Fatal("番号服务未装配该报错")
 	}
 }
@@ -573,3 +573,121 @@ func TestJavScrapeRouteInputs(t *testing.T) {
 }
 
 type javRouteInputView struct{ number, station, category string }
+
+// —— 点名刮削（批量选择的后端那一段）——
+
+// TestJavScrapeTargetsForItems 钉住「只刮勾中的那几部」。
+//
+// 这条是用户提那个需求的落点：原来那颗「在线刮削」只会整根扫（数据源可能是网盘 /
+// SMB，整根递归读一遍实测 7 秒起），而用户往往只想补几部新片。
+func TestJavScrapeTargetsForItems(t *testing.T) {
+	root := t.TempDir()
+	// 两个分类目录，每层都多放几部 —— 点名的只有其中 2 部。
+	mustMkdir(t, filepath.Join(root, "有码"))
+	mustMkdir(t, filepath.Join(root, "FC2"))
+	for _, n := range []string{"SSIS-001", "SSIS-002", "SSIS-003"} {
+		mustWrite(t, filepath.Join(root, "有码", n+".strm"), "x")
+	}
+	mustWrite(t, filepath.Join(root, "FC2", "FC2-4939195.strm"), "x")
+	// 根目录下直接躺着的：rel_dir 为空串、category 也是空串（与海报墙对齐）。
+	mustWrite(t, filepath.Join(root, "ROOT-1.strm"), "x")
+
+	svc := &Service{}
+	tokens, brands := svc.javScrapeStationTokens()
+
+	got := javScrapeTargetsForItems(root, []JavWallScrapeItem{
+		{RelDir: "有码", Stem: "SSIS-002"},
+		{RelDir: "FC2", Stem: "FC2-4939195"},
+	}, tokens, brands)
+	if len(got) != 2 {
+		t.Fatalf("点名 2 部却扫出 %d 个目标：%+v（同一目录里没点名的那些不该进来）", len(got), got)
+	}
+	// category 取一级目录名（路由的一档线索），与列表侧同源。
+	cat := map[string]string{}
+	for _, tg := range got {
+		cat[tg.stem] = tg.category
+	}
+	if cat["SSIS-002"] != "有码" {
+		t.Errorf("SSIS-002 的 category = %q，期望「有码」", cat["SSIS-002"])
+	}
+	if cat["FC2-4939195"] != "FC2" {
+		t.Errorf("FC2-4939195 的 category = %q，期望 FC2", cat["FC2-4939195"])
+	}
+	// 点名这条路必须**自己带上**路由线索（整根那条路是循环前统一算的）。
+	for _, tg := range got {
+		if tg.routeHint.Category != tg.category {
+			t.Errorf("%s 的 routeHint.Category = %q，期望 %q", tg.stem, tg.routeHint.Category, tg.category)
+		}
+		if tg.routeHint.Number != tg.number {
+			t.Errorf("%s 的 routeHint.Number = %q，期望 %q", tg.stem, tg.routeHint.Number, tg.number)
+		}
+	}
+
+	// 根目录散落的：rel_dir 空 = 根，category 也是空串。
+	if g := javScrapeTargetsForItems(root, []JavWallScrapeItem{{Stem: "ROOT-1"}}, tokens, brands); len(g) != 1 || g[0].category != "" {
+		t.Errorf("根目录散落的那些：category 该是空串，得到 %+v", g)
+	}
+}
+
+// TestJavScrapeTargetsForItemsGuards 钉住路径安全与去重那几条。
+//
+// 路径那一套**逐字照抄 resolveJavItem**（normalizeJavRelDir + stem 判据 + isInside），
+// 因为这里收的是**请求里的** rel_dir / stem —— 少一道，一个 `../` 就能越出数据源根。
+func TestJavScrapeTargetsForItemsGuards(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "有码"))
+	mustWrite(t, filepath.Join(root, "有码", "SSIS-001.strm"), "x")
+
+	svc := &Service{}
+	tokens, brands := svc.javScrapeStationTokens()
+
+	cases := []struct {
+		name  string
+		items []JavWallScrapeItem
+		want  int
+	}{
+		{"rel_dir 带 ..", []JavWallScrapeItem{{RelDir: "../有码", Stem: "SSIS-001"}}, 0},
+		{"rel_dir 带 : 前缀（绝对路径那类）", []JavWallScrapeItem{{RelDir: ":x", Stem: "SSIS-001"}}, 0},
+		{"stem 带分隔符", []JavWallScrapeItem{{RelDir: "有码", Stem: "a/b"}}, 0},
+		{"stem 是 ..", []JavWallScrapeItem{{RelDir: "有码", Stem: ".."}}, 0},
+		{"stem 空", []JavWallScrapeItem{{RelDir: "有码", Stem: " "}}, 0},
+		{"磁盘上没有这一部（已重命名 / 删除）", []JavWallScrapeItem{{RelDir: "有码", Stem: "SSIS-999"}}, 0},
+		{"目录不存在", []JavWallScrapeItem{{RelDir: "无码", Stem: "SSIS-001"}}, 0},
+		{"同一部重复点名", []JavWallScrapeItem{
+			{RelDir: "有码", Stem: "SSIS-001"},
+			{RelDir: "有码", Stem: "SSIS-001"},
+		}, 1},
+		{"大小写不同也能配上（返回**磁盘上的**那个主干）", []JavWallScrapeItem{
+			{RelDir: "有码", Stem: "ssis-001"},
+		}, 1},
+	}
+	for _, c := range cases {
+		got := javScrapeTargetsForItems(root, c.items, tokens, brands)
+		if len(got) != c.want {
+			t.Errorf("%s：扫出 %d 个目标，期望 %d（%+v）", c.name, len(got), c.want, got)
+			continue
+		}
+		// 大小写那一档再钉一次「用的是磁盘上的主干」：拿请求里的小写去拼 .json/.nfo，
+		// Linux 部署上会多出**另一份**文件（resolveJavItem 那段注释记着同一个坑）。
+		if c.want == 1 && got[0].stem != "SSIS-001" {
+			t.Errorf("%s：target.stem = %q，必须是磁盘上的那一份 SSIS-001", c.name, got[0].stem)
+		}
+	}
+
+	// 一部都没点（items 为空）由调用方走整根那条路，不在这里兜 —— 这条用例只钉
+	// 「非法条目一律丢掉，不报错也不猜」。
+	if got := javScrapeTargetsForItems(root, nil, tokens, brands); len(got) != 0 {
+		t.Errorf("没点名时该是空，得到 %+v", got)
+	}
+}
+
+// TestJavScrapeTargetsForItemsSkipsUnreadableDir 目录读不到时整组跳过（与整根那条路的容错一致）。
+func TestJavScrapeTargetsForItemsSkipsUnreadableDir(t *testing.T) {
+	root := t.TempDir()
+	svc := &Service{}
+	tokens, brands := svc.javScrapeStationTokens()
+	got := javScrapeTargetsForItems(root, []JavWallScrapeItem{{RelDir: "没这个目录", Stem: "X-1"}}, tokens, brands)
+	if len(got) != 0 {
+		t.Fatalf("目录不存在时该跳过，得到 %+v", got)
+	}
+}
