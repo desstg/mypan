@@ -610,6 +610,24 @@ function imageSrc(item: JavWallItem, index: number): string {
   return view.value === "poster" ? (item.poster_url ?? "") : (item.thumb_url ?? "");
 }
 
+/**
+ * 这张卡是**还没轮到取图**，还是**根本没有图**。
+ *
+ * 模板里「骨架」只该占前一种：后一种（磁盘上没侧车图 —— 比如直接从网盘拷进来、
+ * 还没刮削过的作品）用骨架盖住占位图，看上去就是「一直加载不出来」。用户
+ * 2026-10-17 报的「切到不满一屏的分类还是显示不了海报墙」，一半就是它：
+ * 那 6 部 `<番号>.strm` 的目录里一份图都没有，`poster_url` 是空串，
+ * 而 `v-if="!imageSrc(...)"` 对此同样成立，于是骨架永久盖在「暂无封面」上面。
+ *
+ * 判据必须看**这一部有没有 URL**，不能只看窗口；否则两种状态永远分不开
+ * （属于「静默变空」那一族：看起来只是没加载出来）。
+ */
+function imagePending(item: JavWallItem, index: number): boolean {
+  const url = view.value === "poster" ? (item.poster_url ?? "") : (item.thumb_url ?? "");
+  if (!url) return false;
+  return index < loadedMin.value || index >= loadedMax.value;
+}
+
 // ————————————————————— 滚动容器 —————————————————————
 //
 // 图片窗口要跟着**真正在滚的那个盒子**走。这个组件在后台里是挂在 `.admin__body`
@@ -881,8 +899,11 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
             :alt="item.number"
             :lazy="false"
           />
-          <!-- 还没轮到取图时占住位置，避免取到图之前卡片高度塌下去 -->
-          <div v-if="!imageSrc(item, index)" class="jav-card__skeleton" />
+          <!-- 还没轮到取图时占住位置，避免取到图之前卡片高度塌下去。
+               ⚠️ 判据是「该不该有图但还没轮到」，**不是**「imageSrc 是空串」——
+               没有侧车图的那一部，`imageSrc` 永远是空串，那样骨架会永盖在
+               「暂无封面」上，看起来就是「一直加载不出来」（用户 2026-10-17 报的）。 -->
+          <div v-if="imagePending(item, index)" class="jav-card__skeleton" />
 
           <div class="jav-card__hover">
             <AppButton type="button" size="sm" variant="secondary" @click.stop="openEditor(item)">编辑</AppButton>
