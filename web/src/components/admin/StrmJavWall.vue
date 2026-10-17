@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { getApiErrorMessage } from "@/api/client";
 import type { WallSourceRef } from "@/api/strmScrape";
 import {
@@ -336,7 +336,82 @@ const onlineScrapeLabel = computed(() => {
   return p && p.total > 0 ? `刮削中… (${p.done}/${p.total})` : "刮削中…";
 });
 
-onUnmounted(stopOnlinePoll);
+/** 认领请求在飞时不重复发 —— onMounted 与「窗口重新可见」可能挨着触发。 */
+let adoptInFlight = false;
+
+/**
+ * 挂载 / 换数据源时**认领**正在跑的那条任务。
+ *
+ * # 修的是什么（用户 2026-10-17 报的）
+ *
+ * 「刮削时把窗口关了，再打开按钮就显示『在线刮削』，不是『刮削中…(8/128)』」。
+ *
+ * 根因：`onlineScraping` 是**这个组件的本地 ref**，而在线刮削是**服务端的后台任务**
+ * （见 StartJavWallOnlineScrape）。组件一被销毁，那个 ref 跟着没了 —— 任务还在跑，
+ * 界面上却回到了初始态。而 `onlineScrape()` 只在**用户再点一次按钮**时才去读进度、
+ * 才可能接管轮询（它开头那段 alreadyRunning 就是干这个的），所以中间这段时间按钮
+ * 一直是「在线刮削」。
+ *
+ * 组件什么时候会被销毁：
+ *   * 切到别的页面再切回来 —— `AuxToolsManagement` 被 `AdminView` 的 `<KeepAlive>`
+ *     缓存，**不会重新挂载**（onMounted 不重跑），但会触发 `onActivated`；
+ *   * 换数据源 —— `isJavTask` 翻面时这个组件被 v-if 摘掉再挂上；
+ *   * keep-alive 缓存被淘汰（AdminView 那个 `:key` 变了）—— 这时才真的重挂。
+ *
+ * 所以这一手挂在**每一个「组件刚活过来」的时刻**：onMounted / onActivated /
+ * 数据源变化 / 窗口重新可见。
+ *
+ * # 为什么用「接管轮询」而不是只读一次进度
+ *
+ * 只读一次的话拿到的是**那一刻**的 n/m，之后不再更新 —— 而这里恰恰是用户盯着看
+ * 的那个数字（他要的是「只要刮削没完成就一直显示刮削中」）。接管轮询（`startOnlinePoll`
+ * 那条路）会一路跟到结束、弹结果、并 `await load()` 把这一轮刮出来的东西刷上墙。
+ *
+ * ⚠️ **只在真的在跑时接管**（`p.running`）。没在跑时若也调 `startOnlinePoll`，
+ * 它读到 `running=false` 就会把上一轮留下的 `result` 弹成一次 toast —— 而用户只是
+ * 新开了一次页面，没做任何事。
+ */
+async function adoptRunningScrape() {
+  if (!props.source || onlineScraping.value || adoptInFlight) return;
+  adoptInFlight = true;
+  try {
+    const p = await fetchJavWallOnlineScrapeProgress(props.source);
+    // 读的这几百毫秒里用户可能已经点了按钮（那条路自己会接），别抢。
+    if (!p.running || onlineScraping.value) return;
+    onlineScraping.value = true;
+    startOnlinePoll(p);
+  } catch {
+    // 读不到（网络抖一下 / 后端刚好在重启）：当作没在跑。按钮点下去时还会再读一次。
+  } finally {
+    adoptInFlight = false;
+  }
+}
+
+/**
+ * 窗口重新可见时补一次检查。
+ *
+ * 手机上切到别的 app 再回来、电脑上切走标签页再切回来，Vue 不会给任何钩子 ——
+ * 而这段时间里服务端那条任务可能已经跑完（或者反过来，是在**别处**点起来的）。
+ * 一次轻量请求就能把按钮对回真实状态。
+ */
+function onOnlineScrapeVisibility() {
+  if (document.visibilityState === "visible") void adoptRunningScrape();
+}
+
+onMounted(() => {
+  void adoptRunningScrape();
+  document.addEventListener("visibilitychange", onOnlineScrapeVisibility);
+});
+// keep-alive 的页面切回来走这一条（那时 onMounted 不会重跑，但任务可能已经跑完或
+// 是在这一段里被点起来的）。`onActivated` 在**没有 keep-alive** 时不会触发，
+// 所以它与 onMounted 不是重复调用 —— 两个都留着。
+onActivated(() => {
+  void adoptRunningScrape();
+});
+onUnmounted(() => {
+  stopOnlinePoll();
+  document.removeEventListener("visibilitychange", onOnlineScrapeVisibility);
+});
 
 /** 「刷新元数据」= 重读本地磁盘并重列（不是重新生成；重新生成是卡片上的「重刮」）。 */
 async function refreshMeta() {
@@ -612,6 +687,15 @@ function resetAndLoad() {
 // 数据源变了只重置分类（换源总是从「全部」看起）。
 watch(() => props.source, () => {
   category.value = "";
+  // 换源 = 换了一条进度（服务端按数据源键各记一份）。原来那个源的轮询必须停掉，
+  // 否则它会在新源上继续问旧源的结果；停掉之后立刻认领**新源**在跑的那条。
+  //
+  // ⚠️ 必须先 `onlineScraping = false`：`adoptRunningScrape` 见到 true 就直接返回
+  // （那条守卫是给「用户已经点了按钮」用的），不清掉它，换源之后按钮会一直停在
+  // 上一个源的「刮削中…」。
+  stopOnlinePoll();
+  onlineScraping.value = false;
+  void adoptRunningScrape();
 });
 // 重列：换任务 / 换分类 / 换排序都走这一条。
 //
