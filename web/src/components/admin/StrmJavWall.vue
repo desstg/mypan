@@ -147,8 +147,13 @@ async function load(options: { append?: boolean } = {}) {
       result.value.items = [...result.value.items, ...next.items.filter((it) => !seen.has(it.id))];
       result.value.has_more = next.has_more;
       result.value.total = next.total;
+      // 追加这条**可以**靠 length watcher（长度一定变了）—— 但统一走这一手更省心。
+      void nextTick(afterListReplaced);
     } else {
       result.value = next;
+      // ⚠️ 换了一批时**不能**指望 length watcher：新旧长度相同时它不触发，
+      // 而 resetAndLoad 已经把取图窗口清空了 —— 那面墙就只剩骨架（用户 2026-10-17 报的）。
+      void nextTick(afterListReplaced);
     }
     hasMore.value = Boolean(result.value?.has_more);
     total.value = result.value?.total ?? 0;
@@ -427,6 +432,9 @@ async function refreshMeta() {
     hasMore.value = Boolean(result.value?.has_more);
     total.value = result.value?.total ?? 0;
     publishHiddenDirs();
+    // 与 load() 同一条路：整份换掉了，取图窗口必须自己重算一次
+    // （别指望 length watcher —— 长度可能一模一样，见 afterListReplaced 的说明）。
+    void nextTick(afterListReplaced);
     toast.success("已重新读取本地文件");
   } catch (error) {
     toast.error(getApiErrorMessage(error, "刷新失败"));
@@ -721,13 +729,32 @@ watch(() => props.keyword, () => {
 });
 
 watch(() => items.value.length, () => {
-  void nextTick(() => {
-    bindScrollTarget();
-    refreshImageBudget();
-    // 网格渲染完再判一次「够不够一屏」—— 这时量到的哨兵位置才是最终的。
-    fillViewportIfShort();
-  });
+  void nextTick(afterListReplaced);
 });
+
+/**
+ * 列表换完之后的那一拍：重认滚动盒子、重算取图窗口、判一次「够不够一屏」。
+ *
+ * # 为什么要有这么一个显式的函数（2026-10-17 修的）
+ *
+ * 这三件事原来只挂在 `watch(() => items.value.length)` 上。watch 的语义是
+ * **值变了才回调** —— 而「换了一批」未必改长度：本地目录那种大库，每个一级目录
+ * 都是一整页（200 条），切分类时长度 `200 → 200` **一模一样**。于是
+ * `resetAndLoad()` 把取图窗口清成空集之后，没有任何人再把它填回去：
+ *
+ *   * `imageSrc()` 对每个下标都返回空串 → 整面墙清一色骨架；
+ *   * 而 `onAnyScroll`（滚动时才会跑）里有 `refreshImageBudget()` ——
+ *     所以「随便滚一下就全出来了」，正是用户报的现象。
+ *
+ * 现在这条路的两个入口（`load()` 与 `refreshMeta()`）在**赋值之后**直接调它，
+ * 不等 watch。长度 watcher 留着兜底（别处改 items 的情形）。
+ */
+function afterListReplaced() {
+  bindScrollTarget();
+  refreshImageBudget();
+  // 网格渲染完再判一次「够不够一屏」—— 这时量到的哨兵位置才是最终的。
+  fillViewportIfShort();
+}
 
 // 列表换完（首屏 / 追加）也要重挂观察器：hasMore 可能从 false 翻成 true。
 watch([sentinel, hasMore], () => {
