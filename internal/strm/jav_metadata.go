@@ -1444,6 +1444,28 @@ func (s *Service) ApplySidecarTitleZHByNumber(ctx context.Context, number, title
 	return s.applySidecarFieldByNumber(ctx, number, "title", titleZH)
 }
 
+// ApplySidecarTitleZHToFile 把**中文标题**写进**指定的那一份**侧车 json（连带重建 nfo 的
+// `<title>`），与 ApplySidecarTitleZHByNumber 走同一套判据（`writeFieldIntoFile`）。
+//
+// # 为什么需要它（按番号找那条路不够用）
+//
+// 按番号那条路（`applySidecarFieldByNumber`）遍历的是**番号任务的输出目录**
+// —— 它是从 `s.repo.List(ctx)` 拿 `MediaKind == jav` 的任务，再 `TaskOutputDir` 拼出来的。
+// 而海报墙现在还有一个**「本地目录」数据源**（见 wallSrc / `local_fs`）：那种目录
+// 根本不在任何 strm 任务里，按番号那条路**一个文件都走不到**，于是「在线刮削翻好了
+// 中文标题、侧车与 nfo 里却还是日文」—— 而且不报错，因为找不到就静默返回 false。
+//
+// 在线刮削那条路手上**本来就有**这一份 json 的绝对路径（它在写字段），所以不需要
+// 任何遍历：直接点名写。这也是它比按番号那条快的地方 —— 后者每写一部都要把整棵
+// 任务树走一遍（N 部片就是 N 次遍历）。
+//
+// ⚠️ **必须在别的那几次写盘之后调**：这个函数会按 `title` 重建整个 nfo
+// （`replaceNFOTitle` → `BuildNFOFromMeta`），若在它之后还有 `WriteFieldsIntoFile`
+// 碰同一份 nfo，重建出来的那份会被再改一次，形状就对不上了。
+func (s *Service) ApplySidecarTitleZHToFile(sidecarPath, titleZH string) error {
+	return writeFieldIntoFile(sidecarPath, "title", titleZH)
+}
+
 // applySidecarFieldByNumber 是上面两条的公共骨架：按番号找侧车 → 改一个字段。
 func (s *Service) applySidecarFieldByNumber(ctx context.Context, number, field, value string) bool {
 	number = strings.TrimSpace(number)
@@ -1698,7 +1720,8 @@ func writeSummaryIntoFile(path, summary string) error {
 // 抽出来是因为「补中文标题」是同一件事的第二个字段（用户要求：推送时把中文标题
 // 也写进 json）。三条规矩两处共用，别各写一套：
 //
-//  1. **值没变就不写**（免得白刷 mtime，进而触发下游重算）；
+//  1. **json 值没变就不写 json**（免得白刷 mtime，进而触发下游重算）——
+//     但**nfo 那一手照做**，见下面那段注释；
 //  2. 写回用 MarshalIndent，保持与生成器同样的可读形状；
 //  3. 只动这一个字段，其余原样（侧车是「当时收到了什么」的记录，别顺手改别的）。
 func writeFieldIntoFile(path, field, value string) error {
@@ -1710,23 +1733,122 @@ func writeFieldIntoFile(path, field, value string) error {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return err
 	}
-	if cur, _ := doc[field].(string); strings.TrimSpace(cur) == strings.TrimSpace(value) {
-		return nil // 已经是这个值
-	}
-	doc[field] = value
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := writeFileInPlace(path, out); err != nil {
-		return err
+	// ⚠️ **值没变也要往下走**（2026-10-16 修）：早退只该跳过「写 json」，
+	// 不该跳过「修 nfo」。存量里有一大批正是「json 已经是中文、nfo 还是日文」——
+	// 推同样的值时若在这里 return，那些 nfo 永远修不好（真机样本 MNGS-068）。
+	// 下面两个 nfo 分支各自幂等，重复跑不会白刷 mtime。
+	if cur, _ := doc[field].(string); strings.TrimSpace(cur) != strings.TrimSpace(value) {
+		doc[field] = value
+		out, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := writeFileInPlace(path, out); err != nil {
+			return err
+		}
 	}
 	// 顺手把简介补进**同目录那份 nfo** —— 否则"补到了"对用户没有任何可见效果
 	// （nfo 由 json 生成，而生成器是"存在即跳过"，不点重刮就永远空着）。
-	if field == "summary" {
+	switch field {
+	case "summary":
 		fillNFOPlotIfMissing(path, value)
+	case "title":
+		replaceNFOTitle(path, value)
 	}
 	return nil
+}
+
+// replaceNFOTitle 把 nfo 的 `<title>` / `<sorttitle>` **替换**成 value（已带番号前缀）。
+//
+// # 为什么这里是「替换」，而补缺那条路是「元素不存在才补」
+//
+// 两条路的判据不同，是因为它们回答的问题不同：
+//
+//   - 补缺（fillNFOFieldsIfMissing）：手上是一份**上游刚给**的字段，不知道它比现有
+//     那份新 —— 所以只能补空，绝不能盖掉用户的手改。
+//   - 这条路：手上的 value 是**这一部现在的中文标题**，而写它的人正是本程序
+//     （`jav.ApplySidecarTitleZHByNumber`，只在库里那份标题已经是中文时才调）。
+//     目标状态就是「nfo 的标题 = 中文」，而 nfo 里原本那份是**生成器按日文原文
+//     写的** —— 「元素存在就不动」在这里恰好永远不动，等于什么都没做。
+//
+// ⚠️ 这正是 2026-10-16 那批真机的成因：侧车 json 的 `title` 已经是中文（写进去了），
+// nfo 的 `<title>` 却还是日文。原来的 `writeFieldIntoFile` **只对 `summary`**
+// 顺手补 nfo（见上面那个 switch），`title` 那条通道改完 json 就收工；
+// 而生成 nfo 那一步是「存在即跳过」，于是 nfo 永远停在生成那一刻的日文标题。
+// 真机样本：SNOS-363 —— json.title「女儿的朋友明明长着一张娃娃脸…」，
+// nfo `SNOS-363 娘の友達は幼顔なのに…`；MNGS-068 同理。
+//
+// # 为什么用 `emby.MovieMeta` 读→改→写，而不是正则替换那一行
+//
+// 与 fillNFOFieldsIfMissing 同一条规矩：写出来的元素必须与生成器**逐字节一致**，
+// 否则用户点一次「打开编辑器 → 保存」就会得到一份满是 diff 的文件
+// （`emby.TestParseNFORoundTripByteEqual` 钉的就是这条）。唯一能保证的办法是用
+// 同一个序列化器。
+//
+// # 三件必须原样带过去的东西（少一件就是一次数据损坏）
+//
+//  1. **`GenresOverride`**：nfo 里已经有 `<genre>` 时把它原样钉住，否则重建会按
+//     Tags/演员**重算**合成列表，把用户手工删掉的「片商: X」这类加回来。
+//  2. **`Names`**：`<poster>` / `<thumb>` / `<fanart>` 三个文件名用**磁盘上那份**。
+//     布局可能已经翻转（独占↔平铺），按 `TargetNames` 现算会指向不存在的文件，
+//     而 Emby 那边只表现为「海报没了」。
+//  3. **`OriginTitle`**：`ParseNFO` 会把 `<originaltitle>` 里的番号前缀剥掉，
+//     写回时 `BuildNFOFromMeta` 用 `withNumber` 拼回去 —— 两处严格互逆，
+//     所以往返不变形（这一点由往返测试钉着）。
+//
+// 番号前缀在这里**先剥后拼**：`<title>` 的形状是「番号 + 空格 + 标题」
+// （见 emby.withNumber），而两条调用路上游给的中文标题可能带番号、也可能不带 ——
+// 先 `StripNumberPrefix` 剥掉（没带就是原样），再交给 `BuildNFOFromMeta` 用
+// `withNumber` 拼回去，两种输入都得到同一个形状，不会出现「番号 番号 标题」。
+//
+// 失败只记不报（best-effort）——调用方（`writeFieldIntoFile`）的契约是
+// 「json 改了就算改了」，与补简介那条路同一取向。
+//
+// # 已知的、与「编辑器保存」共有的一个副作用
+//
+// 重建出来的 nfo 会多一个 `<originalplot>`（`BuildNFOFromMeta` 恒写它，值就是
+// `<plot>`），而有些存量 nfo 没有这个元素 —— 它们是「生成时侧车还没简介、后来
+// 由 `fillNFOPlotIfMissing` 插进去的 `<plot>`」。这是**既有行为**：用户在编辑器里
+// 打开再保存一次也会得到同样的结果（同一条重建路），`emby` 的往返测试也是这么钉的。
+// 保留原样而不是在这里特判，是为了让「改标题」与「改别的字段」产出同一种文件。
+func replaceNFOTitle(sidecarPath, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	dir := filepath.Dir(sidecarPath)
+	stem := strings.TrimSuffix(filepath.Base(sidecarPath), filepath.Ext(sidecarPath))
+	nfoPath := filepath.Join(dir, stem+".nfo")
+	raw, err := os.ReadFile(nfoPath)
+	if err != nil {
+		return // 还没生成过 nfo：等生成那一步自己带进去
+	}
+	presence := emby.ParseNFOPresence(raw)
+	// 这一部**连 <title> 都没有**（别的工具产的 nfo，或者被手工删过）：
+	// 那是「补缺」那条路的活，走它那套判据 —— 别在这里凭空造一个元素出来。
+	if !presence.Title {
+		return
+	}
+	meta, err := emby.ParseNFO(raw, emby.NFOReadHints{})
+	if err != nil {
+		return // 不是 <movie> 结构（比如 tvshow.nfo）：别乱动
+	}
+	// ① 钉住 <genre>（理由见函数头注释）。
+	if presence.Genres > 0 {
+		meta.GenresOverride = parsedGenres(raw)
+	}
+	// ② 钉住三个图片文件名。**判据是「三个都空」才现算** —— 与 BuildNFOFromMeta
+	// 内部那条判据逐字相同：从磁盘读回来的 `Names` 里**没有** NFO 那一项
+	// （那是文件名，读 nfo 时无从得知），拿它当判据会把读到的三个名字覆盖成默认值。
+	if meta.Names.Poster == "" && meta.Names.Thumb == "" && meta.Names.Fanart == "" {
+		meta.Names = emby.TargetNames(stem, false)
+	}
+	meta.Title = emby.StripNumberPrefix(meta.Number, value)
+	body, err := emby.BuildNFOFromMeta(meta)
+	if err != nil {
+		return
+	}
+	_ = writeFileInPlace(nfoPath, body)
 }
 
 // writeFieldsIntoFile 把一批字段写进一个已存在的侧车 json（**只补空**）。

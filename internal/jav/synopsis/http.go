@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -141,6 +142,27 @@ func newHTTPClient(timeout time.Duration, proxy func(*http.Request) (*url.URL, e
 		// 显式写 nil = 不跟随 HTTP_PROXY/HTTPS_PROXY。理由见 conn 的注释：
 		// 这里的策略是"直连优先、失败才用应用里配的代理"，环境变量不该插一脚。
 		Proxy: proxy,
+		// ⚠️ **连接阶段单独给 5 秒**（2026-10-17 加）。这不是调优，是修一台机器上
+		// 实打实的 3 倍慢：
+		//
+		// 用户的网络上有一批站（missav123 / jav321 / javdb / freejavbt …）是**黑洞路由**
+		// —— 不是立刻拒绝，而是**完全没回应**，于是 TCP 连接一直挂到
+		// `http.Client.Timeout`（=`jav_timeout_sec`，20 秒）才失败。而 `conn.do`
+		// 的契约是「直连失败 → 换代理重试」，所以每部片光这一家在连接阶段就烧掉
+		// **20 秒**，之后 FlareSolverr 再花 15~20 秒真去取一次 —— 实测每部 ~45 秒，
+		// 10 部 7 分 27 秒（`在线刮削` 那个按钮的实测数字）。
+		//
+		// 判据统计：同一条链上**远端有回应的站**（javbus 302 / fc2 拒绝）连接阶段
+		// 都在 **0.3 秒**内；能连通的一次请求总共不到 1 秒。所以 5 秒对「有回应的站」
+		// 是几十倍余量，对黑洞站则是把 20 秒砍到 5 秒 —— 「直连不通」这个判断的
+		// 结论不变（失败之后照样换代理、照样请 FlareSolverr），只是不用等那么久。
+		//
+		// 没有单独给 TLSHandshakeTimeout：国内直连境外站基本都卡在 TCP 连接那一拍，
+		// 握手来得及早就握手了（`javbus` 0.3 秒连上、0.7 秒拿完整个 302）。
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 	}
 	return &http.Client{Timeout: timeout, Transport: transport}
 }

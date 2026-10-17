@@ -89,11 +89,14 @@ func TestSortJavWallRowsAllDatesEmptyKeepsOrder(t *testing.T) {
 	}
 }
 
-// fillJavWallSortKeys 把 nfo 里的两个日期填进行上 —— 少了它排序就是死的。
-func TestFillJavWallSortKeys(t *testing.T) {
+// fillJavWallRowMeta 把 nfo 里的两个日期填进行上 —— 少了它排序就是死的。
+//
+// ⚠️ 它同时会填标题 / 番号（同一份 nfo 顺手带出来，省一趟读盘），所以这里的桩
+// 也把标题带上，顺便钉住「日期与标题一次填完」这件事。
+func TestFillJavWallRowMeta(t *testing.T) {
 	rows := []javWallRow{
-		{item: JavWallItem{Stem: "A"}},
-		{item: JavWallItem{Stem: "B"}},
+		{item: JavWallItem{Stem: "A", Number: "A", Title: "A"}},
+		{item: JavWallItem{Stem: "B", Number: "B", Title: "B"}},
 	}
 	titles := func(row javWallRow) emby.JavNFOInfo {
 		return emby.JavNFOInfo{
@@ -103,9 +106,19 @@ func TestFillJavWallSortKeys(t *testing.T) {
 			AddedAt: "2026-09-2" + row.item.Stem + " 10:00:00",
 		}
 	}
-	fillJavWallSortKeys(rows, titles)
+	fillJavWallRowMeta(rows, titles)
 	if rows[0].item.ReleaseDate != "2024-0A-01" || rows[1].item.AddedAt != "2026-09-2B 10:00:00" {
 		t.Errorf("日期没被填进去：%+v / %+v", rows[0].item, rows[1].item)
+	}
+	if rows[0].item.Title != "T-A" || rows[1].item.Title != "T-B" {
+		t.Errorf("标题没被填进去：%q / %q", rows[0].item.Title, rows[1].item.Title)
+	}
+
+	// 两个日期都**重填**（nfo 改过之后要立刻反映到排序上，见 fillJavWallRowMeta）。
+	again := []javWallRow{{item: JavWallItem{Stem: "C", Number: "C", Title: "旧", ReleaseDate: "1999-01-01"}}}
+	fillJavWallRowMeta(again, titles)
+	if again[0].item.ReleaseDate != "2024-0C-01" || again[0].item.AddedAt != "2026-09-2C 10:00:00" {
+		t.Errorf("日期应当重填，got %q / %q", again[0].item.ReleaseDate, again[0].item.AddedAt)
 	}
 }
 
@@ -119,8 +132,7 @@ func TestListJavWallDefaultsToAddedDesc(t *testing.T) {
 	// 用真实 nfo 读取器（读磁盘上那几份），这样测的是「日期真的从 nfo 出来了」。
 	// 缓存 map 要自己建 —— 裸 &Service{} 的 map 是 nil，写它会 panic（生产走 New()）。
 	s := &Service{javTitleCache: map[string]javTitleEntry{}}
-	titles := s.newJavTitleLookup(snap.rows)
-	out := listJavWall(snap, JavWallListQuery{}, titles)
+	out := s.listJavWall(snap, JavWallListQuery{})
 	if len(out.Items) == 0 {
 		t.Fatal("墙上应当有卡片")
 	}

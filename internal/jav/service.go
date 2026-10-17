@@ -835,7 +835,38 @@ func (s *Service) fillMissingFields(ctx context.Context, n *javdb.NormalizedMovi
 		// 中文标题也要落到本地那份侧车 json 上（用户要求：推送时写进 json）。
 		// 侧车那边是**替换 `title`**（见 ApplySidecarTitleZHByNumber），
 		// 库里则另存一列，两处口径不同是有意的。
-		s.pushTitleZHToSidecar(n.Number, patch.TitleZH)
+		//
+		// ⚠️ **只在补到的那份确实是中文时才推**（2026-10-17 修）。
+		// `patch.TitleZH` 装的是**上游站点给的那一栏**，而 dmm / missav / airav /
+		// avsox / freejavbt / javbus 这些站的标题多半是**日文**（见 translate.go
+		// 里那段：它们给的标题走的就是 `title_zh` 这一个字段）。
+		// 而侧车那条通道是**无条件替换** `title` 的 —— 于是「补到一份日文标题」
+		// 会直接把侧车里那份中文标题盖掉，nfo 的 `<title>` 跟着一起变日文。
+		// 真机证据：`ABF-387` 库里 `title_zh_source=missav`、那栏是「低声咒骂的
+		// 女服务生 八挂うみ」（日文），而侧车 / nfo 的标题也被写成了同一份日文。
+		//
+		// ⚠️ **推的是候选链，不是候选一**（2026-10-17 再修一次）。
+		// 上面那条闸判的是「**新来的这份**能不能推」，而侧车要的是「**推下去之后**
+		// 那份是不是还是中文」—— 两者在「库里本来就有中文」时不是一回事：
+		//
+		//	库 title_zh = 中文（source=missav），上游这次给的是一份日文
+		//	  → 新来的那份过不了闸 → 这一步什么也不推。
+		//	  ⚠️ 这一拍本身是安全的（侧车里那份中文原样留着），但它**没有第二步** ——
+		//	     手上明明有一份可用的中文，却看着侧车停在那儿不动。
+		//
+		// 所以先把「新来的」过一遍闸（`sidecarTitleZHFrom`，与 `sidecarTitleZH`
+		// **逐字同一个判据**）；它判不过就退到**库里原有的**那一栏 ——
+		// 两条都判不出中文，才什么都不推，那种情况交给 `translateAndPersist`
+		// 去翻（它翻完会推译文，见 backfill.go），这里插不上手。
+		//
+		// ⚠️ 退到库里那份**只在 `patch.TitleZH` 非空时**做（这一段仍在这个 if 里）：
+		// patch 为空说明这一轮根本没碰到标题这一栏，那是 `enrichAndSave` 里
+		// 「patch.Empty() 早退」那条路的事，不该在这里顺手多推一次。
+		if zh := sidecarTitleZHFrom(patch.TitleZH, patch.Source); zh != "" {
+			s.pushTitleZHToSidecar(n.Number, zh)
+		} else if zh := s.librarySidecarTitleZH(ctx, n.ID); zh != "" {
+			s.pushTitleZHToSidecar(n.Number, zh)
+		}
 	}
 	if patch.Summary != "" {
 		n.Summary = patch.Summary
@@ -862,6 +893,30 @@ func (s *Service) fillMissingFields(ctx context.Context, n *javdb.NormalizedMovi
 		// NormalizedMovie.Tags 是 []string（规范化那一步就把 Tag 结构拍平了）
 		n.Tags = append([]string(nil), patch.Tags...)
 	}
+}
+
+// librarySidecarTitleZH 取「库里现在这一部手上最好的那份中文标题」。
+//
+// 它是「候选链」的**第二条**：`fillMissingFields` 先把上游刚给的那份过一遍闸
+// （`sidecarTitleZHFrom`），判不过就退到库里原有的那一栏。
+//
+// # 为什么是「重新读一次」而不是用手上那条记录
+//
+// 补缺链要打 4~6 个外站、单次预算 60 秒 —— 这段期间同一行会被编辑器保存 /
+// 重刮 / 订阅检查改掉。`fillMissingFields` 手上只有调用方那份**补缺之前**的
+// `NormalizedMovie`，里面压根没有库里 title_zh 的原值，所以必须回库拿。
+//
+// 查不到（库空了 / ID 变了）就返回空串 —— 那是「没有候选二」，不是错误。
+func (s *Service) librarySidecarTitleZH(ctx context.Context, movieID string) string {
+	movieID = strings.TrimSpace(movieID)
+	if movieID == "" || s.movies == nil {
+		return ""
+	}
+	movie, err := s.movies.Get(ctx, movieID)
+	if err != nil || movie == nil {
+		return ""
+	}
+	return sidecarTitleZH(movie)
 }
 
 func (s *Service) javbusClient() (JavbusClient, error) {

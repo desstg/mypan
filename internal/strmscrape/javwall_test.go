@@ -109,7 +109,9 @@ func TestBuildJavWallSnapshotLayout(t *testing.T) {
 	}
 
 	// 墙（= 走一遍 listJavWall）上不该有「未匹配」那一档，也不该有它的卡片。
-	visible := listJavWall(snap, JavWallListQuery{}, func(javWallRow) emby.JavNFOInfo { return emby.JavNFOInfo{} })
+	// 用真的 Service（只是 nfo 缓存表要自己建，裸 &Service{} 写它会 panic）。
+	s := &Service{javTitleCache: map[string]javTitleEntry{}}
+	visible := s.listJavWall(snap, JavWallListQuery{})
 	if visible.Total != 5 {
 		t.Fatalf("墙上应当 5 张（未匹配整档藏掉）：%d", visible.Total)
 	}
@@ -235,9 +237,9 @@ func TestListJavWallFilterAndSort(t *testing.T) {
 	root := t.TempDir()
 	writeJavLibrary(t, root)
 	snap := javWallSnapshotForTest(t, root, []string{"未匹配"})
-	titles := func(row javWallRow) emby.JavNFOInfo { return emby.JavNFOInfo{} }
+	s := &Service{javTitleCache: map[string]javTitleEntry{}}
 
-	all := listJavWall(snap, JavWallListQuery{}, titles)
+	all := s.listJavWall(snap, JavWallListQuery{})
 	if all.Total != 5 || len(all.Items) != 5 {
 		t.Fatalf("不过滤应当全出：total=%d len=%d", all.Total, len(all.Items))
 	}
@@ -245,12 +247,12 @@ func TestListJavWallFilterAndSort(t *testing.T) {
 		t.Errorf("统计不对：%+v", all.Stats)
 	}
 
-	cat := listJavWall(snap, JavWallListQuery{Category: "国产"}, titles)
+	cat := s.listJavWall(snap, JavWallListQuery{Category: "国产"})
 	if cat.Total != 3 {
 		t.Errorf("「国产」档应当 3 张，got %d", cat.Total)
 	}
 
-	kw := listJavWall(snap, JavWallListQuery{Keyword: "91cm-109-cd2"}, titles)
+	kw := s.listJavWall(snap, JavWallListQuery{Keyword: "91cm-109-cd2"})
 	if kw.Total != 1 || kw.Items[0].Stem != "91CM-109-cd2" {
 		t.Errorf("关键词过滤不对：%+v", kw.Items)
 	}
@@ -260,9 +262,59 @@ func TestListJavWallFilterAndSort(t *testing.T) {
 	}
 
 	// 分页
-	page := listJavWall(snap, JavWallListQuery{Limit: 2}, titles)
+	page := s.listJavWall(snap, JavWallListQuery{Limit: 2})
 	if len(page.Items) != 2 || !page.HasMore {
 		t.Errorf("分页不对：len=%d hasMore=%v", len(page.Items), page.HasMore)
+	}
+}
+
+// 快照复用期间翻页 / 换 tab **不该再读一遍全库的 nfo**。
+//
+// 这条钉的是一个真实存在的浪费：排序键（发行日期 / 入库时间）住在 nfo 里，而排序要看
+// 全部行 —— 不记「已经取过」的话，每翻一页都要把整库的 nfo 重新 stat 一遍。
+// 本地盘上白送的，网盘 / SMB 上就是每翻一页卡几秒（实测 242 份 nfo 并发也要 2.2s）。
+//
+// 用真 Service + 数得清的桩：第一次走完把 nfo 全删掉，第二次还能拿到同样的标题 ——
+// 说明第二次一个文件都没碰。
+func TestListJavWallReusesNFOAcrossPages(t *testing.T) {
+	root := t.TempDir()
+	writeJavLibrary(t, root)
+	snap := javWallSnapshotForTest(t, root, []string{"未匹配"})
+	s := &Service{javTitleCache: map[string]javTitleEntry{}}
+
+	first := s.listJavWall(snap, JavWallListQuery{Limit: 2})
+	if len(first.Items) == 0 {
+		t.Fatal("墙上应当有卡片")
+	}
+	before := make([]string, 0, len(first.Items))
+	for _, it := range first.Items {
+		before = append(before, it.Title)
+	}
+
+	// 把库里的 nfo 全删了：第二次如果还去读盘，标题就会掉回主干。
+	var nfos []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.EqualFold(filepath.Ext(path), ".nfo") {
+			nfos = append(nfos, path)
+		}
+		return nil
+	})
+	if len(nfos) == 0 {
+		t.Fatal("样本库里应当有 nfo")
+	}
+	for _, p := range nfos {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	second := s.listJavWall(snap, JavWallListQuery{Limit: 2})
+	after := make([]string, 0, len(second.Items))
+	for _, it := range second.Items {
+		after = append(after, it.Title)
+	}
+	if strings.Join(before, "|") != strings.Join(after, "|") {
+		t.Errorf("翻页后标题变了（说明又去读了已经不存在的 nfo）：%v → %v", before, after)
 	}
 }
 

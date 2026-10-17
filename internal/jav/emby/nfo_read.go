@@ -424,6 +424,17 @@ func isASCIILetter(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
+// StripNumberPrefix 是 stripNumberPrefix 的导出形态。
+//
+// 给 `internal/strm` 那条「把 nfo 的 `<title>` 换成中文」的路用（见
+// strm.replaceNFOTitle）：`MovieMeta.Title` 是**剥掉番号前缀**的形态
+// （写出去时由 BuildNFOFromMeta 的 withNumber 拼回来），所以外部要改它就得
+// 用同一个剥法 —— 自己写一遍迟早与这里分家（分家的表现是标题里多一个空格、
+// 或者少一个番号）。
+func StripNumberPrefix(number, title string) string {
+	return stripNumberPrefix(number, title)
+}
+
 // stripNumberPrefix 去掉标题前面的「番号 + 空格」。
 //
 // **只剥带空格的那种**，与 withNumber 严格互逆：

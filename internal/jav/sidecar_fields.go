@@ -267,3 +267,222 @@ func (s *Service) SidecarTitleByNumber(ctx context.Context, number string) (titl
 	}
 	return pickTitleZH(movie.TitleZH, movie.Title), movie.OriginTitle
 }
+
+// ForceTranslateSidecarFields 在**在线刮削那一刻**把这部片的日文标题/简介翻成中文，
+// 并把中文标题并进 `title`（本函数**只并 title**）。
+//
+// # 为什么要有这一条（用户 2026-10-17 定的口径）
+//
+// 原话：「其实库里的标题可以不管太多了，在线刮削时，可以强制写了翻译后的中文标题」。
+//
+// 背景是全库有 11464 部的标题还不是中文（约 51 万字）。于是有两条路可选：
+//
+//   - **后台全量补翻**：跑一次 51 万字的 AI 请求，用户明确否掉了
+//     （「厍里太多要翻译，ai的token消耗太多」）；
+//   - **只在用户真的刮那几部时翻**：花多少 token 由用户点多少次决定。就是这一条。
+//
+// # 「强制」指的是什么
+//
+// `translateFields`（补缺链那条）问的是「**该不该翻**」——已经是中文的跳过、
+// 已有 AI 译文的跳过，翻完还要再过 `sidecarTitleZH` 那道闸才推得出去。
+// 这一条问的是「**用户刚刚点了刮削，这部片的标题还是日文吗**」：
+//
+//   - **不看 `route`**：档位只决定去哪几个站补缺，与「这句话是不是中文」无关；
+//   - **不看 `enriched_at` / `summary_attempts`**：那两个是后台回填循环的排程依据，
+//     这里不是它的一部分（本函数也**不动**它们，与 BackfillLibraryMovie 同一条规矩）；
+//   - **不看 `translateFields` 的字段勾选**：勾选管的是补缺链，用户点刮削时要的是中文标题。
+//
+// 但仍然**看 `isChinese`** —— 标题已经是中文就不发请求。这一条不是省事，是省钱：
+// 一部中文片的标题再翻一次，等于白花一次额度、还可能把通顺的中文改写坏。
+//
+// # 翻译不可用时**什么都不做**
+//
+// 没开翻译 / 没配 AI：与 `translateFields` 同一条契约 —— 安静返回，不报错。
+// 这是配置状态，不是故障。
+//
+// # 只翻 title，summary 留给补缺链
+//
+// 简介由 `BackfillLibraryMovie` 那条链负责（它有 `summary_original` 侧车字段那套
+// 记账，见 translateFields），这里重复一份就是两套判据。用户这次要的正是**标题**。
+//
+// ⚠️ 调用方**必须按两步走**（2026-10-17 真机挖出来的）：
+//
+//	① `LookupTitleZHForSidecar` —— 库里已经有一份像中文的标题就用它，
+//	   **一个 AI 请求都不发**（`missav` 这类别站补来的中文全在这一档）；
+//	② 本函数 —— 库里也没有中文时，才动 `cur`（并可能问 AI）。
+//
+// 只走②的后果是**拿原文重新翻一遍**：真机 10 部里 7 部本来就有上游给的中文标题，
+// 全部被重翻一次，还盖掉了上游那份更贴切的译名。两步合起来才是用户要的
+// 「能不翻就不翻，要翻就翻成中文」。
+//
+// `sidecarTitle` 是调用方**手上那份侧车 json 现有的标题**（没有就传空串）。
+// 它参与两条判据：要不要问 AI、以及库里那份是不是比文件里那份新 —— 见下面那段 ⚠️。
+//
+// # 返回值：`ok` 的语义是「有一个可用的中文标题要推」，不是「刚翻出来一份」
+//
+// ⚠️ **已经是中文时也返回 true**（同一次真机）。原因在调用方那一步：
+// 它做的是 `strm.ApplySidecarTitleZHToFile` → `replaceNFOTitle`，而**json 里是中文、
+// nfo 里还是日文**是一种真实存在的坏状态（真机样本 ACHJ-088：json「长着天使般的面孔…」、
+// nfo「天使のような顔して…」）。若「已经是中文」就返回 false，那批的 nfo 永远修不好 ——
+// 而它恰恰是「用户点了刮削、卡片上还是日文」的那一类。
+//
+// 这与 `writeFieldIntoFile` 的规矩 ① 是同一条：「值没变就不写 json，但 **nfo 那一手照做**」
+// （那条规矩就是为同一批坏状态立的，注释里记着 MNGS-068）。
+//
+// 所以返回 `ok && title != ""` 表示**这一步有的可做**，调用方拿它去写指定那一份文件。
+// **本函数不写侧车**：「侧车在哪」是 strm 那边的知识（见本文件开头那段分工）。
+func (s *Service) ForceTranslateSidecarFields(ctx context.Context, number, sidecarTitle string) (string, bool) {
+	number = strings.TrimSpace(number)
+	if number == "" || s.movies == nil {
+		return "", false
+	}
+	if s.translator == nil || !s.translateEnabled() || !s.translator.Available() {
+		// 没开翻译 / 没配 AI：静默跳过（与 translateFields 逐字相同的契约）。
+		//
+		// ⚠️ 这里连「文件里已经是中文」那一档也一起跳过了。这是**有意的**：
+		// 没开 AI 时用户没打算让这条链碰任何东西（关掉翻译的人正是「别动我的标题」
+		// 那种诉求），不能因为「顺手修 nfo」把那一档的语义反过来。
+		// 那批 nfo 的修法另有其人：后台那条 `sidecarSyncLoop`（每小时，
+		// 判据是 `sidecarTitleZH`，与翻不翻译无关）。
+		//
+		// 但**记一行 info**：这条路的「跳过」与「用户没开翻译」在界面上长得一模一样
+		// （都是「点了刮削、卡片上还是日文」），只有日志能分开。
+		s.logInfo("jav force translate skipped", "number", number, "reason", "翻译未启用或 AI 不可用")
+		return "", false
+	}
+	movie, err := s.movies.GetByNumber(ctx, number)
+	if err != nil || movie == nil {
+		// 刚 `IngestByNumberFresh` 过还查不到：不是正常路径，但不值得为它报错。
+		s.logInfo("jav force translate skipped", "number", number, "reason", "库里查不到这一部")
+		return "", false
+	}
+	// ⚠️ **判据取「文件里那份」而不是「库里那份」**，两者是不同的东西：
+	//   - 侧车 json 的 `title` 是**推送那一刻的快照**，用户可能手改过；
+	//   - 库里 `title_zh` 是另一条链写的（别站补来的、或后台翻的）。
+	// 若只看库里那份，会出现「库里已有中文 → 跳过」，而**手上这份文件还是日文** ——
+	// 用户点了刮削什么都没变，且不报错。反过来只要文件里那份是日文就翻，多花的
+	// 最多是一次额度，而「点了没反应」是这个项目反复在修的那一类病。
+	//
+	// 库里那份也留着当旁证：文件里没有标题时（刚新建的侧车、或键被删过），
+	// 它才是唯一的信息源。
+	cur := strings.TrimSpace(sidecarTitle)
+	if cur == "" {
+		cur = strings.TrimSpace(movie.TitleZH)
+	}
+	if cur == "" {
+		cur = strings.TrimSpace(movie.Title)
+	}
+	if cur == "" {
+		// 两边都没有标题：没东西可推。**这一档最需要日志** ——
+		// 真机上它对应的正是「这半个上游真的一个标题都没给」（例如没进库的片）。
+		s.logInfo("jav force translate skipped", "number", number, "reason", "侧车与库里都没有标题")
+		return "", false
+	}
+	// 已经是中文：**不问 AI**，但要**推出去** —— 见函数头那段 ⚠️（修 nfo 那一半）。
+	if isChinese(cur) {
+		return cur, true
+	}
+	// ⚠️ 库里已经有一份 **AI 译文**时**不重翻**：那是 `titleSourceToTranslate` 的判据
+	// （真机量过 8 部「AI 译文里混着假名」——模型把日文演员名原样留着，或压根回了一句
+	// 「怎么翻」的话），而那 8 部重翻不会变好、只会永远每天再问一次。
+	//
+	// 但**要把它推出去**：文件里那份还是日文，而库里这份已经比它新
+	// （不然就永远卡在「拿来当判据的那份是文件里那份」这条规矩上）。
+	if movie.TitleZHSource == translateSourceAI {
+		zh := strings.TrimSpace(movie.TitleZH)
+		if zh == "" {
+			s.logInfo("jav force translate skipped", "number", number, "reason", "库里有 ai 标记但译文是空的")
+			return "", false
+		}
+		return zh, true
+	}
+	out, terr := s.translator.Translate(ctx, s.translatePrompt(), cur)
+	if terr != nil {
+		s.logInfo("jav force translate title failed", "number", number, "err", terr)
+		return "", false
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		s.logInfo("jav force translate title failed", "number", number, "reason", "AI 返回空")
+		return "", false
+	}
+	// 先落库再回传：侧车写失败时至少界面上（详情页读库）是中文的。落库走 Upsert
+	// ——那条 SQL 的「空值不覆盖」语义正好，不会把别的字段冲掉。
+	movie.TitleZH = out
+	movie.TitleZHSource = translateSourceAI
+	if err := s.movies.Upsert(ctx, movie); err != nil {
+		s.logWarn("jav force translate upsert failed", "number", number, "err", err)
+	}
+	s.logInfo("jav force translated title", "number", number)
+	return out, true
+}
+
+// LookupTitleZHForSidecar 按番号找一部片的**中文标题**，给「点名写一份侧车」那条路用。
+//
+// # 与 `ForceTranslateSidecarFields` 的分工
+//
+// 那一条服务「**刚点过在线刮削**」这个场景：它会问 AI（所以要先过一遍翻译开关与
+// 额度），也会把译文落库。这一条服务的是另一半 —— **用户已经有一份目标文件**、
+// 只缺「该写进去哪个中文标题」。两条差别只有一处：
+//
+//   - **不问 AI**：调用方手上那份文件早就有标题（侧车 json 里的 `title`），
+//     要判断的是「库里是否已经有一份**更好**的中文」，而不是「把它翻出来」。
+//     点一次刮削花一次额度是用户定的口径（「厍里太多要翻译，ai的token消耗太多」），
+//     而这条路的触发时机不是「用户点了一次」——
+//     它是**每份侧车每轮都被扫到**（`sidecarSyncOnce` 每小时、海报墙按目录相册
+//     重建/整理每跑一次），在这里问 AI 就是那个被否掉的全量补翻。
+//
+// # 与 `sidecarTitleZH` 的分工（这才是它存在的理由）
+//
+// `sidecarTitleZH` 是整批回写那条路的判据，**只认 `TitleZHSource == "ai"`**（或
+// 标题本身已是中文）。而真机上「库里那份是好中文、侧车 json 那份还是日文」占大头，
+// 库里那份的来源是 `missav` / `freejavbt` 这类**别站补来的**（2026-10-17 实测 300 份
+// 侧车里 49 份 json 标题仍是日文、其中 28 份库里已有中文）。本条把那几档一起收下：
+//
+//   - `title_zh` 与 `title` 不同 → 库里那份是**别人给的**（本站从不往 `title` 里写
+//     中文副本，只有「原文」那一栏是日文）→ 用它，**并且只在它自己是中文时**；
+//   - `title_zh` 与 `title` 相同 → **不能再用「有没有中文」当判据**（否则一部标题
+//     恰好是中文的日文原文就会被当成译文推下去，而它不是）。改看来源标记：
+//     `ai`（本程序翻的）或 `missav`（别站给的中文标题）都收，其余（`dmm` 这类
+//     原文站塞进译文栏的日文、以及空标记）一律不收。
+//
+// 两处都还要求「一眼能看出是中文」（`isChinese`），因为**上游给的译文栏里混着日文**
+// 是实测存在的（`dmm` 那档）。
+//
+// # 一个已知的、刻意留下的窄口
+//
+// 常规西文标题（`Title` 与 `TitleZH` 都写着 `Vixen 26.09.19 ...`）过不了 `isChinese`，
+// 于是侧车那份永远拿不到它最想要的名字。要覆盖它得放宽到「译文栏与原文栏**不同**
+// 就认」，而那会把 `dmm` 那档日文一起放进来（判断依据只剩「不同」，而日文原文与
+// 日文译文确实常常不同）。**宁可少修那几张卡片，也不往侧车里灌日文。**
+func (s *Service) LookupTitleZHForSidecar(ctx context.Context, number string) (string, bool) {
+	number = strings.TrimSpace(number)
+	if number == "" || s.movies == nil {
+		return "", false
+	}
+	movie, err := s.movies.GetByNumber(ctx, number)
+	if err != nil || movie == nil {
+		return "", false
+	}
+	title := strings.TrimSpace(movie.Title)
+	for _, cand := range []string{movie.TitleZH, title} {
+		zh := strings.TrimSpace(cand)
+		if zh == "" || zh == title {
+			// 空的那栏不必说；与原文同值的那栏只是**日文原文的副本**，
+			// 拿它当真译文写下去等于把侧车里那份中文换成日文。
+			continue
+		}
+		if !isChinese(zh) {
+			continue // 一眼不像中文：宁可留着侧车那份日文，等翻译那条路
+		}
+		return zh, true
+	}
+	// 两栏同值（或那栏是白的）：只能看来源标记。
+	switch movie.TitleZHSource {
+	case "ai", "missav":
+		if zh := strings.TrimSpace(movie.TitleZH); zh != "" {
+			return zh, true
+		}
+	}
+	return "", false
+}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"litepan/internal/jav/emby"
@@ -23,9 +24,21 @@ import (
 
 const (
 	// javWallSnapshotTTL 是快照的保鲜期。扫盘只在超时、root mtime 变了、或显式刷新时重做。
+	//
+	// ⚠️ 别为了「少扫几次」把它调大：`sameDirMtime` 只盯得住**根目录**的 mtime，
+	// 而刮削往影片目录里写 nfo / 海报时根目录的 mtime 一动不动 —— 于是 TTL 之内
+	// 保存完的改动不会反映到墙上（用户会以为没保存上）。墙要的是「刚做完的动作立刻可见」。
 	javWallSnapshotTTL = 60 * time.Second
 	// javWallMaxDepth 是往下扫的层数上限。番号库没有 Season 那种层级，留 4 层余量。
 	javWallMaxDepth = 4
+
+	// javWallScanWorkers 是扫盘时**同时**读几个一级目录。
+	//
+	// 海报墙的数据源常常是网盘 / SMB 上的目录（「本地目录」那个入口就是这么用的），
+	// 那种路径上每一次 ReadDir 都是一次网络往返：实测 250 个影片目录串行 25.5s、
+	// 8 路并发 13.6s。但**不能开大** —— 同一个共享上量到 16 路反而回弹到 24.7s
+	// （比串行还慢），那是 SMB 客户端在互相排队。8 是实测的拐点。
+	javWallScanWorkers = 8
 )
 
 // JavWallCategory 是一级目录（用户口语里的「类型」：有码 / 无码 / 欧美 / 国产…）。
@@ -116,7 +129,11 @@ type JavWallListResult struct {
 	FullSyncWipe bool `json:"full_sync_wipe"`
 }
 
-// javWallSnapshot 是一次扫盘的结果（只读）。
+// javWallSnapshot 是一次扫盘的结果。
+//
+// ⚠️ 它**不是只读的**：`listJavWall` / `javWallDetail` 会往 `rows` 上补 nfo 里的
+// 标题与排序日期（见 fillJavWallRowMeta / fillMetaOnce）。读的人拿到的 `javWallRow`
+// 一律是**拷贝**（`rows` 切片是逐行拷出来的），所以补写不会漏到别人手里。
 type javWallSnapshot struct {
 	root    string
 	builtAt time.Time
@@ -128,6 +145,17 @@ type javWallSnapshot struct {
 	// javWallRows 拿它与**当前**设置比对：不一致就作废重建 —— 设置改了但缓存还没过期时，
 	// 缓存命中会给出一份按旧名单过滤的墙（「改了设置墙不刷新」）。
 	hiddenKey string
+
+	// fillMetaOnce 保证「把 nfo 里的两个日期与标题 / 番号填进 rows」这件事
+	// **一份快照只做一次**。
+	//
+	// 为什么要有它：排序键住在 nfo 里，而排序看的是**全部**行 —— 每翻一页 / 换个 tab /
+	// 改次排序都重填一遍的话，网盘 / SMB 上每次操作都要把整库 nfo 重新 stat 一遍
+	// （实测 250 部并发 1.4s，串行 7.1s）。填过之后 rows 上就带着日期与标题了。
+	//
+	// 用 sync.Once 而不是「判一个 bool」：快照是**多个请求共享**的，两个请求同时首列
+	// 会一起往里写（数据竞争）。
+	fillMetaOnce sync.Once
 }
 
 // javWallRow 是卡片 + 标题缓存的键（nfo 的 mtime/size）。
@@ -136,9 +164,6 @@ type javWallRow struct {
 	// absDir 与 strmName 留着给「读单品」用，不进 JSON。
 	absDir   string
 	strmName string
-
-	titleMod  time.Time
-	titleSize int64
 }
 
 // javWallRows 返回这个数据源的卡片（带快照缓存）。
@@ -248,29 +273,72 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 		// hasOwnStrm 表示这一层**直接**躺着 `.strm`（不递归）。
 		hasOwnStrm bool
 	}
-	tops := make([]topEntry, 0, len(top))
-	anyOwnStrm := false
-	for _, entry := range top {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+	tops := make([]topEntry, len(top))
+	// ⚠️ 一级目录之间**没有先后关系**（各自独立收自己的卡片），所以这里并发读。
+	//
+	// 以前是串行的 for 循环，每个一级目录还要被 ReadDir 两遍 —— 本地盘上白送的，
+	// 但海报墙的数据源可以是**网盘 / SMB 上的目录**（「本地目录」那个入口就是这么用的）：
+	// 实测 250 个影片目录，串行两遍 51s → 并发一遍 13.6s（另加根目录那一次 10.4s）。
+	// 并发度不能开大，理由见 javWallScanWorkers。
+	//
+	// 每个 goroutine **只写自己的下标**（tops[i]），所以不需要锁；切片长度一次开够
+	// （append 会写同一个 len，那才需要锁）。
+	var (
+		wg       sync.WaitGroup
+		anyMu    sync.Mutex
+		anyOwn   bool
+		scanSem  = make(chan struct{}, javWallScanWorkers)
+		firstErr error
+	)
+	for i := range top {
+		entry := top[i]
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		catDir := filepath.Join(root, entry.Name())
-		own := hasStrmInDir(catDir)
-		if own {
-			anyOwnStrm = true
-		}
-		// 一级目录下可能还有一层（分类目录 → 影片目录），也可能直接躺着 .strm。
-		// 隐藏**只按一级目录名判**：同一个名字出现在更深处（作品目录恰好与某个一级目录同名）
-		// 不该被连坐，所以这里不把 hiddenSet 传下去。
-		tops = append(tops, topEntry{
-			name:       entry.Name(),
-			rows:       collectJavRows(ctx, ref, catDir, entry.Name(), entry.Name(), 1, nil),
-			hasOwnStrm: own,
-		})
+		wg.Add(1)
+		scanSem <- struct{}{}
+		go func(idx int, entry os.DirEntry) {
+			defer wg.Done()
+			defer func() { <-scanSem }()
+			if err := ctx.Err(); err != nil {
+				anyMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				anyMu.Unlock()
+				return
+			}
+			catDir := filepath.Join(root, entry.Name())
+			// ⚠️ 这一次调用**同时**给出「收进来的卡片」与「这一层是不是直接躺着 .strm」。
+			//
+			// 以前这里先 `hasStrmInDir(catDir)` 看一眼、紧接着又 `collectJavRows(catDir)`
+			// 再读一次 —— 同一个目录被 ReadDir 两遍。网盘 / SMB 上每一次 ReadDir
+			// 都是一次网络往返，两遍就是白花一倍时间。判据只能从**已经读出来的那一次**里取。
+			rows, own := collectJavRows(ctx, ref, catDir, entry.Name(), entry.Name(), 1, nil)
+			if own {
+				anyMu.Lock()
+				anyOwn = true
+				anyMu.Unlock()
+			}
+			// 一级目录下可能还有一层（分类目录 → 影片目录），也可能直接躺着 .strm。
+			// 隐藏**只按一级目录名判**：同一个名字出现在更深处（作品目录恰好与某个一级目录同名）
+			// 不该被连坐，所以这里不把 hiddenSet 传下去。
+			tops[idx] = topEntry{name: entry.Name(), rows: rows, hasOwnStrm: own}
+		}(i, entry)
 	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	// 没进过 goroutine 的那些位（文件 / 隐藏目录）是零值，把它们的空行剔掉。
+	kept := tops[:0]
+	for _, t := range tops {
+		if t.name != "" {
+			kept = append(kept, t)
+		}
+	}
+	tops = kept
+	anyOwnStrm := anyOwn
 
 	// ⚠️ **「分类」还是「作品」要判一下**（2026-10-14，挂本地目录时踩到）。
 	//
@@ -279,7 +347,7 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 	// 250 个作品目录直接躺在根下。照原样摊就是 250 个 tab 把网格顶到屏幕外
 	// （实测 grid top = 1384px，一屏连一张海报都看不到）。
 	//
-	// 判据是「这一层**直接**有没有 `.strm`」（`hasStrmInDir`，**不递归**）：
+	// 判据是「这一层**直接**有没有 `.strm`」（`hasOwnStrm`，**不递归**）：
 	//   - 有 → 这一层就是**作品目录**（两层结构）→ **不建 tab**，卡直接摊在「全部」里；
 	//   - 一个都没有 → 保留原行为（它是分类，卡在下一层）→ 建 tab。
 	//
@@ -302,7 +370,10 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 	// ⚠️ 这里只收根目录这一层的文件，**不递归** —— 递归会把上面已经按分类收过的
 	// 影片目录再收一遍（它们也挂在 root 下面），卡片成倍冒出来。这个坑实测踩过：
 	// 5 张卡变成 9 张、每个 tab 的计数也跟着涨。
-	if rootFiles := filesInDir(root); len(rootFiles) > 0 {
+	//
+	// 用的是**开头那一次** ReadDir 的结果（`rootFiles`），不再读一遍根目录：
+	// 网盘 / SMB 上根目录这一层有 250 个条目，重读一次实测 1.3s。
+	if rootFiles, _ := splitJavDirEntries(top); len(rootFiles) > 0 {
 		if rootRows := javWallRowsForDir(ref, root, "", "", rootFiles); len(rootRows) > 0 {
 			snap.rows = append(snap.rows, rootRows...)
 			snap.cats = append(snap.cats, JavWallCategory{Name: ""})
@@ -327,17 +398,35 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 }
 
 // collectJavRows 收一个目录里的卡片；子目录递归下去（层数有上限）。
-func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat string, depth int, hidden map[string]struct{}) []javWallRow {
+//
+// 第二个返回值 `own` 报告**这一层直接**躺着 `.strm` 吗（不递归）——它就是
+// buildJavWallSnapshot 判「分类目录还是作品目录」用的那条判据，从**同一次 ReadDir**
+// 里顺带算出来。别为了它再单独读一遍目录：这一层可能是 SMB / 网盘上的路径，
+// 多一次 ReadDir 就是多一次网络往返（见 buildJavWallSnapshot 那段注释）。
+func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat string, depth int, hidden map[string]struct{}) ([]javWallRow, bool) {
 	if depth > javWallMaxDepth {
-		return nil
+		return nil, false
+	}
+	// 扫盘是**并发**的（见 buildJavWallSnapshot），每一路都要自己看取消信号 ——
+	// 少了这一句，用户关掉页面之后后台还会把整棵树扫完。
+	if ctx.Err() != nil {
+		return nil, false
 	}
 	entries, err := os.ReadDir(absDir)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 
 	// 先把这一层的文件按名字归位（一次 ReadDir 拿到全部）。
 	files, subdirs := splitJavDirEntries(entries)
+
+	own := false
+	for name := range files {
+		if strings.EqualFold(filepath.Ext(name), ".strm") {
+			own = true
+			break
+		}
+	}
 
 	rows := javWallRowsForDir(ref, absDir, relDir, cat, files)
 
@@ -350,9 +439,10 @@ func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat stri
 		if relDir != "" {
 			childRel = relDir + "/" + sub.Name()
 		}
-		rows = append(rows, collectJavRows(ctx, ref, filepath.Join(absDir, sub.Name()), childRel, cat, depth+1, hidden)...)
+		childRows, _ := collectJavRows(ctx, ref, filepath.Join(absDir, sub.Name()), childRel, cat, depth+1, hidden)
+		rows = append(rows, childRows...)
 	}
-	return rows
+	return rows, own
 }
 
 // javWallRowsForDir 把一个目录里**直接躺着**的 `.strm` 变成卡片。
@@ -548,7 +638,22 @@ func findJavWallRow(snap *javWallSnapshot, relDir, stem string) (javWallRow, boo
 }
 
 // listJavWall 按查询条件切出这一页。
-func listJavWall(snap *javWallSnapshot, q JavWallListQuery, titles javTitleLookup) JavWallListResult {
+//
+// 收 `*Service` 而不是一个 `javTitleLookup`：这里要**自己**决定什么时候读 nfo、
+// 读多少（一份快照读一次全库，见 fillJavWallRowMeta），而读 nfo 要 s 上的缓存。
+func (s *Service) listJavWall(snap *javWallSnapshot, q JavWallListQuery) JavWallListResult {
+	// 排序键（发行日期 / 入库时间）与显示用的标题 / 番号都住在 nfo 里，**一趟读完**
+	// 并填进 `snap.rows`（一份快照只做一次，见 fillJavWallRowMeta）。
+	//
+	// 于是：第一趟读全库，之后翻页 / 换 tab / 改排序一次盘都不用碰 ——
+	// 快照命中时整条路只剩过滤 + 排序（实测第二次列表 0.5ms）。
+	//
+	// ⚠️ 必须在**复制出 `rows` 之前**做：下面那份 `rows` 是逐行拷的，先拷后填的话
+	// 拷到的还是空值 —— 第一次请求会按「全空」稳定排序（= 扫盘原序），
+	// 第二次请求才排对，表现为「刷新一下顺序就变了」。第一版就是这么写错的。
+	snap.fillMetaOnce.Do(func() {
+		fillJavWallRowMeta(snap.rows, s.newJavTitleLookup(snap.rows))
+	})
 	hidden := make(map[string]struct{}, len(snap.hidden))
 	for _, name := range snap.hidden {
 		hidden[name] = struct{}{}
@@ -584,9 +689,6 @@ func listJavWall(snap *javWallSnapshot, q JavWallListQuery, titles javTitleLooku
 		}
 		rows = append(rows, row)
 	}
-	// 排序键（发行日期 / 入库时间）**不在 row 上**，得现从 nfo 取 —— 见
-	// sortJavWallRows 的说明。所以这里把「这一页要用的」先并发读出来再排。
-	fillJavWallSortKeys(rows, titles)
 	sortJavWallRows(rows, q.Sort)
 
 	limit := q.Limit
@@ -608,18 +710,10 @@ func listJavWall(snap *javWallSnapshot, q JavWallListQuery, titles javTitleLooku
 		end = len(rows)
 	}
 	page := make([]JavWallItem, 0, end-offset)
+	// 标题 / 番号 / 两个日期都已经在 fillJavWallRowMeta 那一趟里填进 item 了
+	// （一份快照只填一次），这里只是把当页拷出来。**不再读盘**。
 	for _, row := range rows[offset:end] {
-		item := row.item
-		// 标题/番号从 nfo 读（带缓存）—— 读不到就保持主干，卡片上不至于空着。
-		if nfo := titles(row); nfo.Title != "" || nfo.Number != "" {
-			if item.Number == item.Stem && nfo.Number != "" {
-				item.Number = nfo.Number
-			}
-			if nfo.Title != "" {
-				item.Title = stripJavNumberPrefix(item.Number, nfo.Title)
-			}
-		}
-		page = append(page, item)
+		page = append(page, row.item)
 	}
 	return JavWallListResult{
 		Items:      page,
@@ -664,7 +758,7 @@ func javWallMatches(item JavWallItem, keyword string) bool {
 //
 // `ReleaseDate` / `AddedAt` 是建 nfo 时就写死的（生成器把侧车里的 release_date 与
 // dest.added_at 写进 `<premiered>` / `<dateadded>`），列表这条路只负责**读回来**。
-// 调用方要先跑 fillJavWallSortKeys —— 少了那一步，两个字段恒为零值、比较恒 false、
+// 调用方要先跑 fillJavWallRowMeta —— 少了那一步，两个字段恒为零值、比较恒 false、
 // 稳定排序原序返回，表现为「日期排序点下去毫无反应」且不报错（这坑踩过）。
 //
 // # 为什么默认是 added_desc 而不是番号升序
@@ -712,20 +806,39 @@ func sortJavWallRows(rows []javWallRow, sortKey string) {
 	}
 }
 
-// fillJavWallSortKeys 给每一行补上排序用的两个日期（就地改 item）。
+// fillJavWallRowMeta 把 nfo 里的东西一次性填进行上：两个**排序键**（发行日期 /
+// 入库时间）与**显示用的标题 / 番号**。就地改 `rows`（必须传快照自己那份，见调用点）。
 //
-// 走的是与「读标题」同一个读取器：**同一个 nfo、同一次解析**，标题与日期一起出来，
-// 不额外读盘。titles 内部有 8 并发预热 + mtime 缓存，所以冷启动几千份 nfo 时
-// 这一趟就是原来那一趟。
+// # 为什么合在一起、而且只做一次
 //
-// 为什么排序前就要填：`sortJavWallRows` 拿 `item.ReleaseDate` / `.AddedAt` 比较，
-// 而 listJavWall 里排序排在「给这一页读标题」之前 —— 那一步只覆盖当页，
-// 排序却要看**全部**行。
-func fillJavWallSortKeys(rows []javWallRow, titles javTitleLookup) {
+// 两件事读的是**同一份 nfo、同一次解析**，分两趟做就是把整库读两遍。而排序键只有
+// 全库都填好才能排（`sortJavWallRows` 拿 `item.ReleaseDate` / `.AddedAt` 比较），
+// 标题却只要当页 —— 于是最省的做法是：**第一趟读全库时把两样都填掉**，之后翻页 /
+// 换 tab / 改排序都不用再碰盘（快照命中时整条路只剩过滤 + 排序）。
+//
+// ⚠️ 只填一次的前提是「填的是快照自己那份 rows」：`listJavWall` 每次都会把行**拷**
+// 一份出来过滤，填在副本上存不下来，第二趟就全是空的。调用点因此必须传 `snap.rows`。
+//
+// ⚠️ 日期与标题都**每次重填**（用的是读取器里的值）：nfo 的 mtime/size 缓存负责
+// 省掉没变的那部分，改过的那一份必须立刻反映出来。用户的手改落在 nfo 上，
+// 由 SaveJavWallMeta 作废快照 + 重建来生效（快照是新的，这一趟自然重读）。
+// 别在这里加「非空就不覆盖」之类的判断 —— 那会让墙永远停在旧标题上。
+func fillJavWallRowMeta(rows []javWallRow, titles javTitleLookup) {
 	for i := range rows {
 		nfo := titles(rows[i])
 		rows[i].item.ReleaseDate = nfo.Release
 		rows[i].item.AddedAt = nfo.AddedAt
+		// 标题 / 番号：读不到（没有 nfo、不是 <movie> 结构）就保持主干，卡片上不至于空着。
+		if nfo.Title == "" && nfo.Number == "" {
+			continue
+		}
+		item := &rows[i].item
+		if item.Number == item.Stem && nfo.Number != "" {
+			item.Number = nfo.Number
+		}
+		if nfo.Title != "" {
+			item.Title = stripJavNumberPrefix(item.Number, nfo.Title)
+		}
 	}
 }
 
@@ -777,16 +890,6 @@ func defaultJavWallHiddenDirs(svc *settings.Service) []string {
 	return []string{name}
 }
 
-// filesInDir 读一个目录、只取文件（按名字归位）。读不到（目录不存在）返回空。
-func filesInDir(dir string) map[string]os.DirEntry {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	files, _ := splitJavDirEntries(entries)
-	return files
-}
-
 // splitJavDirEntries 把一次 ReadDir 的结果分成「文件表」与「可见子目录」。
 // 隐藏目录（`.` 开头）两边都不进 —— 网盘的元数据目录不属于媒体库。
 func splitJavDirEntries(entries []os.DirEntry) (map[string]os.DirEntry, []os.DirEntry) {
@@ -802,20 +905,4 @@ func splitJavDirEntries(entries []os.DirEntry) (map[string]os.DirEntry, []os.Dir
 		files[e.Name()] = e
 	}
 	return files, subdirs
-}
-
-// hasStrmInDir 报告这一层**直接**躺着 `.strm` 吗（不递归）。
-//
-// 用来分辨「分类目录」与「作品目录」——见 buildJavWallSnapshot 里那段注释。
-func hasStrmInDir(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".strm") {
-			return true
-		}
-	}
-	return false
 }

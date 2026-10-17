@@ -51,6 +51,31 @@ const emit = defineEmits<{
 
 const loading = ref(false);
 const refreshing = ref(false);
+/**
+ * 这一次加载已经等了一会儿了（超过 4 秒）。
+ *
+ * 扫盘是**按目录读**的，而数据源可能是网盘 / SMB 上的目录（「本地目录」那个入口）——
+ * 那里每读一层目录都要走一次网络，几百部作品的库冷扫十几秒是正常的。只显示一句
+ * 「加载中…」的话，用户会以为卡死了。等过一会儿再补一句解释，比一直干等强。
+ *
+ * 只在**首屏**（`loading`）时出现，续加载（`loadingMore`）不弹 —— 那一屏一屏地滚，
+ * 用户已经知道在加载什么了。
+ */
+const slowHint = ref(false);
+let slowHintTimer: number | undefined;
+
+function armSlowHint() {
+  window.clearTimeout(slowHintTimer);
+  slowHint.value = false;
+  slowHintTimer = window.setTimeout(() => {
+    slowHint.value = true;
+  }, 4000);
+}
+
+function clearSlowHint() {
+  window.clearTimeout(slowHintTimer);
+  slowHint.value = false;
+}
 const result = ref<JavWallListResult | null>(null);
 const category = ref<string>("");
 const view = ref<"thumb" | "poster">("poster");
@@ -105,6 +130,7 @@ async function load(options: { append?: boolean } = {}) {
     loadingMore.value = true;
   } else {
     loading.value = true;
+    armSlowHint();
   }
   try {
     const next = await fetchJavWallItems(props.source, {
@@ -139,6 +165,7 @@ async function load(options: { append?: boolean } = {}) {
   } finally {
     loading.value = false;
     loadingMore.value = false;
+    clearSlowHint();
   }
 }
 
@@ -711,7 +738,15 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
       </div>
     </div>
 
-    <div v-if="loading" class="jav-wall__state">加载中…</div>
+    <div v-if="loading" class="jav-wall__state">
+      <span>加载中…</span>
+      <!-- 冷扫要走网络（数据源可能是网盘 / SMB 上的目录），十几秒是正常的 ——
+           等过 4 秒补一句解释，免得用户以为卡死了。 -->
+      <span v-if="slowHint" class="jav-wall__state-hint">
+        正在读取目录，第一次会比较慢（本地目录在网盘 / 共享盘上时，每读一层都要走一次网络）。
+        读完就会缓存，之后的翻页与切换都很快。
+      </span>
+    </div>
     <div v-else-if="!items.length" class="jav-wall__state">
       这个任务的输出目录里还没有番号影片。先在「STRM 任务」里同步一次，或确认任务的媒体类型与输出目录。
     </div>
@@ -836,6 +871,15 @@ defineExpose({ refreshMeta, load, onlineScrape, onlineScraping, onlineScrapeLabe
 .jav-wall__view-btn { padding: 5px 12px; font-size: 12px; background: transparent; border: 0; color: var(--text-muted); cursor: pointer; }
 .jav-wall__view-btn--active { background: var(--brand); color: #fff; }
 .jav-wall__state { padding: 40px; text-align: center; color: var(--text-muted); }
+/* 慢扫时那句解释：居中、限宽（一句话铺满整屏很难读），与「加载中…」之间留一点空。 */
+.jav-wall__state-hint {
+  display: block;
+  max-width: 520px;
+  margin: 10px auto 0;
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.85;
+}
 /* 两套网格，按视图切：
    - 缩略图（横版）：5 列固定，保持原来的大小 —— 横图铺满宽度后本来就矮，再缩小就看不清了；
    - 海报图（竖版）：**与「STRM 刮削」那面墙同尺寸**（auto-fill 140px + 14px 间距）。

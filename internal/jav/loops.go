@@ -422,25 +422,90 @@ func (s *Service) sidecarSyncLoop(ctx context.Context, gate <-chan struct{}) {
 	}
 }
 
-// sidecarSyncOnce 跑一轮回写。
-func (s *Service) sidecarSyncOnce(ctx context.Context) {
+// RunSidecarSyncNow 立刻跑一轮存量回写（**同步**，跑完才返回）。
+//
+// 存在的理由与 `strmscrape.JavWallOnlineScrapeByTask` 逐字相同：正主
+// `sidecarSyncOnce` 是未导出的，而 `internal/app` 那个真机联调测试（全链条那一条）
+// 要能把「每小时那一趟」手动走一遍并**拿到统计**，否则那一段只能靠等。
+//
+// ⚠️ **不要挂到 HTTP 上** —— 它是「几千部 × 几千个文件」的整批遍历，中间那层反代
+// 等不了（与在线刮削那条同一条纪律，见 javwall_online.go 里 502 那段）。
+//
+// 返回的是 `SidecarSyncResult`（扫到/改写/番号表），失败时 err 非空。
+// 没注入 sink（比如没接 strm 模块）时返回零值 —— 与 sidecarSyncOnce 同一条取向。
+func (s *Service) RunSidecarSyncNow(ctx context.Context) (SidecarSyncResult, error) {
 	s.mu.Lock()
 	sync := s.sidecarSyncSink
 	s.mu.Unlock()
 	if sync == nil {
-		return // 没注入（比如没接 strm 模块）：什么都不做，与两条单字段 sink 同一条取向
+		return SidecarSyncResult{}, nil
 	}
-
-	// ① 整批：遍历媒体库目录里的侧车，按番号查库回写。
-	//
-	// 这一趟同时把「哪些番号**有**侧车」收了回来（res.Numbers），下面记账就靠它 ——
-	// 侧车文件名带质量后缀（`SSIS-001-U.json`），只有 json 里的 number 字段是裸番号。
 	res, err := sync(ctx, func(number string) (map[string]any, bool) {
 		return s.sidecarSyncFields(ctx, number)
 	})
 	if err != nil {
+		return res, err
+	}
+	// 标题那一条通道**不在** SyncSidecarsFromRepo 里（它的字段清单刻意没有 title，
+	// 见下面 sidecarSyncOnce 第 ③ 段的长注释）—— 所以放在这里补跑一遍。
+	// 放在这个函数里而不是 `sidecarSyncOnce` 里，是因为它是**这条路的一部分**：
+	// 手动那一趟（真机联调测试）与每小时那一趟拿到的统计必须一致。
+	res.TitleFixed = s.syncSidecarTitles(ctx, res.Numbers)
+	return res, nil
+}
+
+// syncSidecarTitles 把「库里那栏中文标题」推给已经存在的侧车（**替换**通道，
+// 顺带把 nfo 的 `<title>` / `<sorttitle>` 一起换掉）。返回真的改动了几份。
+func (s *Service) syncSidecarTitles(ctx context.Context, numbers []string) int {
+	s.mu.Lock()
+	sink := s.titleZHSink
+	s.mu.Unlock()
+	if sink == nil {
+		return 0
+	}
+	fixed := 0
+	// 同一个番号只推一次。**不能指望调用方去重**：`SyncSidecarsFromRepo` 现在
+	// 是按 `seenNumber` 去过重的，但那是**它**的实现细节 —— 而这里的 sink
+	// （`ApplySidecarTitleZHByNumber`）每调一次就**整目录 Walk 一遍**去找侧车，
+	// 一个重复番号就是白走一趟全库。去重放在这条路上，代价是几行，收益是
+	// 「不管上游给什么，这里都不会重复劳动」。
+	done := make(map[string]struct{}, len(numbers))
+	for _, number := range numbers {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, dup := done[number]; dup {
+			continue
+		}
+		done[number] = struct{}{}
+		movie, err := s.movies.GetByNumber(ctx, number)
+		if err != nil || movie == nil {
+			continue
+		}
+		// 判据与单部那条通道**同一个** `sidecarTitleZH`（「这一部现在显示的那份标题
+		// 是不是中文」）—— 两处各写一遍，「什么时候推标题」迟早出现两套答案。
+		zh := sidecarTitleZH(movie)
+		if zh == "" {
+			continue
+		}
+		if changed, terr := sink(number, zh); terr != nil {
+			s.logWarn("写本地侧车中文标题失败", "number", number, "err", terr)
+		} else if changed {
+			fixed++
+		}
+	}
+	return fixed
+}
+
+// sidecarSyncOnce 跑一轮回写（后台循环那条；统计只进日志）。
+func (s *Service) sidecarSyncOnce(ctx context.Context) {
+	res, err := s.RunSidecarSyncNow(ctx)
+	if err != nil {
 		s.logWarn("jav sidecar sync walk failed", "err", err)
 		return
+	}
+	if res.Scanned == 0 && res.Written == 0 {
+		return // 没注入 sink（零值）或这一轮没事可做：与原来的早退同一条取向
 	}
 
 	// ② 记账：**扫到侧车的那些**记一笔。
@@ -462,10 +527,31 @@ func (s *Service) sidecarSyncOnce(ctx context.Context) {
 		synced++
 	}
 
-	// ③ 补缺链刚补到的那批（有 sidecar_synced_at 为空、但侧车不在本地）留给下一轮；
+	// ③ 标题那一栏单独走的那一趟**已经在 `RunSidecarSyncNow` 里跑完了**（统计是
+	//    `res.TitleFixed`）。为什么它不在 `SyncSidecarsFromRepo` 里、为什么必须补这一趟：
+	//
+	// `SyncSidecarsFromRepo` 走的是 `writeFieldsIntoFile`，而那个函数的字段清单
+	// （`sidecarFieldsFor`）里**刻意没有 `title`** —— 标题那条通道是「无条件替换」，
+	// 判据与「只补空」不同，两套塞一个函数里必然互相带偏（见 `SidecarTitleByNumber`
+	// 那段注释）。代价是：**已经存在的侧车**的 `title` / `nfo <title>` 没有任何一条路
+	// 会去修正，除非那一部恰好再被补缺链推一次。
+	//
+	// 真机后果（2026-10-17 全量审计，556 个目录 / 536 份侧车）：
+	//   - 16 份 `json 标题是中文、nfo <title> 还是日文`（冻结在旧状态）；
+	//   - 48 份 json 标题**至今是日文** —— 其中 27 份**库里 `title_zh` 已经是中文**，
+	//     也就是「译文在库里躺了很久，侧车从没收到过」。
+	// 两批都只靠「每小时那一趟」就能修好，不需要用户点任何按钮。
+	//
+	// 判据与单部那条通道**同一个** `sidecarTitleZH`（「这一部现在显示的那份标题
+	// 是不是中文」），走完 `writeFieldIntoFile` 之后 nfo 的 `<title>`/`<sorttitle>`
+	// 也会跟着换（那条 switch 里 `case "title"` 就是为这件事加的）。nfo 那条幂等，
+	// 所以每轮重复跑不会白刷 mtime。
+
+	// ④ 补缺链刚补到的那批（有 sidecar_synced_at 为空、但侧车不在本地）留给下一轮；
 	//    这里只报告，不发通知 —— 它是后台的慢活，通知会变成噪声。
-	if res.Scanned > 0 || res.Written > 0 {
-		s.logInfo("jav sidecar sync done", "scanned", res.Scanned, "written", res.Written, "marked", synced)
+	if res.Scanned > 0 || res.Written > 0 || res.TitleFixed > 0 {
+		s.logInfo("jav sidecar sync done", "scanned", res.Scanned, "written", res.Written,
+			"marked", synced, "title_fixed", res.TitleFixed)
 	}
 }
 
@@ -1278,10 +1364,28 @@ func missingForMovie(m *domain.JavMovie, hasActors bool) synopsis.Missing {
 //
 // 演员是关联表（jav_movie_actors），所以单独走一次 ReplaceMovieActors ——
 // 只在**一个都没有**时才做（missingForMovie 已经判过）。
+//
+// # `title_zh` 那一栏有一条额外规矩：**中文不被非中文顶掉**（2026-10-17）
+//
+// 这一栏的语义是「**另存的中文标题**」，而补缺链那几家（dmm / missav / airav /
+// avsox / freejavbt / javbus）给的标题**多半是日文**，走的却是同一个字段。
+// 于是「库里本来有中文、这一轮补到一份日文」时，无条件覆盖等于**把中文扔掉**：
+// 库里那一列变日文、侧车那条判据（`sidecarTitleZH`）随之判不出中文，
+// nfo 也就再也修不回来 —— 真机 ABF-387 就是这个形状。
+//
+// 所以判据与 `sidecarTitleZH` **同一条**（`sidecarTitleZHFrom`）：
+// 新来的那份能过闸（AI 译文 / 本身是中文）才覆盖；过不了闸而库里那份已经是
+// 可用的中文，就**留着库里那份**。两边都判不出中文时照常写入（那正是要拿去翻译的原文）。
+//
+// ⚠️ 丢掉那份日文**不损失信息**：日文原名本来就在 `Title` / `OriginTitle` 两栏里，
+// 而这一栏的读者（侧车 / nfo 的 `<title>`）要的是能读的中文。
 func applyPatch(m *domain.JavMovie, p synopsis.FieldPatch, linked []*domain.JavActor) {
 	if p.TitleZH != "" {
-		m.TitleZH = p.TitleZH
-		m.TitleZHSource = p.Source
+		// 新来的这份能当译文用吗？
+		if sidecarTitleZHFrom(p.TitleZH, p.Source) != "" || sidecarTitleZH(m) == "" {
+			m.TitleZH = p.TitleZH
+			m.TitleZHSource = p.Source
+		}
 	}
 	if p.Summary != "" {
 		m.Summary = p.Summary

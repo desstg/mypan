@@ -255,3 +255,130 @@ func TestSidecarFieldsCoverWriteSchemaLeaves(t *testing.T) {
 		}
 	}
 }
+
+// TestLookupTitleZHForSidecar 钉住「点名写一份侧车」那条路的**取值判据**。
+//
+// 它存在的理由（2026-10-17 真机）：10 部片里有 7 部**上游早就给了中文标题**
+// （库里 `title_zh` 是 `missav` / `freejavbt` 那几家补来的），而当时的实现只走
+// 「强制翻译」那一步 —— 于是那 7 部被重翻了一遍，还盖掉了上游那份更贴切的译名。
+// 用户的原话是「厍里太多要翻译，ai的token消耗太多」，所以这一步的 KPI 是
+// **零 AI 请求**。
+//
+// 判据里有两条容易写错的对称情形（下面 ② 与 ③），它们长得很像但结论相反：
+//
+//   - `title_zh` 与 `title` **不同** → 库里那份是别人给的，**但还得看它像不像中文**
+//     （上游的译名栏里混日文是实测存在的，`dmm` 那档）；
+//   - `title_zh` 与 `title` **相同** → 那栏只是原文的副本，**不能再拿「像不像中文」
+//     当判据**（一部日文原文本就可能是汉字堆，`nukitei` 系）。这时只看来源标记。
+func TestLookupTitleZHForSidecar(t *testing.T) {
+	const jp = "超高級中出し専門ソープ 七瀬アリス"
+	repo := &fakeMovieRepo{byNumber: map[string]*domain.JavMovie{
+		// ① 上游给的中文（**要用的那一档**）
+		"ABF-387": {Number: "ABF-387", Title: jp, TitleZH: "超高级中出专门泡泡浴 七濑爱丽丝", TitleZHSource: "missav"},
+		// ② 译文栏是日文（`dmm` 那档塞进来的）→ 不能要
+		"DMM-001": {Number: "DMM-001", Title: jp, TitleZH: "超高級中出し専門ソープ 七瀬アリス", TitleZHSource: "dmm"},
+		// ③ 两栏同值、来源是别站给的中文标题 → 要（只能靠来源判）
+		"MAD016": {Number: "MAD016", Title: "某个全汉字标题", TitleZH: "某个全汉字标题", TitleZHSource: "missav"},
+		// ④ 两栏同值、来源是原文站 → 不要（宁可留着侧车那份，等翻译那条路）
+		"MAD017": {Number: "MAD017", Title: "某个全汉字标题", TitleZH: "某个全汉字标题", TitleZHSource: "dmm"},
+		// ⑤ 译文栏空 → 没有可用的
+		"EMPTY-1": {Number: "EMPTY-1", Title: "タイトル"},
+	}}
+	svc := &Service{movies: repo}
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		number string
+		want   string
+		ok     bool
+		why    string
+	}{
+		{"ABF-387", "超高级中出专门泡泡浴 七濑爱丽丝", true, "上游给的中文"},
+		{"DMM-001", "", false, "译文栏里是日文，不许拿它盖掉侧车那份"},
+		{"MAD016", "某个全汉字标题", true, "两栏同值但来源是别站的中文标题"},
+		{"MAD017", "", false, "两栏同值且来源是原文站"},
+		{"EMPTY-1", "", false, "译文栏是空的"},
+		{"NOT-IN-LIB", "", false, "库里没有这一部"},
+		{"", "", false, "番号是空的"},
+	} {
+		got, ok := svc.LookupTitleZHForSidecar(ctx, tc.number)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("%s：got (%q, %v)，期望 (%q, %v) —— %s", tc.number, got, ok, tc.want, tc.ok, tc.why)
+		}
+	}
+
+	// 没装配库时不 panic（这条路会被刮削那三条分支无条件调到）。
+	if got, ok := (&Service{}).LookupTitleZHForSidecar(ctx, "ABF-387"); ok || got != "" {
+		t.Errorf("未装配库该返回空，got (%q, %v)", got, ok)
+	}
+}
+
+// TestRunSidecarSyncNowFixesTitles 钉住**整批那趟也要修标题**这条（2026-10-17 补的缺口）。
+//
+// # 它防的是什么
+//
+// `SyncSidecarsFromRepo` 走的是 `writeFieldsIntoFile`，而那个函数的字段清单
+// （`sidecarFieldsFor`）里**刻意没有 `title`** —— 标题是「无条件替换」通道，
+// 判据与「只补空」不同。代价是：**已经存在的侧车**里那份 `title` / nfo `<title>`
+// 没有任何一条路会去修正，除非那一部恰好再被补缺链推一次。
+//
+// 真机后果（2026-10-17 全量审计，300 份侧车）：49 份 json 标题至今是日文，
+// 其中 **28 份库里 `title_zh` 已经是中文** —— 译文在库里躺了很久，侧车从没收到过。
+// 这条用例就是钉「只靠每小时那趟也能把它推下去」。
+func TestRunSidecarSyncNowFixesTitles(t *testing.T) {
+	// ① 库里有中文标题（`sidecarTitleZH` 判据过）→ 该被推下去。
+	zhMovie := &domain.JavMovie{Number: "SNOS-186", Title: "日本語のタイトル", TitleZH: "女儿的朋友"}
+	// ② 库里那栏还是日文（上游站点塞的）→ 判据不过，**不该**推下去
+	//    （推了等于拿日文盖掉侧车里已有的中文）。
+	jpMovie := &domain.JavMovie{Number: "ABF-387", Title: "毒づきウェイトレス", TitleZH: "毒づきウェイトレス 八掛うみ"}
+	// ③ 库里没有这一部 → 不推、也不 panic。
+	svc := &Service{
+		movies: &fakeMovieRepo{byNumber: map[string]*domain.JavMovie{
+			"SNOS-186": zhMovie,
+			"ABF-387":  jpMovie,
+		}},
+	}
+	svc.SetSidecarSyncSink(func(_ context.Context, _ func(string) (map[string]any, bool)) (SidecarSyncResult, error) {
+		return SidecarSyncResult{
+			Scanned: 3,
+			Written: 0,
+			// 顺序刻意乱、且有重复：遍历那条路是按目录走的，调用方不该假设有序。
+			Numbers: []string{"ABF-387", "SNOS-186", "NOT-IN-LIB", "SNOS-186"},
+		}, nil
+	})
+	var pushed []string
+	svc.SetTitleZHSidecarSink(func(_ string, titleZH string) (bool, error) {
+		pushed = append(pushed, titleZH)
+		return true, nil // 就当每次都真改了
+	})
+
+	res, err := svc.RunSidecarSyncNow(context.Background())
+	if err != nil {
+		t.Fatalf("RunSidecarSyncNow: %v", err)
+	}
+	if len(pushed) != 1 || pushed[0] != "女儿的朋友" {
+		t.Fatalf("推下去的该只有库里那份中文标题，实际 %q", pushed)
+	}
+	if res.TitleFixed != 1 {
+		t.Errorf("TitleFixed=%d，期望 1（含重复的那份也只该写一次）", res.TitleFixed)
+	}
+	// Written 与 TitleFixed 是**两本账**：这一趟字段一个都没补，标题修了一份。
+	if res.Written != 0 {
+		t.Errorf("Written=%d，期望 0（字段那本账不该被标题记进来）", res.Written)
+	}
+
+	// ④ 没注入标题通道（比如没接 strm 模块）→ 不 panic，TitleFixed 仍是 0。
+	bare := &Service{
+		movies: &fakeMovieRepo{byNumber: map[string]*domain.JavMovie{"SNOS-186": zhMovie}},
+	}
+	bare.SetSidecarSyncSink(func(_ context.Context, _ func(string) (map[string]any, bool)) (SidecarSyncResult, error) {
+		return SidecarSyncResult{Scanned: 1, Numbers: []string{"SNOS-186"}}, nil
+	})
+	res2, err := bare.RunSidecarSyncNow(context.Background())
+	if err != nil {
+		t.Fatalf("没注入标题通道时不该报错：%v", err)
+	}
+	if res2.TitleFixed != 0 {
+		t.Errorf("没注入标题通道时 TitleFixed 该是 0，got %d", res2.TitleFixed)
+	}
+}

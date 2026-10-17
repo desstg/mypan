@@ -766,8 +766,57 @@ func (s *Service) IngestMovie(ctx context.Context, id string) (*domain.JavMovie,
 // 简介与中文标题只有 IngestMovie 会补，而那条路现在只剩后台：入库队列
 // （hydrate.go）与订阅检查里的演员作品表补齐（check.go）。
 // 所以「补缺链」全项目只有这两个后台入口，用户点出来的请求里一趟都不跑。
+//
+// # ⚠️ 它顺手推一次侧车标题（2026-10-17 修的那处覆盖）
+//
+// 「从榜单/影库/订阅列表进库」的那些片，**库里只有 number/title/cover**（列表接口
+// 不给详情），补缺链也就没跑过 —— 于是库里 `title_zh` 是空的，侧车 json 的 `title`
+// 却是**上一次生成时的日文快照**。这时候点开详情，JAVDB 那份详情**确实可能带回中文**
+// （首页标题、或者以后别的来源），可这条路推的是 `pushMovieFieldsToSidecar`
+// ——那份字段清单里**刻意没有 title**（见 sidecar_fields.go 的说明）。
+//
+// 后果就是用户报的那类：库里/详情页写的是「怪盗少女 七濑爱丽丝」，抽屉里的卡片
+// （读侧车 json）还是「怪盗少女 七瀬アリス」。所以入库之后照 `backfillMovie` 收尾
+// 那条的判据再推一次**手上最好的那份中文**（候选链：新来的 → 库里原有的）。
+//
+// 不影响上面那条边界：**一次 AI 请求都不发**（推送前先过 `sidecarTitleZHFrom`，
+// 判不出中文就退到库里那份；两份都不是中文才什么都不做 —— 翻译那条路仍然只属于
+// 后台那两条入口）。
 func (s *Service) ingestMovieDetailOnly(ctx context.Context, id string) (*domain.JavMovie, error) {
-	return s.ingestMovie(ctx, id, false)
+	movie, err := s.ingestMovie(ctx, id, false)
+	if err != nil || movie == nil {
+		return movie, err
+	}
+	s.pushBestTitleZHToSidecar(ctx, movie)
+	return movie, nil
+}
+
+// pushBestTitleZHToSidecar 把「这一部现在手上最好的那份中文标题」推给侧车。
+//
+// 判据是候选链，两个候选共用同一条规矩（`sidecarTitleZHFrom` / `sidecarTitleZH`）：
+//
+//	① **库里那一行**（`movie.TitleZH` + 来源标记）—— 别站补来的中文、后台翻的译文；
+//	② **JAVDB 详情里刚带回来的**（`movie.Title`），仅当它本身就是中文时。
+//
+// ⚠️ ② 的条件是「`Title` 本身能过 `isChinese`」，而不是「`Title` 非空」：
+// JAVDB 的 `title` 绝大多数是**日文原文**，无条件拿它当候选等于把侧车里那份中文
+// 换成日文 —— 那正是 `fillMissingFields` 那条闸要防的事（真机 ABF-387）。
+//
+// 两个候选**都不问 AI**：翻译仍然只属于后台那两条入口
+// （hydrate 队列、订阅检查），用户点出来的请求里一次额度都不花。
+func (s *Service) pushBestTitleZHToSidecar(_ context.Context, movie *domain.JavMovie) {
+	if movie == nil {
+		return
+	}
+	// ① 库里那一栏：别站补来的中文、后台翻的译文 —— 都在这里。
+	if zh := sidecarTitleZH(movie); zh != "" {
+		s.pushTitleZHToSidecar(movie.Number, zh)
+		return
+	}
+	// ② JAVDB 详情带回来的那行原文 —— 只在它本身就是中文时才认。
+	if zh := sidecarTitleZHFrom(movie.Title, ""); zh != "" {
+		s.pushTitleZHToSidecar(movie.Number, zh)
+	}
 }
 
 // IngestMovieDetail 是 ingestMovieDetailOnly 的导出形态，给 API 层的
@@ -894,11 +943,29 @@ func (s *Service) enrichAndSave(ctx context.Context, rec *domain.JavMovie, n *ja
 	if patch.Summary != "" {
 		// 补到了：本地那份 json 也得有，否则 nfo 里还是空
 		// （nfo 读的是本地 json，不是库）。写失败只记 warn，不影响入库。
-		s.pushSummaryToSidecar(work.Number, patch.Summary)
+		//
+		// ⚠️ **推的是 `current.Summary`，不是 `patch.Summary`**（2026-10-17 修）。
+		// 与 `backfill.go` 里那条逐字同因：`patch.Summary` 是上游给的**原文**，
+		// 而 `current.Summary` 已经可能被上面那次翻译换成中文了。推原文等于
+		// 把刚写进侧车的中文**用日文盖回去**，于是同一部片「抽屉读 json（日文）、
+		// Emby 读 nfo（中文）」——两侧都不认账。真机那 16 份
+		// `json中文/nfo日文` 里就有从这里过去的（用户点「重新获取」触发
+		// `IngestByNumber` → 这条路）。
+		s.pushSummaryToSidecar(work.Number, current.Summary)
 	}
 	if patch.TitleZH != "" {
 		// 中文标题同样要落到本地那份 json 上（侧车那边是**替换 title**）。
-		s.pushTitleZHToSidecar(work.Number, patch.TitleZH)
+		//
+		// ⚠️ 判据取 `sidecarTitleZH(current)`（这一部**现在**显示的那份），
+		// 不是 `patch.TitleZH != ""`：patch 只说明「这轮补到了一栏标题」，
+		// 不代表它就能当译文推下去 —— dmm 那档给的是日文。
+		//
+		// 这里**不需要**再退回「补缺前那份」：`applyPatch` 自己对 `title_zh`
+		// 有一条「中文不被非中文顶掉」的规矩（见 loops.go），所以库里原本那份中文
+		// 还在 `current` 上，判据自然拿得到它。
+		if zh := sidecarTitleZH(current); zh != "" {
+			s.pushTitleZHToSidecar(work.Number, zh)
+		}
 	}
 	// 补缺链补到的字段（简介/时长/导演/片商/标签…）也一并推一次。
 	//
@@ -1048,9 +1115,9 @@ func (s *Service) ingestByNumber(ctx context.Context, number string, force bool)
 	// ⚠️ 两条出口都**只抓详情、不跑补缺链**（2026-09-30 改）。这是「用户直接敲了一个
 	// 番号」那条路，他等着看见结果；补缺链 60~148 秒会把这个请求一起拖死
 	// （前端 90 秒超时，见 api/client.ts）。补缺归后台两处，见 resolveSearchActor 的注释。
-	want := normalizeNumber(number)
+	want := domain.NormalizeNumberKey(number)
 	for _, m := range movies {
-		if normalizeNumber(m.Number) == want {
+		if domain.NormalizeNumberKey(m.Number) == want {
 			return s.ingestMovieDetailOnly(ctx, m.ID)
 		}
 	}
@@ -1066,12 +1133,12 @@ func (s *Service) ingestByNumber(ctx context.Context, number string, force bool)
 //
 // 「SSIS-001」「ssis001」「SSIS_001」在用户眼里是同一个番号，
 // 而上游不同接口给的写法确实不一样。
-func normalizeNumber(v string) string {
-	v = strings.ToUpper(strings.TrimSpace(v))
-	v = strings.ReplaceAll(v, "-", "")
-	v = strings.ReplaceAll(v, "_", "")
-	return strings.ReplaceAll(v, " ", "")
-}
+//
+// ⚠️ **2026-10-17 起只是 `domain.NormalizeNumberKey` 的一层本地别名**（留着是为了
+// 不一次性改动本文件里那几处调用）。那边多剥了制表符，两处**必须同源** ——
+// 「上游给的 vs 库里存的」与「刮削目标 vs 库里存的」是同一件事，各写一份迟早
+// 会在某个空白字符上分家（而分家的表现是「有的片能对上、有的对不上」）。
+func normalizeNumber(v string) string { return domain.NormalizeNumberKey(v) }
 
 // buildDetail 组装详情视图。
 //
@@ -1834,6 +1901,13 @@ type SidecarSyncResult struct {
 	Scanned int
 	// Written 是真的改写了内容的份数（侧车里已经是新值的不算）。
 	Written int
+	// TitleFixed 是「标题那一栏被替换成中文」的份数（见 sidecarSyncOnce 里第 ③ 段）。
+	//
+	// 与 Written **分开计**：Written 走的是「只补空」那条（`writeFieldsIntoFile`），
+	// 而标题是**无条件替换**（`writeFieldIntoFile` 的 `case "title"`，顺带换 nfo 的
+	// `<title>`/`<sorttitle>`）—— 两条判据不同，混在一个数里就分不出
+	// 「补了字段」与「修好了标题」。
+	TitleFixed int
 	// Numbers 是扫到侧车的番号，给调用方记账用（见 sidecarSyncLoop）。
 	Numbers []string
 }

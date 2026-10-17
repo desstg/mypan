@@ -151,16 +151,43 @@ func (r *javMovieRepo) Get(ctx context.Context, id string) (*domain.JavMovie, er
 	return scanJavMovie(row)
 }
 
+// GetByNumber 按番号取一部片。
+//
+// # 会依次试几个**书写形态**（2026-10-17 修的真 bug）
+//
+// 原来是全等匹配（只大小写不敏感），而同一个番号在库里与磁盘上写法不同：
+// 库里国产那 1719 条是**不带连字符**的（`MAD016` / `BLX0072`），而刮削目标、
+// 上游给的却带（`MAD-016`）。真机后果：在线刮削那 10 部里 7 部在「把中文标题
+// 写进侧车」那一步记 `库里查不到这一部` 而静默跳过 —— 库里明明有这一部。
+//
+// 形态清单与取舍见 `domain.NumberLookupForms`（只多试「去掉第一个连字符」那一种，
+// 不枚举全部切分 —— 全库实测有 3 组交错形态，枚举会随机挑错片）。
+//
+// 逐形态查而不是一条 SQL 里 `replace()`：后者是全表扫描（表达式上没有索引），
+// 而这是一条热路径。形态最多两个，命中即止。
 func (r *javMovieRepo) GetByNumber(ctx context.Context, number string) (*domain.JavMovie, error) {
-	n := strings.TrimSpace(number)
-	if n == "" {
+	forms := domain.NumberLookupForms(number)
+	if len(forms) == 0 {
 		return nil, domain.Errorf(domain.CodeNotFound, "影片不存在")
 	}
-	// 番号大小写不敏感，且优先取有封面的那条 —— 榜单摘要行常常没有封面。
-	row := r.db.read.QueryRowContext(ctx, `SELECT `+javMovieColumns+` FROM jav_movies
+	var lastErr error
+	for _, form := range forms {
+		// 番号大小写不敏感，且优先取有封面的那条 —— 榜单摘要行常常没有封面。
+		row := r.db.read.QueryRowContext(ctx, `SELECT `+javMovieColumns+` FROM jav_movies
 WHERE number = ? COLLATE NOCASE
-ORDER BY (CASE WHEN cover_url <> '' THEN 0 ELSE 1 END), updated_at DESC LIMIT 1`, n)
-	return scanJavMovie(row)
+ORDER BY (CASE WHEN cover_url <> '' THEN 0 ELSE 1 END), updated_at DESC LIMIT 1`, form)
+		m, err := scanJavMovie(row)
+		if err == nil {
+			return m, nil
+		}
+		lastErr = err
+		// 只有「查不到」才值得换下一个形态：库真出错（磁盘/锁）时再查一遍
+		// 只会把同一个错误重复一遍。
+		if ae, ok := domain.AsAppError(err); !ok || ae.Code != domain.CodeNotFound {
+			return nil, err
+		}
+	}
+	return nil, lastErr
 }
 
 func (r *javMovieRepo) List(ctx context.Context, f domain.JavMovieFilter) ([]*domain.JavMovie, int, error) {

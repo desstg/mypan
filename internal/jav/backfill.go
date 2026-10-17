@@ -182,11 +182,32 @@ func (s *Service) backfillMovie(
 	}
 	// 简介还要落到**本地那份侧车 json** 上，否则 nfo 里还是空
 	// （nfo 读的是本地 json，不是库）。只动本地副本，不写网盘。
-	if patch.Summary != "" {
-		s.pushSummaryToSidecar(number, patch.Summary)
+	//
+	// ⚠️ **推的是 `movie.Summary`，不是 `patch.Summary`**（2026-10-16 修的真 bug）。
+	// 这两份在「翻了」的时候**不是同一个东西**：`patch.Summary` 是上游给的原文
+	// （日文），而 `movie.Summary` 已经在上面那次翻译里变成中文了。
+	// 原来推的是 patch 那一份，于是刚推进侧车的中文简介**被日文原文原样盖回去** ——
+	// 真机后果（116 那 43 份）：侧车 json 的 `summary` 是日文、nfo 的 `<plot>` 却是中文
+	// （中文那一次推的时候顺手补进去了，而 `fillNFOPlotIfMissing` 的判据是
+	// 「已经有 `<plot>` 就不动」，后一次的日文推不动它），于是**同一部片的两个显示位
+	// 一中文一日文** —— 抽屉读 json（日文）、Emby 读 nfo（中文）。
+	//
+	// 三栏（summary / title_zh / 其余字段）**同一个道理**：`translateAndPersist`
+	// 已经在翻译那一刻推过一次译文了，这里再推一次原文是纯粹的倒退。
+	if v := strings.TrimSpace(movie.Summary); v != "" {
+		s.pushSummaryToSidecar(number, v)
 	}
-	if patch.TitleZH != "" {
-		s.pushTitleZHToSidecar(number, patch.TitleZH)
+	// 中文标题同理：判据与 translateAndPersist 那条**同一个**（`sidecarTitleZH`），
+	// 不是「patch 里有没有」。
+	//
+	// ⚠️ 这里**不需要**候选链的第二步（退到「补缺之前库里的那份」）：标题那条补缺
+	// 只在 `movie.TitleZH` 为空时才跑（见上面 `s.titleEnrichers` 那个 if），
+	// 所以走到这时 `movie.TitleZH` 要么还是原来的中文，要么是这一轮新补到的 ——
+	// 库里原本那份中文不可能被一份日文顶掉。真正需要候选链的是 `fillMissingFields`
+	// 与 `enrichAndSave`：那两条的 missing 判据取的是**上游刚给的那份**，
+	// 库里有中文时它们照样会去要一次标题（而那一次可能拿到日文）。
+	if zh := sidecarTitleZH(movie); zh != "" {
+		s.pushTitleZHToSidecar(number, zh)
 	}
 	// 这一轮补到的其余字段（时长/导演/片商/标签…）也推一次 —— 它们没有自己的通道，
 	// 而侧车要的是「这部片现在有什么」，不只是「这次补到了什么」。
@@ -230,9 +251,11 @@ func (s *Service) translateAndPersist(ctx context.Context, movie *domain.JavMovi
 	//   - 中文标题（`title_zh`）也有自己的通道（`pushTitleZHToSidecar`）——
 	//     漏了它，侧车/nfo 里的标题就一直是日文（第二趟真机就是这个问题）；
 	//   - 其余字段走整批那条。
+	// 标题那条通道的判据在 `sidecarTitleZH` 里（两处调用共用一份，别在这里再写一遍）——
+	// 「这一栏现在是中文，或刚由 AI 翻出来」，**不是**「来源标记是不是 ai」。
 	s.pushSummaryToSidecar(movie.Number, movie.Summary)
-	if strings.TrimSpace(movie.TitleZH) != "" && movie.TitleZHSource == translateSourceAI {
-		s.pushTitleZHToSidecar(movie.Number, movie.TitleZH)
+	if zh := sidecarTitleZH(movie); zh != "" {
+		s.pushTitleZHToSidecar(movie.Number, zh)
 	}
 	s.pushMovieFieldsToSidecar(ctx, movie.ID)
 	return true

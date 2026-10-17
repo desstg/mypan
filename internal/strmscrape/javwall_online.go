@@ -547,6 +547,17 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 		// 这正是后台那条 `sidecarSyncLoop` 干的活（它有它自己的每小时节奏），
 		// 这里按目录就地补一遍 —— 用户点了一次「在线刮削」，上游补不到的部分
 		// 至少该把本地那份理顺。
+		//
+		// 标题那一手**也要走**（2026-10-17 补）：这一档（上游一个字段都没给）
+		// 里「侧车 json 是中文、nfo 还是日文」的比例最高 —— 上游什么都没给，
+		// 恰恰说明这部片当初就没走通刮削，nfo 停在生成那一刻。库里查不到的片
+		// （没进过库）在 `ForceTranslateSidecarFields` 里会自己静默跳过。
+		//
+		// 顺序放在 `localJavRepair` **之前**：标题是**替换**（不是补空），先做它
+		// 就得到一份「标题已定稿、其余元素待补」的 nfo，补缺再照它的判据补其余。
+		// 反过来其实也行（重建走 ParseNFO→BuildNFOFromMeta，往返字节一致，
+		// 不会丢东西），只是要多绕一次重建 —— 选前者是因为它读起来就是那个顺序。
+		s.pushScrapedJavTitle(ctx, t, filepath.Join(t.absDir, t.stem+".json"))
 		return s.localJavRepair(t), false
 	}
 	// 侧车 json 名与 nfo 同主干（`<主干>.json`），只是扩展名不同 ——
@@ -601,6 +612,10 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 		// 平铺布局下两者不同（`.strm` 多个时 nfo 名不是主干）。
 		// `FillNFOFieldsIfMissing` 的判据是「元素不存在才补」，重复调用幂等。
 		_ = s.strm.FillNFOFieldsIfMissing(filepath.Join(t.absDir, t.names.NFO), doc)
+		// 标题那一手**放最后**：上面那次补缺（`FillNFOFieldsIfMissing`）会重建整个 nfo，
+		// 而 `ApplySidecarTitleZHToFile` 同样按 title 重建一遍 —— 顺序反过来，
+		// 重建出来的那份又会被补缺改一次，形状与「编辑器保存」那条路对不上。
+		s.pushScrapedJavTitle(ctx, t, jsonPath)
 		return true, false
 	}
 
@@ -614,7 +629,92 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 	if err != nil {
 		return false, true
 	}
+	// 同上：标题那一手放最后（这次它重建 nfo，就是这一部的收尾）。
+	s.pushScrapedJavTitle(ctx, t, jsonPath)
 	return changed, false
+}
+
+// pushScrapedJavTitle 把**中文标题**写进这一部刚刮完的侧车（连带重建 nfo 的 `<title>`）。
+//
+// # 为什么要这一步（用户 2026-10-17 定的口径）
+//
+// 原话：「其实库里的标题可以不管太多了，在线刮削时，可以强制写了翻译后的中文标题」。
+//
+// 背景：全库 11464 部的标题还不是中文（约 51 万字），而**后台全量补翻**要花同样量级的
+// AI 额度 —— 用户明确否掉了（「厍里太多要翻译，ai的token消耗太多」）。
+// 于是口径改成「**只在用户真的点刮削的那几部上翻**」：token 花多少由用户点几次决定。
+//
+// # 为什么这一步不改「补到了」的计数
+//
+// `scraped` / `skipped` 由 `scrapeOneJav` 上面那三条分支算完了；这一步是**锦上添花**
+// （用户没开翻译时它什么都不做），失败不该让整部片算失败 —— 与补图那一步同一条取向。
+//
+// # 三条分支各调一次，但判据只有一份
+//
+// 「新建侧车」「已有侧车」「上游查不到这一部」三条路都走本函数，差别只在写盘那一步
+// 接哪条文件路径，以及**调用点在各自那几手写盘之后**。
+//
+// ⚠️ 三条路都不改「补到了/跳过」的计数（各自在调用点之前就算完了）——
+// 这一步是锦上添花（用户没开翻译时它什么都不做），失败不该让整部片算失败。
+//
+// # 先问库、后问 AI（两步，顺序不能反）
+//
+// 2026-10-17 真机跑出来的：只走「强制翻译」那一步时，**上游本来给了中文标题的 7 部
+// 也被重翻了一遍**（`jav translated` 在那 10 部里出现 7 次），而重翻出来的名字还不如
+// 上游那份贴切。用户的原话是「厍里太多要翻译，ai的token消耗太多」—— 真正的省法是
+// **能不翻就不翻**，不是「少翻几部」：
+//
+//  1. `jav.LookupTitleZHForSidecar`：库里已经有一份**像中文**的标题（别站补来的
+//     `missav` / `freejavbt` 全在这一档）就用它，**一个请求都不发**；
+//  2. `jav.ForceTranslateSidecarFields`：库里也没有中文，才拿手上那份 `cur` 去翻。
+//
+// 顺序反过来的代价是实打实的钱，而且结果更差（模型把「桃园怜奈」这种译名重译一遍）。
+func (s *Service) pushScrapedJavTitle(ctx context.Context, t javScrapeTarget, jsonPath string) {
+	if s.jav == nil {
+		return
+	}
+	// 这一手**只改手上这份文件**（`ApplySidecarTitleZHToFile` 点名写盘的判据就是它），
+	// 所以文件不在就没有这一步可做 —— 三条调用分支里，前两条刚写过它、第三条也只在
+	// 文件存在时才走到；这个守卫只挡「将来有人从别处调」。
+	if !fileExists(jsonPath) {
+		return
+	}
+	// 手上这份 json 现有的 title：既当判据（已经是中文就别再问 AI），也当「库里那份
+	// 有没有更新」的比较基准 —— 值没变时 `ApplySidecarTitleZHToFile` 自己会跳过写
+	// json，但 nfo 那一手照做（见 writeFieldIntoFile 的规矩 ①），所以不必先比一次。
+	sidecarTitle := readSidecarTitle(jsonPath)
+
+	// ① 库里那份（上游早给过中文的那一档走这里，零 AI 请求）。
+	title, ok := s.jav.LookupTitleZHForSidecar(ctx, t.number)
+	if !ok {
+		// ② 库里也没有中文：才走到「翻」那一步。
+		title, ok = s.jav.ForceTranslateSidecarFields(ctx, t.number, sidecarTitle)
+	}
+	if !ok || title == "" {
+		// 「为什么没做事」由 jav 那边自己记（它有设置与翻译器的状态，
+		// 见 ForceTranslateSidecarFields 里那几行）—— 这里不重复记一份。
+		return
+	}
+	if err := s.strm.ApplySidecarTitleZHToFile(jsonPath, title); err != nil {
+		if s.log != nil {
+			s.log.Warn("番号在线刮削：写中文标题失败", "stem", t.stem, "err", err)
+		}
+	}
+}
+
+// readSidecarTitle 读一份侧车 json 的 `title`（读不到就返回空串）。
+func readSidecarTitle(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.Title)
 }
 
 // localJavRepair 上游查不到这一部时，用**本地那份侧车 json** 把 nfo 补一遍。

@@ -514,6 +514,9 @@ type JavLibraryStats struct {
 type JavMovieRepository interface {
 	Upsert(ctx context.Context, m *JavMovie) error
 	Get(ctx context.Context, id string) (*JavMovie, error)
+	// GetByNumber 按番号取一部片。**实现必须容忍番号的书写形态差异**
+	// （`MAD-016` 与库里的 `MAD016` 是同一部）—— 见 NumberLookupForms 与
+	// store 里的实现说明。调用方可以放心地只传手上那一份写法。
 	GetByNumber(ctx context.Context, number string) (*JavMovie, error)
 	List(ctx context.Context, f JavMovieFilter) ([]*JavMovie, int, error)
 	Count(ctx context.Context) (int, error)

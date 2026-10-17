@@ -95,6 +95,18 @@ async function loadSettings(opts?: { silent?: boolean }) {
         tmdb_api_host: data.tmdb_api_host || "https://api.themoviedb.org",
         tmdb_image_host: data.tmdb_image_host || "https://image.tmdb.org",
         tmdb_request_interval_ms: Number(data.tmdb_request_interval_ms) || 300,
+        // ⚠️ 这四项曾经漏在回填之外：`useSettingsForm` 的初始草稿就是「基线」，
+        // 而 `applyBaseline` 只覆盖传进来的键 —— 漏传的键基线就停在初始值上。
+        // 于是**打开设置页永远是空的**（theporndb key 本来就只回「配没配」，
+        // flaresolverr / 翻译提示词 / 翻哪些字段却是有值的），
+        // 而只要点一次「保存」就会把这份「空」原样写回库里，把已配好的冲掉。
+        // 新增设置项时**必须在这里补一行**，否则就是同一个坑。
+        theporndb_key: data.theporndb_key || "",
+        theporndb_key_set: Boolean(data.theporndb_key_set),
+        flaresolverr_url: data.flaresolverr_url || "",
+        translate_enabled: Boolean(data.translate_enabled),
+        translate_fields: data.translate_fields ?? ["summary"],
+        translate_prompt: data.translate_prompt || "",
       });
     },
     "加载 STRM 刮削设置失败",

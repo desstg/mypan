@@ -1183,42 +1183,21 @@ defineExpose({
             {{ isJavTask ? "刷新元数据（只重新读取本地文件）" : "重建刮削索引（扫描本地 STRM 目录）" }}
           </span>
         </span>
-        <!-- 设置改成下拉：刮削设置一直有；番号影片时多一项「隐藏的目录」直达 ——
-             那颗 ⚙ 在两种任务下长得一样，菜单里有几项按任务类型分。 -->
-        <AppDropdown align="right">
-          <template #trigger="{ toggle }">
-            <span class="scrape-tip scrape-tip--right">
-              <AppIconButton
-                icon="settings"
-                label="设置"
-                variant="secondary"
-                size="md"
-                no-native-title
-                @click.stop="toggle"
-              />
-              <span class="scrape-tip__bubble">STRM 刮削设置</span>
-            </span>
-          </template>
-          <template #panel>
-            <div class="scrape-menu">
-              <button type="button" class="scrape-menu__item" @click="emit('open-settings')">
-                <span>STRM 刮削设置</span>
-              </button>
-              <!-- 「补齐剧照与演员」**不在这里** —— 它挪到页头当按钮了（见
-                   AuxToolsManagement.vue）。藏在设置下拉里用户找不到（实测问「在哪里」），
-                   而它是个动作、不是设置项。 -->
-              <button
-                v-if="isJavTask"
-                type="button"
-                class="scrape-menu__item"
-                @click="javHiddenOpen = true"
-              >
-                <span>番号墙隐藏的目录</span>
-                <span class="scrape-menu__hint">勾上的目录整档不出现在墙上</span>
-              </button>
-            </div>
-          </template>
-        </AppDropdown>
+        <!-- 设置一键直达刮削设置抽屉，不再包一层下拉。
+             原先这个下拉里两项：刮削设置 +（番号面才有）「番号墙隐藏的目录」——
+             后者的另一个入口是页头那颗「全部目录 / 隐藏 N 个目录」按钮（openScopePanel），
+             所以下拉摘了不丢功能，点 ⚙ 直接开抽屉。 -->
+        <span class="scrape-tip scrape-tip--right">
+          <AppIconButton
+            icon="settings"
+            label="设置"
+            variant="secondary"
+            size="md"
+            no-native-title
+            @click="emit('open-settings')"
+          />
+          <span class="scrape-tip__bubble">STRM 刮削设置</span>
+        </span>
       </div>
     </div>
 
@@ -2486,11 +2465,4 @@ defineExpose({
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
   cursor: default;
 }
-.scrape-menu { display: flex; flex-direction: column; min-width: 220px; padding: 6px; }
-.scrape-menu__item { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; padding: 8px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; }
-.scrape-menu__item:hover { background: var(--surface-sunken); }
-/* 刮削进行中时「补齐」那颗要看起来是禁用的（它与刮削共用同一条后台队列）。 */
-.scrape-menu__item:disabled { opacity: 0.5; cursor: not-allowed; }
-.scrape-menu__item:disabled:hover { background: transparent; }
-.scrape-menu__hint { font-size: 11px; color: var(--text-muted); }
 </style>

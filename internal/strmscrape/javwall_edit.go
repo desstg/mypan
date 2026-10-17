@@ -74,6 +74,15 @@ func (s *Service) javWallDetail(ctx context.Context, ref javItemRef) (*JavWallIt
 	if err != nil {
 		return nil, err
 	}
+	// 先让快照把 nfo 里的标题 / 日期填上（与列表走的是同一趟、同一份缓存）。
+	//
+	// 不填的话这里回给前端的 `item.title` 还是**主干**：详情抽屉与卡片共用同一个
+	// `JavWallItem`，保存元数据之后前端拿它替换卡片 —— 于是「刚在抽屉里改完标题，
+	// 卡片上却显示番号」。这一趟本身几乎不花时间（读取器带 mtime/size 缓存，
+	// 列表刚刚读过的那批直接命中）。
+	snap.fillMetaOnce.Do(func() {
+		fillJavWallRowMeta(snap.rows, s.newJavTitleLookup(snap.rows))
+	})
 	row, ok := findJavWallRow(snap, ref.RelDir, ref.Stem)
 	if !ok {
 		return nil, domain.Errorf(domain.CodeNotFound, "这一部不在墙上（目录刚变过？刷新一下）")
@@ -278,7 +287,7 @@ func (s *Service) ListJavWallBySource(ctx context.Context, src *wallSrc, q JavWa
 	if err != nil {
 		return JavWallListResult{}, err
 	}
-	out := listJavWall(snap, q, s.newJavTitleLookup(snap.rows))
+	out := s.listJavWall(snap, q)
 	// 「全量扫描会覆盖手改」那条横幅**只对 STRM 任务有意义**：本地目录源没有扫描模式，
 	// 给 true 会让用户以为有个会覆盖他编辑的定时任务 —— 那是**不存在的**东西。
 	if src != nil && src.Task != nil {

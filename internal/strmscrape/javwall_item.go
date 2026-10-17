@@ -201,25 +201,14 @@ func javWallImageWidth(view string) int {
 	return 400
 }
 
-// cachedJavTitle 只在缓存命中且文件没变时返回。
-func (s *Service) cachedJavTitle(absPath string) (javTitleEntry, bool) {
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return javTitleEntry{}, false
-	}
-	s.javTitleMu.Lock()
-	defer s.javTitleMu.Unlock()
-	e, ok := s.javTitleCache[absPath]
-	if !ok || !e.mod.Equal(info.ModTime()) || e.size != info.Size() {
-		return javTitleEntry{}, false
-	}
-	return e, true
-}
-
 // javNFOInfoOf 读一份 nfo 的「标题 / 番号 / 两个日期」（带缓存）。
 //
 // 读不到（文件不在、不是 <movie> 结构）返回零值 —— 调用方按「没有」处理，
 // 卡片上回落到主干、排序键为空。
+//
+// ⚠️ 开头的这一次 `os.Stat` 就是「有没有变」的判据，也是热路径上的主要开销：
+// 海报墙的数据源可以是网盘 / SMB 上的目录，那里 242 次 stat 串行 7.1s、8 路并发 2.2s。
+// 所以调用它的地方必须**并发**（见 newJavTitleLookup），别在串行循环里直接调。
 func (s *Service) javNFOInfoOf(absPath string) emby.JavNFOInfo {
 	info, err := os.Stat(absPath)
 	if err != nil {
@@ -249,8 +238,14 @@ func (s *Service) javNFOInfoOf(absPath string) emby.JavNFOInfo {
 // javTitleLookup 是给列表用的「读一份 nfo」函数（带缓存 + 并发）。
 type javTitleLookup func(row javWallRow) emby.JavNFOInfo
 
-// newJavTitleLookup 返回一个带并发预热的 nfo 读取器：先把这一页要用的都读出来
+// newJavTitleLookup 返回一个带并发预热的 nfo 读取器：先把这一批要用的都读出来
 // （8 个 worker），再逐行取。冷启动几千份 nfo 时差别明显。
+//
+// ⚠️ **缓存校验（那一次 `os.Stat`）也必须放进 worker 里**。写成「先串行查一遍缓存、
+// 只把没命中的丢给 worker」看着更省事，实际上把**整库的 stat** 又变回串行了 ——
+// 海报墙的数据源可以是网盘 / SMB 上的目录，那里 242 次 stat 串行 7.1s、8 路并发 2.2s，
+// 于是**每次翻页 / 换 tab / 改排序都要白等七秒**（快照缓存了也没用：这一趟读的是 nfo，
+// 不归快照管）。第一版就是这么写的。
 //
 // nfo 名与生成器同源（`emby.TargetNames`）：**不要**在这里另拼一个名字，
 // 平铺/独占翻转时那会指向一个不存在的文件（卡片上的标题全变成主干）。
@@ -265,20 +260,18 @@ func (s *Service) newJavTitleLookup(rows []javWallRow) javTitleLookup {
 		return filepath.Join(row.absDir, emby.TargetNames(row.item.Stem, row.item.Flat).NFO)
 	}
 	for _, row := range rows {
-		path := pathOf(row)
-		if _, ok := s.cachedJavTitle(path); ok {
-			continue // 缓存里已有，不必占一个 worker
-		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(p string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// javNFOInfoOf 自己会先 stat 再查缓存（mtime+size 对得上就直接回）。
+			// 那次 stat 就是这里的主要开销，所以它必须在 worker 里，见上面的注释。
 			info := s.javNFOInfoOf(p)
 			mu.Lock()
 			loaded[p] = info
 			mu.Unlock()
-		}(path)
+		}(pathOf(row))
 	}
 	wg.Wait()
 	return func(row javWallRow) emby.JavNFOInfo {

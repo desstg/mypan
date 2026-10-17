@@ -88,6 +88,61 @@ func TestJavMovieGetByNumberIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestJavMovieGetByNumberFallsBackToLooseForm 钉住「库里不带连字符、调用方带」这条。
+//
+// 2026-10-17 真机：在线刮削那 10 部里 7 部（`MAD-016` / `BLX-0072` / `MAN-0001`…）
+// 的库行是不带连字符的（`MAD016`，全库 1719 条全这个形态），而 `GetByNumber`
+// 原来只做全等匹配 —— 于是「把中文标题写进侧车」那一步被判「库里查不到这一部」，
+// 标题就在库里却静默跳过。
+func TestJavMovieGetByNumberFallsBackToLooseForm(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.JavMovies.Upsert(ctx, &domain.JavMovie{
+		ID: "cn1", Number: "MAD016", Title: "牛郎织女 / 转生凡人与你交欢", TitleZH: "牛郎织女 / 转生凡人与你交欢",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := s.JavMovies.GetByNumber(ctx, "MAD-016")
+	if err != nil {
+		t.Fatalf("带连字符的番号该查到库里那条不带连字符的：%v", err)
+	}
+	if got.ID != "cn1" {
+		t.Fatalf("id = %q, want cn1", got.ID)
+	}
+	// 反方向也通（库里带、调用方不带）：第一步恰好命中，不该因为多了个形态而变慢或变错。
+	if err := s.JavMovies.Upsert(ctx, &domain.JavMovie{ID: "jp1", Number: "SSIS-001", Title: "t"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if got, err := s.JavMovies.GetByNumber(ctx, "ssis-001"); err != nil || got.ID != "jp1" {
+		t.Fatalf("大小写不敏感那条不该被形态兜底影响：got %v / %v", got, err)
+	}
+
+	// ⚠️ **两种形态都存在时，原样优先**。全库实测有 3 组「去掉连字符会撞车」的
+	// （`T-38052`/`T38-052` 等）。兜底那一步是「原样查不到才走」，所以哪怕两组
+	// 同时存在也不会挑错片。
+	if err := s.JavMovies.Upsert(ctx, &domain.JavMovie{ID: "loose", Number: "T-38052", Title: "a"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := s.JavMovies.Upsert(ctx, &domain.JavMovie{ID: "tight", Number: "T38-052", Title: "b"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	exact, err := s.JavMovies.GetByNumber(ctx, "T-38052")
+	if err != nil {
+		t.Fatalf("原样存在时该直接命中：%v", err)
+	}
+	if exact.ID != "loose" {
+		t.Fatalf("原样优先：id = %q, want loose（撞车的另一条 %q）", exact.ID, "tight")
+	}
+
+	// 真查不到时仍然是 NotFound（调用方靠这个码区分「库里没有」与「库出错」）。
+	if _, err := s.JavMovies.GetByNumber(ctx, "ZZZZ-9999"); err == nil {
+		t.Fatal("库里没有的番号该报错")
+	} else if ae, ok := domain.AsAppError(err); !ok || ae.Code != domain.CodeNotFound {
+		t.Fatalf("该是 NOT_FOUND，got %v", err)
+	}
+}
+
 func TestJavMagnetFingerprintDedup(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
