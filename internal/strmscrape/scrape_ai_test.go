@@ -120,43 +120,52 @@ func (s *stubAI) EnhanceWithProgress(_ context.Context, req recognition.BatchReq
 //
 // 这是用户那条硬约束（「不能影响现在所有的功能」）的**代码级**钉子：STRM 任务
 // 那边连一次 AI 调用都不该发生 —— 多等一次网络往返就是行为变化，哪怕结果一样。
+//
+// 开关口径在按钮合并之后变成了**设置项**（`strm_scrape_ai_backfill`）：页头只有一颗
+// 「开始刮削」，没有第二个入口去表达「这次要不要用 AI」，所以没得选、只能读设置。
 func TestAIOnlyForLocalSource(t *testing.T) {
 	ai := &stubAI{}
 	ai.available.Store(true)
-	svc := New(Options{
-		StrmDir:  t.TempDir(),
-		DataDir:  t.TempDir(),
-		Settings: newWallLocalDirsSettings(t, nil),
-		AI:       ai,
-	})
+	// 同一份 AI，按设置值现造一个 Service —— 判据只该看「设置 + 源 + AI 可用」。
+	newSvc := func(settingOn bool) *Service {
+		return New(Options{
+			StrmDir: t.TempDir(), DataDir: t.TempDir(),
+			Settings: newWallLocalDirsSettings(t, map[string]string{
+				settings.KeyStrmScrapeAIBackfill: boolString(settingOn),
+			}),
+			AI: ai,
+		})
+	}
+	localSrc := &wallSrc{Kind: "local", LocalID: "abc", Root: t.TempDir(), MediaKind: settings.WallLocalKindTmdb}
+	taskSrc := &wallSrc{Kind: "task", TaskID: 5, Root: t.TempDir(), MediaKind: "tmdb"}
 
 	cases := []struct {
 		name string
+		on   bool
 		src  *wallSrc
-		req  RunRequest
 		want bool
 	}{
 		{
-			name: "本地目录 + 点了按钮 + AI 配好",
-			src:  &wallSrc{Kind: "local", LocalID: "abc", Root: t.TempDir(), MediaKind: settings.WallLocalKindTmdb},
-			req:  RunRequest{UseAI: true},
+			name: "本地目录 + 设置里开着 + AI 配好",
+			on:   true,
+			src:  localSrc,
 			want: true,
 		},
 		{
-			name: "STRM 任务即使点了按钮也不开（任务源永不走 AI）",
-			src:  &wallSrc{Kind: "task", TaskID: 5, Root: t.TempDir(), MediaKind: "tmdb"},
-			req:  RunRequest{UseAI: true},
+			name: "STRM 任务即使设置开着也不开（任务源永不走 AI）",
+			on:   true,
+			src:  taskSrc,
 			want: false,
 		},
 		{
-			name: "本地目录但没点按钮",
-			src:  &wallSrc{Kind: "local", LocalID: "abc", Root: t.TempDir(), MediaKind: settings.WallLocalKindTmdb},
-			req:  RunRequest{},
+			name: "本地目录但设置里关着",
+			on:   false,
+			src:  localSrc,
 			want: false,
 		},
 	}
 	for _, tc := range cases {
-		if got := svc.aiEnabledFor(tc.src, tc.req); got != tc.want {
+		if got := newSvc(tc.on).aiEnabledFor(tc.src); got != tc.want {
 			t.Errorf("%s：aiEnabledFor=%v want %v", tc.name, got, tc.want)
 		}
 	}
@@ -165,16 +174,16 @@ func TestAIOnlyForLocalSource(t *testing.T) {
 	}
 }
 
-// TestAIDisabledKeepsOldFailurePath AI 没装配（= 用户没开 AI）时：
+// TestAIDisabledKeepsOldFailurePath AI 没装配（= 用户在「系统设置 → AI 整理」里
+// 没配 / 配不全）时：
 //   - `aiEnabledFor` 为假 → `run()` 走原来那条路，连待识别都不攒；
 //   - 内存里放一个 AI 也没用（Available 为假），一次都不会被调。
 func TestAIDisabledKeepsOldFailurePath(t *testing.T) {
 	src := &wallSrc{Kind: "local", LocalID: "abc", Root: t.TempDir(), MediaKind: settings.WallLocalKindTmdb}
-	req := RunRequest{UseAI: true}
 
 	// ① 完全没装配 AI（Options.AI 留 nil）。
 	bare := New(Options{StrmDir: t.TempDir(), DataDir: t.TempDir(), Settings: newWallLocalDirsSettings(t, nil)})
-	if bare.aiEnabledFor(src, req) {
+	if bare.aiEnabledFor(src) {
 		t.Fatal("没装配 AI 时必须返回 false（否则 run() 会去攒待识别）")
 	}
 
@@ -184,7 +193,7 @@ func TestAIDisabledKeepsOldFailurePath(t *testing.T) {
 		StrmDir: t.TempDir(), DataDir: t.TempDir(),
 		Settings: newWallLocalDirsSettings(t, nil), AI: off,
 	})
-	if svc.aiEnabledFor(src, req) {
+	if svc.aiEnabledFor(src) {
 		t.Fatal("AI 未启用时必须返回 false")
 	}
 	// 待识别清单为空 → enhancePending 直接返回 nil，不碰 AI、不报错。
@@ -261,6 +270,9 @@ func unparseableFixture(t *testing.T, tmdbHost string) (root string, svc *settin
 		settings.KeyMOTmdbAPIKey:    "test-key",
 		settings.KeyMOTmdbAPIHost:   tmdbHost,
 		settings.KeyMOTmdbImageHost: tmdbHost,
+		// AI 补认现在是**设置项**（按钮合并之后没有第二个入口了）——这两个 fixture
+		// 都是「要用 AI」的场景，所以在这里一并打开，测试体里就不必再管它。
+		settings.KeyStrmScrapeAIBackfill: "true",
 	}); err != nil {
 		t.Fatalf("设置 tmdb 接入点: %v", err)
 	}
@@ -299,7 +311,7 @@ func TestAIScrapeWritesNFOForUnmatchedWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSource: %v", err)
 	}
-	if err := svc.run(context.Background(), src, RunRequest{UseAI: true}); err != nil {
+	if err := svc.run(context.Background(), src, RunRequest{}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -339,7 +351,7 @@ func TestRunWithoutAILeavesUnmatchedAsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSource: %v", err)
 	}
-	if err := svc.run(context.Background(), src, RunRequest{UseAI: true}); err != nil {
+	if err := svc.run(context.Background(), src, RunRequest{}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if got := ai.calls.Load(); got != 0 {
@@ -376,6 +388,9 @@ func multiUnparseableFixture(t *testing.T, tmdbHost string, names ...string) (ro
 		settings.KeyMOTmdbAPIKey:    "test-key",
 		settings.KeyMOTmdbAPIHost:   tmdbHost,
 		settings.KeyMOTmdbImageHost: tmdbHost,
+		// AI 补认现在是**设置项**（按钮合并之后没有第二个入口了）——这两个 fixture
+		// 都是「要用 AI」的场景，所以在这里一并打开，测试体里就不必再管它。
+		settings.KeyStrmScrapeAIBackfill: "true",
 	}); err != nil {
 		t.Fatalf("设置 tmdb 接入点: %v", err)
 	}
@@ -403,7 +418,7 @@ func TestAIOnlyReceivesUnmatchedWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSource: %v", err)
 	}
-	if err := svc.run(context.Background(), src, RunRequest{UseAI: true}); err != nil {
+	if err := svc.run(context.Background(), src, RunRequest{}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -442,7 +457,7 @@ func TestAIBatchFailureKeepsOriginalFailurePath(t *testing.T) {
 		t.Fatalf("resolveSource: %v", err)
 	}
 	// run 本身不该把 AI 的失败抛出来（降级：只记日志）。
-	if err := svc.run(context.Background(), src, RunRequest{UseAI: true}); err != nil {
+	if err := svc.run(context.Background(), src, RunRequest{}); err != nil {
 		t.Fatalf("AI 整批失败时 run 不该报错：%v", err)
 	}
 	if got := ai.calls.Load(); got != 1 {
@@ -474,7 +489,7 @@ func TestAIUnrecognizedReplaysRuleFailureReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSource: %v", err)
 	}
-	if err := svc.run(context.Background(), src, RunRequest{UseAI: true}); err != nil {
+	if err := svc.run(context.Background(), src, RunRequest{}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if p := svc.GetProgress(); p.Failed != 1 {

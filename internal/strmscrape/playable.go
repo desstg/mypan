@@ -78,6 +78,32 @@ type PlayableFile struct {
 // 也可能指向别的播放器。那种文件对「能不能播」这个问题的答案就是「不能」，
 // 而整条请求因为其中一个文件坏了就 500，会把「这一部不能播」说成「这个接口坏了」。
 func (s *Service) readPlayableFiles(ref posterRef, absDir, relDir string, names []string) []PlayableFile {
+	return s.readPlayableFilesEx(ref, absDir, relDir, names, true)
+}
+
+// readPlayableFilesAny 与 readPlayableFiles 同形，但**不卡本应用的地址格式**：
+// 正文里有一行非空就收下。只给「本地目录」源用，见 readPlayableFilesEx 的说明。
+func (s *Service) readPlayableFilesAny(ref posterRef, absDir, relDir string, names []string) []PlayableFile {
+	return s.readPlayableFilesEx(ref, absDir, relDir, names, false)
+}
+
+// readPlayableFilesEx 是那两个的门面。`strict` 决定要不要卡正文格式。
+//
+// # 为什么要分两档
+//
+// **卡**（任务来源）：`.strm` 是本应用生成的，正文必须是 `/api/strm/play/...`
+// （`ParseLitePanSTRMURL`）。不是就是坏了，照旧丢掉 —— 任务那面一字未改，
+// 番号那面同样走这一档（番号也有本地目录，但那些库是本应用自己产的，见 wall_detail.go:245）。
+//
+// **不卡**（TMDB 本地目录）：那是**用户拿别的工具产的库**，挂上来只是让墙上能列出来。
+// 实测 `X:\Strm\mypan\影片2` 的正文是 `http://192.168.31.4:9527/d/<id>?/名字.mp4`
+// —— OpenList 那种直链。LitePan 根本不是它的产出方，拿本应用的地址格式去卡，
+// 会把**整柜作品**判成「不能播」，详情抽屉里连播放键都不出现（用户报的就是这个）。
+// 本地目录没有「重建索引」这回事，正文是磁盘上的既有事实，只能原样收下；
+// 能不能播交给播放器去答，本应用不装作知道。
+func (s *Service) readPlayableFilesEx(
+	ref posterRef, absDir, relDir string, names []string, strict bool,
+) []PlayableFile {
 	// 字幕只列一次，给这个目录下每一集都带上。
 	subs := listSubtitleFiles(ref, absDir, relDir)
 	out := make([]PlayableFile, 0, len(names))
@@ -92,9 +118,11 @@ func (s *Service) readPlayableFiles(ref posterRef, absDir, relDir string, names 
 		if line == "" {
 			continue
 		}
-		if _, _, ok := proxybase.ParseLitePanSTRMURL(line); !ok {
-			s.log.Warn("strm wall skip non-litepan play url", "name", name)
-			continue
+		if strict {
+			if _, _, ok := proxybase.ParseLitePanSTRMURL(line); !ok {
+				s.log.Warn("strm wall skip non-litepan play url", "name", name)
+				continue
+			}
 		}
 		out = append(out, PlayableFile{Name: name, Path: line, Subtitles: subs})
 	}

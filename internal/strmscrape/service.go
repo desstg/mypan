@@ -409,7 +409,11 @@ func (s *Service) applyRematch(ctx context.Context, src *wallSrc, req RematchReq
 	}
 	scrapeCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 	defer cancel()
-	raw, err := client.Lookup(scrapeCtx, req.TMDBID, mediaType)
+	// 用 LookupFull 而不是 Lookup：这条路（重新匹配 / 重新刮削，`overwrite` 常为真）
+	// 要写的就是完整的那一份。用简版的话，用户手动选定之后**已有的**演员/剧照/
+	// 背景图会被一份薄 nfo 盖掉 —— 而且这一部往往正是从「薄」的那一版重新刮的。
+	// 附加块拉不回来时 LookupFull 自己降级回简版（见 tmdb 客户端），不会整部失败。
+	raw, _, err := client.LookupFull(scrapeCtx, req.TMDBID, mediaType)
 	if err != nil {
 		return nil, domain.Errorf(domain.CodeDriverError, "TMDB 查询失败：%v", err)
 	}
@@ -610,6 +614,18 @@ func (s *Service) PosterThumb(path string, width int) ([]byte, string) {
 	return s.thumbs.Get(path, width)
 }
 
+// emptyWorksMessage 是「这一轮一部都没扫到」时给用户的话。
+//
+// 分两种：点名刮（勾了几部）扫不到那几部，跟整根扫发现库里是空的，原因完全不同 ——
+// 前者多半是目录刚被动过、或勾选集是上一次留下的；后者是「这个目录本来就没有 .strm」。
+// 文案混用会让用户按错的方向去查。
+func emptyWorksMessage(picked bool) string {
+	if picked {
+		return "选中的作品在当前刮削范围内不存在（可能已被移动或删除）"
+	}
+	return "当前刮削范围内没有 .strm 文件"
+}
+
 func (s *Service) run(ctx context.Context, src *wallSrc, req RunRequest) error {
 	root := src.Root
 	failures := make([]ScrapeFailure, 0)
@@ -638,6 +654,8 @@ func (s *Service) run(ctx context.Context, src *wallSrc, req RunRequest) error {
 		return err
 	}
 	works = filterWorksByScope(works, s.GetScope(src.ScopeKey()).ExcludedDirs)
+	picked := len(req.ItemIDs) > 0
+	works = filterWorksByIDs(works, req.ItemIDs)
 	if len(works) == 0 {
 		s.setProgress(func(p *Progress) {
 			p.Total = 0
@@ -645,10 +663,10 @@ func (s *Service) run(ctx context.Context, src *wallSrc, req RunRequest) error {
 			p.Skipped = 0
 			p.Failed = 0
 			p.CurrentItemID = ""
-			p.Message = "当前刮削范围内没有 .strm 文件"
+			p.Message = emptyWorksMessage(picked)
 			p.Error = ""
 		})
-		return domain.Errorf(domain.CodeValidation, "当前刮削范围内没有 .strm 文件：%s", root)
+		return domain.Errorf(domain.CodeValidation, "%s：%s", emptyWorksMessage(picked), root)
 	}
 	s.setProgress(func(p *Progress) {
 		p.Total = len(works)
@@ -664,9 +682,10 @@ func (s *Service) run(ctx context.Context, src *wallSrc, req RunRequest) error {
 		interval = 300 * time.Millisecond
 	}
 
-	// AI 补认只在「本地目录源 + 用户这次点了 AI 按钮 + AI 真的配好了」三条同时成立时开启。
+	// AI 补认只在「设置里开着 + 源是本地目录 + AI 真的配好了」三条同时成立时开启
+	// （原来是「用户点了那颗 AI 按钮」，按钮合并进「开始刮削」之后这个开关挪到了设置里）。
 	// 关着时下面的循环**一个分支都不多走** —— 进度、失败计数、日志与改造前逐字相同。
-	useAI := s.aiEnabledFor(src, req)
+	useAI := s.aiEnabledFor(src)
 	// pending 只装「规则没认出来、留给 AI 再试一次」的作品（见 scrape_ai.go）。
 	pending := make([]aiPendingWork, 0)
 

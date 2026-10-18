@@ -30,6 +30,9 @@ import (
 type BackfillRequest struct {
 	StrmTaskID int64  `json:"strm_task_id"`
 	LocalDirID string `json:"local_dir_id,omitempty"`
+	// ItemIDs 非空时**只补这几部**（页头「批量选择」勾中的作品）。
+	// 与 RunRequest.ItemIDs 同一套 id（`pathToItemID(relKey)`），空 = 整根扫。
+	ItemIDs []string `json:"item_ids,omitempty"`
 }
 
 // BackfillImages 扫一遍任务，给缺新数据的作品补抓。
@@ -49,11 +52,11 @@ func (s *Service) BackfillImages(ctx context.Context, req BackfillRequest) error
 	}
 	_ = ctx // 后台任务不随启动请求结束
 	return s.startAsyncOperation(src, 0, "准备补齐", "补齐完成", "strm backfill failed", func(runCtx context.Context) error {
-		return s.backfill(runCtx, src)
+		return s.backfill(runCtx, src, req)
 	})
 }
 
-func (s *Service) backfill(ctx context.Context, src *wallSrc) error {
+func (s *Service) backfill(ctx context.Context, src *wallSrc, req BackfillRequest) error {
 	root := src.Root
 	failures := make([]ScrapeFailure, 0)
 	defer func() {
@@ -71,6 +74,10 @@ func (s *Service) backfill(ctx context.Context, src *wallSrc) error {
 		return err
 	}
 	works = filterWorksByScope(works, s.GetScope(src.ScopeKey()).ExcludedDirs)
+	// 点名补齐：勾了几部就只补那几部（用户要求与「开始刮削」同一条规矩）。
+	// 勾选集为空 = 整根扫，与改造前逐字相同。
+	picked := len(req.ItemIDs) > 0
+	works = filterWorksByIDs(works, req.ItemIDs)
 
 	// 先挑出要处理的（这一步只读盘，很便宜），进度条才有总数。
 	targets := make([]workGroup, 0, len(works))
@@ -86,7 +93,13 @@ func (s *Service) backfill(ctx context.Context, src *wallSrc) error {
 			p.Skipped = 0
 			p.Failed = 0
 			p.CurrentItemID = ""
-			p.Message = "没有需要补齐的作品"
+			// 点名补齐时「没有需要补齐的」有两种来路：选中那几部本来就不缺、
+			// 或者那几部在当前范围内根本找不到（和刮削那边同一条区分）。
+			if picked && len(works) == 0 {
+				p.Message = emptyWorksMessage(true)
+			} else {
+				p.Message = "没有需要补齐的作品"
+			}
 			p.Error = ""
 		})
 		return nil

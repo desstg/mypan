@@ -469,10 +469,23 @@ func (s *Service) playableForWork(ref posterRef, root string, g workGroup) []Pla
 	sort.Slice(items, func(i, j int) bool { return naturalLess(items[i].abs, items[j].abs) })
 
 	out := make([]PlayableFile, 0, len(items))
+	// 正文校验按来源分档，**只看「是不是本地目录」这一条**（与分辨率无关，见下）：
+	//   任务来源 → 卡 `/api/strm/play/...`（`.strm` 就是本应用产的）
+	//   本地目录 → 不卡（用户的库可能是别的工具产的，正文是 OpenList 那种直链；
+	//             卡格式会把整柜作品判成没有播放键 —— 用户报的就是这个）
+	// ⚠️ 不要把这档判据挪进 readPlayableFiles 按 `ref` 自己算：那个函数**番号墙也在用**，
+	// 而番号那面的本地目录承载的是本应用自己产的 `.strm`（wall_detail.go:245），
+	// 必须继续走「卡格式」那一档。分档只在**调用点**决定，才能一面一面地放。
+	strictURL := !ref.isLocal()
 	for _, it := range items {
 		// 每一集可能与别的集**不在同一个目录**（Season 01 / Season 02），
 		// 所以逐条按它自己那层取（字幕也是按目录列的）。
-		got := s.readPlayableFiles(ref, filepath.Dir(it.abs), it.rel, []string{filepath.Base(it.abs)})
+		var got []PlayableFile
+		if strictURL {
+			got = s.readPlayableFiles(ref, filepath.Dir(it.abs), it.rel, []string{filepath.Base(it.abs)})
+		} else {
+			got = s.readPlayableFilesAny(ref, filepath.Dir(it.abs), it.rel, []string{filepath.Base(it.abs)})
+		}
 		out = append(out, got...)
 	}
 	return out

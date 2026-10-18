@@ -166,6 +166,36 @@ func workNeedsScrape(g workGroup, mediaType string) bool {
 	return !workHasNFO(g, mediaType) || !workHasPoster(g, mediaType)
 }
 
+// filterWorksByIDs 把扫盘结果收窄到勾中的那几部（空清单 = 全都要，逐字返回原切片）。
+//
+// 判据是 `pathToItemID(relKey)` —— 与 `buildItem` 给每条目的 `id` **同一个函数**。
+// 抽在调用点上游、两种动作（刮削 / 补齐）共用一份，是为了不让「列表上勾的是这几部、
+// 实际刮的却是那几部」这种错有机会出现（两侧各写一遍哈希口径迟早会漂）。
+//
+// ⚠️ 按**作品**过滤，不按集。剧集被勾中就是整部（含全部集与全部季），用户明确要求。
+func filterWorksByIDs(works []workGroup, ids []string) []workGroup {
+	if len(ids) == 0 {
+		return works
+	}
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			want[id] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		// 全是空白串 ≈ 没给；当成「全都要」而不是「一部都不刮」。
+		return works
+	}
+	out := make([]workGroup, 0, len(want))
+	for _, g := range works {
+		if _, ok := want[pathToItemID(g.relKey)]; ok {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 func countTVEpisodeProgress(g workGroup) (total, scraped int) {
 	if g.flatFile != "" {
 		return 0, 0

@@ -29,8 +29,9 @@ type tmdbInfo struct {
 	// Extra 是详情接口附加块里那批「比简版多出来」的内容（评分、时长、类型、
 	// 演员、背景图、剧照、预告片、id…）。见 tmdb_extra.go 的 tmdbExtraMeta。
 	//
-	// 零值表示这次没取到附加块（LookupFull 降级，或者调用方走的是 Lookup）——
-	// 那时 nfo 按「只有简版那几项」写，与改造前的行为一致。
+	// ⚠️ **只看这个字段判不出「这份是全量还是简版」**：搜索载荷里本来就有评分与
+	// 背景图，`parseTMDBExtra` 照样会填进 Extra。判据是 `extraHasContent`
+	// （时长/评分/演员/剧照/类型里有没有一样），以及走哪条路 —— 见 `enrichTMDBInfo`。
 	Extra tmdbExtraMeta
 }
 
@@ -63,6 +64,84 @@ func lookupTMDBInfo(ctx context.Context, client *tmdb.Client, id, mediaType stri
 		lastErr = fmt.Errorf("TMDB 查询失败")
 	}
 	return nil, lastErr
+}
+
+// enrichTMDBInfo 把搜索结果（简版）升级成**带附加块**的详情。
+//
+// # 为什么刮削主路也要全量
+//
+// 搜索（`/search/*`）回来的载荷只有 title/year/plot/rating/poster —— 演员、类型、
+// 时长、剧照、背景图全都不在里面。以前只有两条路能拿到那批数据：目录名带
+// `{tmdb-<id>}` 的（走 lookupTMDBInfo）和「补齐剧照与演员」。结果是**名字干净、
+// 没带 id 的目录刮出来是薄 nfo**（0 个 `<actor>`、没有 extrafanart），得再点一次
+// 补齐才齐 —— 用户明确要求改成主刮削也走全量。
+//
+// 代价是每部多一轮详情（`LookupFull` 自己发两次：一次简版当兜底正文、一次带附加块；
+// 附加块那份实测热门剧 400 KB 上下）。所以它挂在**搜索命中之后**，不是每部都打：
+// 搜索失败、被 AI 救回来的那些不花这一轮。`LookupFull` 内部已经在附加块失败时降级回
+// 简版，不会让整部刮削失败（Extra 留零值，nfo 按「只有简版那几项」写，与改造前一致）。
+//
+// # 三条不收的条件
+//
+//   - 详情与搜索**指向了不同的作品**（id 对不上，或类型对不上 —— 详情的类型必须是
+//     搜索定格的那一个。电影与剧集是两套独立 id 空间，`lookupTMDBInfo` 又会换类型重试，
+//     不钉类型的话一部电影可能被写成 tvshow.nfo）：宁可留薄的也不刮错片；
+//   - 取详情失败：留简版，静默降级为「这次没抓到演员」。
+//
+// 还有一种「详情取到了但附加块没解出东西」的情况（`extraHasContent` 为假）：那时
+// **正文仍然留搜索那份**（别用没有增量的详情把它冲掉），只把集数补上 —— 见下。
+//
+// 剧集总集数（`ep_tmdb` 那一档）只有详情里有，搜索载荷通常不带
+// `number_of_episodes`。它**与附加块走同一个响应**：一次详情同时给出演员与集数，
+// 所以这里只打一次 —— 以前「补集数」是搜索之后单独再打一次同一个端点，现在合成一次。
+func enrichTMDBInfo(ctx context.Context, client *tmdb.Client, info *tmdbInfo) {
+	if info == nil || strings.TrimSpace(info.TMDBID) == "" || client == nil {
+		return
+	}
+	mediaType := strings.TrimSpace(info.MediaType)
+	if mediaType == "" {
+		mediaType = MediaTypeMovie
+	}
+	full, err := lookupTMDBInfo(ctx, client, info.TMDBID, mediaType)
+	if err != nil || full == nil {
+		return
+	}
+	// 详情与搜索必须指向同一部作品。对不上时**连集数也不采用** —— 那是另一部片的。
+	if strings.TrimSpace(full.TMDBID) != strings.TrimSpace(info.TMDBID) {
+		return
+	}
+	// 电影与剧集是**两套独立的 id 空间**，同一个号在两边的确是两部不同的作品。
+	// lookupTMDBInfo 在首选类型失败时会换另一个类型再试（那是给「目录名带 id」
+	// 那条路用的兜底），这里必须把类型也钉住 —— 否则一部电影可能被写成 tvshow.nfo。
+	if strings.TrimSpace(full.MediaType) != mediaType {
+		return
+	}
+	epSearch := info.EpisodeCount
+	if !extraHasContent(full.Extra) {
+		// 没有增量：留搜索那份正文。但集数不算「附加块」，它在响应正文里，
+		// 照样可以补 —— 否则剧集会静默缺一档集数。
+		if info.MediaType == MediaTypeTV && epSearch <= 0 && full.EpisodeCount > 0 {
+			info.EpisodeCount = full.EpisodeCount
+		}
+		return
+	}
+	// 搜索能按年份挑，取详情只看 id；把搜出来的年份与存疑标记保留下来
+	// （`<year>` 与「存疑」图标都靠它）。
+	full.Year = info.Year
+	full.Doubt = info.Doubt
+	if full.EpisodeCount <= 0 {
+		full.EpisodeCount = epSearch
+	}
+	*info = *full
+}
+
+// extraHasContent 报告附加块里**有没有值得用的东西**。
+//
+// 结构体里带切片，没法跟零值 `==` 比。判据取「时长 / 评分 / 演员 / 剧照 / 类型」
+// 这五项里任意一项非空即可：一次成功的 LookupFull 至少会命中其中一项（TMDB 上
+// 几乎没有既没时长、又没评分、又没演员、又没剧照、又没类型的条目）。
+func extraHasContent(e tmdbExtraMeta) bool {
+	return e.Runtime > 0 || e.VoteCount > 0 || len(e.Cast) > 0 || len(e.Stills) > 0 || len(e.Genres) > 0
 }
 
 func (s *Service) matchWork(ctx context.Context, client *tmdb.Client, g workGroup) (*tmdbInfo, error) {
@@ -118,13 +197,10 @@ func (s *Service) matchWork(ctx context.Context, client *tmdb.Client, g workGrou
 	if err != nil {
 		return nil, err
 	}
-	if info.EpisodeCount == 0 && info.MediaType == MediaTypeTV {
-		if raw, _, lerr := client.LookupFull(ctx, info.TMDBID, MediaTypeTV); lerr == nil {
-			if full, derr := decodeTMDBInfo(raw, MediaTypeTV); derr == nil && full.EpisodeCount > 0 {
-				info.EpisodeCount = full.EpisodeCount
-			}
-		}
-	}
+	// 搜索给的是简版，演员/剧照/背景图/时长/类型都在详情里（见 enrichTMDBInfo）。
+	// 它**顺带把剧集总集数也补上**（搜索载荷里通常没有 `number_of_episodes`），
+	// 以前这里是单独再打一次同一个端点 —— 现在合成一次，剧集只是多一次而不是两次。
+	enrichTMDBInfo(ctx, client, info)
 	return info, nil
 }
 

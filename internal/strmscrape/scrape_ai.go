@@ -50,15 +50,20 @@ type AIEnhancer interface {
 
 // aiEnabledFor 判断这次刮削要不要走 AI 补认。
 //
-// 四条同时成立才开：用户点了那颗按钮（`UseAI`）、源是**本地目录**、AI 已装配、
-// AI 配好了。任何一条不成立都返回 false —— 而 false 意味着 `run()` 里连
-// 「攒待识别」那一步都不进入，进度、失败计数、日志与改造前逐字相同。
+// 三条同时成立才开：**设置里开着**这一项、源是**本地目录**、AI 已装配且配好了。
+// 任何一条不成立都返回 false —— 而 false 意味着 `run()` 里连「攒待识别」那一步都
+// 不进入，进度、失败计数、日志与改造前逐字相同。
+//
+// ⚠️ 开关是**设置项**（`Settings.AIBackfill`），不是请求参数 —— 页头那颗「AI 识别刮削」
+// 已经并进「开始刮削」，没有第二个入口去表达这个意图，而这件事会花钱，得让用户显式勾。
+// 求值**在后台任务里**（不是发起请求时）：进度是异步填的，`run()` 拿到的 req 与
+// 发起时那份是同一个副本，读设置那一刻算一次最直接。
 //
 // ⚠️ **任务源永远不开**（用户原话「不能影响现在所有的功能」）：任务刮削多等一次
 // AI 网络往返就是行为变化，哪怕结果一样。抽成函数是为了让这条规矩能被直接测到
 // （TestAIOnlyForLocalSource），而不是藏在 run() 的一行判断里。
-func (s *Service) aiEnabledFor(src *wallSrc, req RunRequest) bool {
-	return req.UseAI && src.isLocal() && s.ai != nil && s.ai.Available()
+func (s *Service) aiEnabledFor(src *wallSrc) bool {
+	return s.GetSettings().AIBackfill && src.isLocal() && s.ai != nil && s.ai.Available()
 }
 
 // aiPendingWork 是「规则没认出来、留给 AI 再试一次」的一部作品。
@@ -234,8 +239,9 @@ func (s *Service) flushAIPending(
 // searchTMDBByRecognition 用 AI 认出来的片名/年份去搜 TMDB。
 //
 // 与 `matchWork` 尾部同一套回退：剧集搜不到时再按电影搜一次（命名里没有 SxxExx
-// 的作品很容易被判成剧集）；搜到之后补齐剧集总集数（与 matchWork 同一条规矩，
-// 否则 `ep_tmdb` 会缺一档）。
+// 的作品很容易被判成剧集）；搜到之后补上附加块（演员/剧照/背景图/时长/类型）
+// 与剧集总集数（与 matchWork 同一条规矩，否则 `ep_tmdb` 会缺一档，
+// 而且「AI 刮出来的」会比「规则刮出来的」少一批元数据）。
 func searchTMDBByRecognition(ctx context.Context, client *tmdb.Client, title string, year *int, mediaType string) (*tmdbInfo, error) {
 	info, err := searchTMDBInfo(ctx, client, title, year, mediaType)
 	if err != nil && mediaType == MediaTypeTV {
@@ -244,12 +250,9 @@ func searchTMDBByRecognition(ctx context.Context, client *tmdb.Client, title str
 	if err != nil {
 		return nil, err
 	}
-	if info.EpisodeCount == 0 && info.MediaType == MediaTypeTV {
-		if raw, _, lerr := client.LookupFull(ctx, info.TMDBID, MediaTypeTV); lerr == nil {
-			if full, derr := decodeTMDBInfo(raw, MediaTypeTV); derr == nil && full.EpisodeCount > 0 {
-				info.EpisodeCount = full.EpisodeCount
-			}
-		}
-	}
+	// 与 matchWork 同一条规矩：搜索给的是简版，AI 救回来的这一部同样要补上
+	// 演员/剧照/背景图/时长/类型（见 enrichTMDBInfo）—— 否则「AI 刮出来的」与
+	// 「规则刮出来的」会写出两种成色的 nfo。剧集总集数它也会一并补上。
+	enrichTMDBInfo(ctx, client, info)
 	return info, nil
 }

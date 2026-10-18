@@ -110,35 +110,54 @@ async function handleDrawerSave() {
              thumb.jpg / poster.jpg —— 把番号生成器写的图删掉。番号自己的动作在
              卡片上（编辑 / 重刮）与设置下拉里（刷新元数据）。 -->
         <template v-if="isScrapeTab && !scrapePanelRef?.isJavSource">
+          <!-- 批量选择：只刮 / 只补勾中的那几部。
+               位置由用户指定 —— 在「补齐剧照与演员」**左边**，所以它同时管着右边那两颗：
+               勾了片子之后点「补齐剧照与演员」就只补这几部，点「开始刮削」就只刮这几部。
+               一部没勾时右边两颗**禁用**（开着批量选择却整库扫，等于这颗按钮白开）。
+
+               开态用 primary 高亮，与右边两颗区分开「我现在在哪一档」。
+               ⚠️ 刮削期间禁用：提交那拍要按这份选择集算 id，中途改选中会让「点了哪几部」
+               与「实际刮了哪几部」对不上（墙里也有一道同样的守卫）。 -->
+          <AppButton
+            type="button"
+            :variant="scrapePanelRef?.tmdbBatchMode ? 'primary' : 'secondary'"
+            :disabled="scrapePanelRef?.running"
+            :title="
+              scrapePanelRef?.tmdbBatchMode
+                ? '点卡片勾选要刮的影片，再点右边的按钮开始；再点一次退出'
+                : '只处理勾选的影片，不再整库扫一遍'
+            "
+            @click="scrapePanelRef?.tmdbToggleBatchMode()"
+          >
+            {{ scrapePanelRef?.tmdbBatchModeLabel ?? "批量选择" }}
+          </AppButton>
           <!-- 补齐：给**已经刮过**的作品补新抓的剧照/演员/背景图。它必须放在页头 ——
                藏在面板里那颗 ⚙ 的下拉菜单里时用户根本找不到（实测问「在哪里」）。
-               `missing_only` 策略下已刮过的作品会被正常刮削跳过，这是它们唯一的入口。 -->
+               `missing_only` 策略下已刮过的作品会被正常刮削跳过，这是它们唯一的入口。
+               勾了几部就只补这几部（`item_ids` 那条路，后端按作品过滤）。 -->
           <AppButton
             type="button"
             variant="secondary"
-            :disabled="scrapePanelRef?.running"
+            :disabled="scrapePanelRef?.running || scrapePanelRef?.tmdbBatchDisabled"
+            :title="
+              scrapePanelRef?.tmdbBatchDisabled
+                ? '先在卡片上勾几部，或关掉批量选择'
+                : undefined
+            "
             @click="scrapePanelRef?.backfillArtwork()"
           >
             补齐剧照与演员
           </AppButton>
-          <!-- AI 识别刮削：只在**本地目录**源上出现。挂上来的媒体库往往是别的工具
-               产出的，命名千奇百怪，规则解析不出片名 → TMDB 搜不到 → 整批失败；
-               这一颗把那批「认不出的」攒起来问一次 AI，认出来再搜 TMDB 写元数据。
+          <!-- 开始刮削：任务源与本地目录源**共用这一颗**（原来本地目录上还有一颗
+               「AI 识别刮削」，只差一个「这次要不要用 AI」的意图，已按用户要求合并掉，
+               好给页头腾位置）。
 
-               ⚠️ STRM 任务上不显示（后端也只对本地目录源开 AI）：任务那套的时间与结果
-               必须与改造前一致，而 AI 会多等一次网络往返。
-               ⚠️ AI 没配时**不报错、不提示**（用户明确要求）：那颗按钮照常可点，
-               这次刮削就等于普通刮削。所以这里不去读设置、不弹「先配置 AI」。 -->
-          <AppButton
-            v-if="scrapePanelRef?.isLocalSource"
-            type="button"
-            variant="secondary"
-            :disabled="scrapePanelRef?.running"
-            title="规则认不出片名的那批交给 AI 识别，再拿片名去 TMDB 搜；AI 未配置时等同于普通刮削"
-            @click="scrapePanelRef?.startAIScrape()"
-          >
-            AI 识别刮削
-          </AppButton>
+               ⚠️ AI 现在是**设置项**（「海报墙 → 设置 → 刮削策略 → AI 补认识别」），
+               不再是点击时带的参数：合并之后页头没有第二个入口能表达「这次别用 AI」，
+               只能读设置。所以这两颗按钮**不去读设置、不弹「先配置 AI」、按钮也不为此变样** ——
+               用户原话「AI 没配好时点了不能出错」。
+               后端的闸是 `src.isLocal() && 设置开着 && AI 可用`（strmscrape/scrape_ai.go）：
+               STRM 任务源**永远不走 AI**，那套的时间与结果与改造前逐字一致。 -->
           <AppButton
             v-if="scrapePanelRef?.running"
             type="button"
@@ -147,7 +166,18 @@ async function handleDrawerSave() {
           >
             停止刮削
           </AppButton>
-          <AppButton v-else type="button" variant="primary" @click="scrapePanelRef?.startScrape()">
+          <AppButton
+            v-else
+            type="button"
+            variant="primary"
+            :disabled="scrapePanelRef?.tmdbBatchDisabled"
+            :title="
+              scrapePanelRef?.tmdbBatchDisabled
+                ? '先在卡片上勾几部，或关掉批量选择'
+                : undefined
+            "
+            @click="scrapePanelRef?.startScrape()"
+          >
             开始刮削
           </AppButton>
         </template>

@@ -83,6 +83,13 @@ export interface StrmScrapeRematchResult {
 
 export interface StrmScrapeSettings {
   write_mode: StrmScrapeWriteMode;
+  /**
+   * 刮削时要不要用 AI 补认规则认不出的那批（**只对本地目录源生效**）。
+   *
+   * 原来这是一颗「AI 识别刮削」按钮，已并进「开始刮削」；那件事会花钱，
+   * 所以开关挪到这里由用户自己勾。默认开。
+   */
+  ai_backfill: boolean;
   tmdb_api_key: string;
   tmdb_language: string;
   tmdb_api_host: string;
@@ -171,18 +178,23 @@ export function saveStrmScrapeSettings(settings: Partial<StrmScrapeSettings>) {
 /**
  * 起一次刮削。
  *
- * `useAI` 只在本地目录源上生效（「AI 识别刮削」按钮）：规则认不出的片名交给 AI 认，
- * 认出来再搜 TMDB。**AI 没配时后端不报错** —— 照常走规则那套，结果与不传这个参数一致。
+ * `itemIDs` 非空时**只刮这几部**（页头「批量选择」勾中的作品）。元素是列表里
+ * `StrmScrapeItem.id` —— 后端按同一个哈希（`pathToItemID`）在扫盘结果上过滤，
+ * 所以两边口径必然一致。空 = 整根扫。
+ *
+ * ⚠️ 「用 AI 补认认不出的那批」**不在这里**了：它是个设置项
+ * （`settings.ai_backfill`，见「海报墙 → 设置」），只对本地目录源生效。
+ * 原来那颗「AI 识别刮削」按钮已并进「开始刮削」，请求上不再有这个开关。
  */
 export function runStrmScrape(
   ref: number | WallSourceRef,
   writeMode?: StrmScrapeWriteMode,
-  useAI?: boolean,
+  itemIDs?: string[],
 ) {
   return http.post<StrmScrapeProgress>("/admin/strm-scrape/run", {
     ...sourceParams(ref),
     write_mode: writeMode,
-    ...(useAI ? { use_ai: true } : {}),
+    ...(itemIDs?.length ? { item_ids: itemIDs } : {}),
   });
 }
 
@@ -413,11 +425,13 @@ export function deleteTmdbWallItem(ref: number | WallSourceRef, itemId: string) 
  * 给已经刮过的作品补上后来才有的数据（背景图 / 剧照 / 演员 / 评分 / 时长 / 完整 nfo）。
  *
  * 只补缺：**不重写已有 nfo 的正文**，也不覆盖已有的图。已经齐了的作品会被跳过。
- * 与「开始刮削」同一条后台队列，进度看 `fetchStrmScrapeProgress`。
+ * `itemIDs` 与 `runStrmScrape` 同义（空 = 整根扫）。与「开始刮削」同一条后台队列，
+ * 进度看 `fetchStrmScrapeProgress`。
  */
-export function backfillStrmScrapeImages(ref: number | WallSourceRef) {
+export function backfillStrmScrapeImages(ref: number | WallSourceRef, itemIDs?: string[]) {
   return http.post<StrmScrapeProgress>("/admin/strm-scrape/backfill", {
     ...sourceParams(ref),
+    ...(itemIDs?.length ? { item_ids: itemIDs } : {}),
   });
 }
 

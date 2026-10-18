@@ -104,7 +104,12 @@ const (
 	KeyQuarkTVClientListMode = "quark_tv_client_list_mode"
 	KeyQuarkTVProxyClients   = "quark_tv_proxy_clients"
 	KeyStrmScrapeWriteMode   = "strm_scrape_write_mode"
-	KeyStrmScrapeScopes      = "strm_scrape_scopes"
+	// KeyStrmScrapeAIBackfill 控制「本地目录刮削时，规则认不出的那批要不要交给 AI 补认」。
+	//
+	// 它为什么是个**设置项**而不是请求参数：那件事会**花钱**（AI 按量计费），
+	// 得由用户自己勾；而入口只有一颗「开始刮削」，没有第二颗按钮去承载这个意图了。
+	KeyStrmScrapeAIBackfill = "strm_scrape_ai_backfill"
+	KeyStrmScrapeScopes     = "strm_scrape_scopes"
 
 	KeyMOTmdbAPIKey            = "mo_tmdb_api_key"
 	KeyMOTmdbLanguage          = "mo_tmdb_language"
@@ -532,6 +537,8 @@ func defaultSpecs() []Spec {
 			{Value: "bidirectional", Label: "本地与云端互补"},
 		}),
 		stringSpec(KeyStrmScrapeWriteMode, "strm", "STRM 刮削写入策略", "missing_only=仅补缺；overwrite=覆盖已有 nfo/海报。", "missing_only"),
+		boolSpec(KeyStrmScrapeAIBackfill, "strm", "AI 补认识别",
+			"开启后，**本地目录**数据源刮削时，规则解析不出片名的作品会交给 AI 认一次，认出片名再搜 TMDB。\n只补认不出的，规则能搜到的一秒都不多等；AI 没配置好时这一项不起作用（点了也不出错）。\nSTRM 任务永远不走 AI —— 那套的时间与结果与改造前保持一致。", "true"),
 		{Key: KeyStrmScrapeScopes, Type: TypeString, Default: "{}", Hidden: true},
 
 		// 全局代理。顺序即卡片上的行序（Snapshot 复用声明顺序）。

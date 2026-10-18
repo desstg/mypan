@@ -54,6 +54,9 @@ const {
   revert: revertToBaseline,
 } = useSettingsForm<StrmScrapeSettings>({
   write_mode: "missing_only",
+  // 默认开：与「合并前那颗 AI 按钮默认的行为」一致（点一下本来就会用 AI）。
+  // 用户关掉它就是不花钱那一档。
+  ai_backfill: true,
   tmdb_api_key: "",
   theporndb_key: "",
   // 只读的回读字段：后端告诉界面「key 配了没」，供输入框 placeholder 用。
@@ -90,6 +93,9 @@ async function loadSettings(opts?: { silent?: boolean }) {
       const data = await fetchStrmScrapeSettings();
       applyBaseline({
         write_mode: (data.write_mode as StrmScrapeWriteMode) || "missing_only",
+        // ⚠️ 新增设置项**必须在这里补一行**（下面那段注释说的就是这个坑）：
+        // 漏了的话基线停在初始值上，打开设置页看到的不是库里的值。
+        ai_backfill: data.ai_backfill !== false,
         tmdb_api_key: data.tmdb_api_key || "",
         tmdb_language: data.tmdb_language || "zh-CN",
         tmdb_api_host: data.tmdb_api_host || "https://api.themoviedb.org",
@@ -195,6 +201,26 @@ defineExpose(
           </template>
           <template #control>
             <AppSelect v-model="settings.write_mode" :options="writeModeOptions" />
+          </template>
+        </SettingsRow>
+        <!-- AI 补认：原来是一颗「AI 识别刮削」按钮，已并进页头那颗「开始刮削」
+             （两颗只差请求里一个字段，合并后给「批量选择」腾出了位置）。
+             那件事会**花钱**，所以开关必须留在设置里由用户自己勾 —— 而且入口只剩一颗
+             按钮之后，界面上再没有第二个地方能表达「这次别用 AI」。 -->
+        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('ai_backfill')">
+          <template #info>
+            <div class="settings-row__label">AI 补认识别</div>
+            <SettingsHelpTooltip title="什么时候会用到 AI">
+              刮削时，<strong>本地目录</strong>数据源里那些<strong>规则解析不出片名</strong>的作品，
+              交给 AI 认一次片名，认出来再拿去搜 TMDB。<br /><br />
+              规则自己就能搜到的作品一秒都不多等 —— 只有认不出的那批会问 AI。<br /><br />
+              <strong>STRM 任务永远不走 AI</strong>（那套的速度与结果与以前完全一致）。<br /><br />
+              AI 本身在「系统设置 → AI 整理」里配置；<strong>没配好时这一项不起作用</strong>，
+              刮削照常跑，只是不调 AI。
+            </SettingsHelpTooltip>
+          </template>
+          <template #control>
+            <SettingsBoolSegment v-model="settings.ai_backfill" label="启用" />
           </template>
         </SettingsRow>
       </SettingsCard>

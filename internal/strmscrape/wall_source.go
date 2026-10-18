@@ -123,6 +123,12 @@ func (r posterRef) ref() WallSourceRef {
 	return WallSourceRef{StrmTaskID: r.TaskID, LocalDirID: r.LocalDirID}
 }
 
+// isLocal 报告这个取图引用指的是一个**本地目录**源（而不是任务）。与 `*wallSrc.isLocal`
+// 同一个口径，只是这里只有一个 posterRef 可用（可播正文分档要用，见 playableForWork）。
+func (r posterRef) isLocal() bool {
+	return strings.TrimSpace(r.LocalDirID) != ""
+}
+
 // resolveSource 把请求侧的选择器解析成一个数据源。**这是唯一的入口** ——
 // 除了 `resolveTask` 自己，别处不要再直接调它。
 func (s *Service) resolveSource(ctx context.Context, ref WallSourceRef) (*wallSrc, error) {

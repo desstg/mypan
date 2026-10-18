@@ -21,6 +21,9 @@ func (s *Service) GetSettings() Settings {
 	if s.settings == nil {
 		return out
 	}
+	// ⚠️ 这一行必须在 nil 守卫**之后** —— 上面那个 WriteMode 是在守卫之前算的，
+	// 靠的是它自己判了 `s.settings != nil`；照抄那个形状在这里就是空指针。
+	out.AIBackfill = s.settings.Bool(settings.KeyStrmScrapeAIBackfill)
 	enriched := mediaorganize.EnrichPlannerSettings(s.settings, nil)
 	out.TmdbAPIKey = mediaorganize.PlannerTMDBAPIKey(enriched)
 	out.TmdbLanguage = mediaorganize.PlannerTMDBLanguage(enriched)
@@ -44,6 +47,8 @@ func (s *Service) UpdateSettings(ctx context.Context, in Settings) error {
 	}
 	payload := map[string]string{
 		settings.KeyStrmScrapeWriteMode: normalizeWriteMode(in.WriteMode),
+		// 那个布尔**总是**写下去（不是「只在为 true 时写」）：用户要能把它关掉。
+		settings.KeyStrmScrapeAIBackfill: boolString(in.AIBackfill),
 	}
 	if lang := strings.TrimSpace(in.TmdbLanguage); lang != "" {
 		payload[settings.KeyMOTmdbLanguage] = lang

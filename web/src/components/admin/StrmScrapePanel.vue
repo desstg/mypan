@@ -416,6 +416,107 @@ function setWallRootEl(el: unknown) {
   wallRootEl.value = el instanceof HTMLElement ? el : null;
 }
 
+// ————————————————— 批量选择（点名刮削 / 点名补齐）—————————————————
+//
+// 勾中的几部拿去刮、或者拿去补齐 —— 页头那两颗按钮都读这一份集合。
+// 状态住在面板里（页头只做入口），与番号墙 `batchMode` 那几个 expose 同一条规矩。
+//
+// ⚠️ **选择集必须记住它属于哪个源**。`id` 是 `pathToItemID(relKey)` 的哈希，
+// 而 `relKey` 是**相对库根**的路径 —— 换一个源之后同一个 id 可能指向别的作品
+// （番号墙那边靠「换源整体清空」绕开了这条，这里必须留下源键才能判出来）。
+const batchMode = ref(false);
+const batchPicked = ref(new Map<string, StrmScrapeItem>());
+// 勾选**属于哪个源**。只在**勾第一部**时记下来（见 togglePick），之后不再变 ——
+// 它唯一的用处是发现「换过源了」。所以它天然是 `string | null`：`null` = 这份勾选
+// 不属于任何源。判据因此只对「非空勾选」生效（空勾选走整根扫，与源无关）。
+const batchSourceKey = ref<string | null>(null);
+
+const pickedCount = computed(() => batchPicked.value.size);
+const batchModeLabel = computed(() => {
+  if (!batchMode.value) return "批量选择";
+  return pickedCount.value > 0 ? `批量选择（已选 ${pickedCount.value} 部）` : "批量选择（点卡片勾选）";
+});
+// 「开着但一部没勾 → 按钮禁用」的判据两侧都有：这里是可见的那一道。
+// 收尾清场靠的是面板里的 `clearBatchPicked()`，它比页头那颗按钮更靠得住。
+const batchDisabled = computed(() => batchMode.value && pickedCount.value === 0);
+
+function isPicked(item: StrmScrapeItem) {
+  return batchPicked.value.has(item.id);
+}
+
+function togglePick(item: StrmScrapeItem) {
+  const next = new Map(batchPicked.value);
+  if (next.has(item.id)) next.delete(item.id);
+  else next.set(item.id, item);
+  batchPicked.value = next;
+  // 记下这份勾选属于哪个源：勾第一部时钉住，勾空之后放掉（空勾选不带源语义）。
+  if (next.size === 0) batchSourceKey.value = null;
+  else if (batchSourceKey.value === null) batchSourceKey.value = selectedKey.value ?? null;
+}
+
+/**
+ * 点卡片：批量选择开着时是**勾选**，否则开详情。
+ *
+ * 所有点击路径（鼠标 / Enter / Space）都收敛到这一个函数，判据只有一份 ——
+ * 与番号墙 `onCardClick` 同形。勾选圈本身 `pointer-events: none`，点击只落在这里。
+ */
+function onCardClick(item: StrmScrapeItem) {
+  if (batchMode.value) togglePick(item);
+  else wall.openTMDB(sourceRef.value, item);
+}
+
+/**
+ * 清空勾选（**不退模式**）。
+ *
+ * 起任务之后、以及收尾时都要清：选择属于「提交前」，留着会让用户以为
+ * 「这几部还在选中」—— 而那时墙可能已经刷新过一轮，勾中那几部甚至不在列表里了。
+ */
+function clearBatchPicked() {
+  batchPicked.value = new Map();
+  // ⚠️ 源键要一起放掉。留着一个「上一次勾选所属的源」，下一次勾选时 togglePick
+  // 见它非 null 就不会重新钉 —— 于是 `pickedForSubmit` 拿旧源键跟当前源比，
+  // 必然不等，点名刮被静默降级成整根扫。
+  batchSourceKey.value = null;
+}
+
+/**
+ * 退出批量选择。**刮削/补齐进行中一律拒绝**。
+ *
+ * 与番号墙那条守卫同一个理由：任务收尾要靠这份选择集清场，中途退出会留下一堆
+ * 「看不见但仍被选中」的条目。页头那颗按钮也禁用了，这里再兜一道。
+ */
+function toggleBatchMode() {
+  if (running.value) return;
+  if (batchMode.value) {
+    batchMode.value = false;
+    clearBatchPicked();
+  } else {
+    batchMode.value = true;
+  }
+}
+
+/**
+ * 选中的那几部在当前列表里都能找到时才返回它们的 id，否则返回空数组（= 整根扫）。
+ *
+ * 两条判据：**源没换过**、以及**每一部都还在 `items` 里**。少一条都不行 ——
+ * 筛选/排序/翻页都会让 `items` 只装一部分，而 id 是相对库根算的，拿一份
+ * 「已经把某些部过滤掉了」的清单去点名，用户会以为在刮自己勾的那几部、
+ * 实际刮的是另几部。宁可多扫一遍全库，也不能刮错。
+ *
+ * 返回空数组就是「不点名」，`runStrmScrape` 那边会连 `item_ids` 这个键都不发。
+ */
+function pickedForSubmit(): string[] {
+  if (!batchMode.value || pickedCount.value === 0) return [];
+  // 源键是**勾选自己记的**（togglePick 在勾第一部时钉住）。发现与当前源不一致 =
+  // 这份勾选是在别的源上做的，一律作废（宁可多扫一遍全库，也不能刮到别的作品）。
+  if (batchSourceKey.value !== (selectedKey.value ?? null)) return [];
+  const loaded = new Set(items.value.map((it) => it.id));
+  for (const id of batchPicked.value.keys()) {
+    if (!loaded.has(id)) return [];
+  }
+  return [...batchPicked.value.keys()];
+}
+
 function setTypeFilter(next: TypeFilter) {
   typeFilter.value = next;
   tvSubFilter.value = "all";
@@ -619,6 +720,22 @@ async function syncProgress() {
   } catch {}
 }
 
+/**
+ * 「开始刮削」：任务源与本地目录源**共用这一颗**。
+ *
+ * 本地目录上原先另有一颗「AI 识别刮削」，与它只差请求里的一个 `use_ai` 字段 ——
+ * 已合并进来（用户拍板），好给页头腾出「批量选择」的位置。那一档改由**设置项**
+ * 「海报墙 → 设置 → AI 补认识别」控制（默认开），**只对本地目录源生效**：
+ * 那种挂上来的库往往是别的工具产的、命名千奇百怪，规则解析不出片名的整批失败；
+ * 开着时那批会攒起来问一次 AI，认出来再拿片名去搜 TMDB（见 strmscrape/scrape_ai.go）。
+ *
+ * **批量选择开着时，勾中的那几部只刮那几部**（`pickedForSubmit` 那个判据）。
+ * 拿不准（源换过 / 有勾中的部不在当前列表里）就退回整根扫 —— 宁可多扫，不能刮错。
+ *
+ * ⚠️ **AI 没配时不报错、不提示**（用户明确要求）：后端 `Available()` 为假时整条 AI
+ * 分支不进，这次刮削就等于普通刮削。所以这里不去查设置、不弹「先配置 AI」；
+ * toast 也照旧只说「已开始刮削」—— 认没认出来只有后端知道，不替它宣称。
+ */
 async function startScrape() {
   if (!selectedKey.value) {
     toast.error("请先选择任务或本地目录");
@@ -626,36 +743,16 @@ async function startScrape() {
   }
   if (running.value) return;
   try {
-    const p = await runStrmScrape(sourceRef.value);
+    const picked = pickedForSubmit();
+    const p = await runStrmScrape(sourceRef.value, undefined, picked);
     progress.value = p;
     progressPolling.sync();
-    toast.success("已开始刮削");
-  } catch (e) {
-    toast.error(getApiErrorMessage(e, "启动刮削失败"));
-  }
-}
-
-/**
- * 「AI 识别刮削」：与普通刮削同一套，只多带 `use_ai`。
- *
- * 差别在后端：规则解析不出片名 / 搜不到 TMDB 的那批**攒起来问一次 AI**，
- * 认出来再拿片名去搜 TMDB，然后照常写 nfo 与海报（见 strmscrape/scrape_ai.go）。
- *
- * ⚠️ **AI 没配时不报错、不提示**（用户明确要求）：后端 `Available()` 为假时
- * 整条 AI 分支不进，这次刮削就等于普通刮削 —— 调用方拿到的仍是正常进度。
- * 所以这里也不去查设置、不弹「先配置 AI」。
- */
-async function startAIScrape() {
-  if (!selectedKey.value) {
-    toast.error("请先选择任务或本地目录");
-    return;
-  }
-  if (running.value) return;
-  try {
-    const p = await runStrmScrape(sourceRef.value, undefined, true);
-    progress.value = p;
-    progressPolling.sync();
-    toast.success("已开始刮削（AI 补认识别）");
+    // 起了任务就把勾选清掉（**不退模式**）：选择属于「提交前」，留着会让用户以为
+    // 「这几部还在选中」—— 而那时墙可能已经刷新过一轮，勾中那几部甚至不在列表里了。
+    // 与番号墙同一条规矩，但那边靠 `pendingBatchItems` 那份副本收尾，这里直接清。
+    if (batchMode.value) clearBatchPicked();
+    // 报出「刮的是哪一档」：点名刮与整根扫的耗时差得很远，用户得知道这次是哪种。
+    toast.success(picked.length > 0 ? `已开始刮削：选中的 ${picked.length} 部` : "已开始刮削");
   } catch (e) {
     toast.error(getApiErrorMessage(e, "启动刮削失败"));
   }
@@ -677,6 +774,9 @@ async function stopScrape() {
  * 存量作品的入口：`missing_only` 策略下，已经刮过的作品会被跳过（那是对的 ——
  * 否则每次刮削都要全量重跑），所以加了新抓取范围之后得有个**单独**的入口去补。
  * 只补缺：不重写已有 nfo 的正文，也不覆盖已有的图。
+ *
+ * **批量选择开着时，勾中的那几部只补那几部** —— 与「开始刮削」同一条规矩
+ * （同一份勾选集、同一个 `pickedForSubmit` 判据，用户明确要求两颗按钮都吃它）。
  */
 async function backfillArtwork() {
   if (!selectedKey.value) {
@@ -687,11 +787,13 @@ async function backfillArtwork() {
     toast.error("刮削任务进行中，请稍后再试");
     return;
   }
+  const picked = pickedForSubmit();
   try {
     await confirm({
       title: "补齐剧照与演员",
-      message:
-        "将扫描本任务下**已经刮过**的作品，给缺少剧照、演员、背景图或完整 nfo 的那些补上（只补缺，不改动已有的 nfo 正文与图片）。每部作品要下载若干张图，数量多时请耐心等待。",
+      message: picked.length
+        ? `将给**选中的 ${picked.length} 部**作品补上缺少的剧照、演员、背景图或完整 nfo（只补缺，不改动已有的 nfo 正文与图片，也没勾的那些不会被动到）。每部作品要下载若干张图，数量多时请耐心等待。`
+        : "将扫描本任务下**已经刮过**的作品，给缺少剧照、演员、背景图或完整 nfo 的那些补上（只补缺，不改动已有的 nfo 正文与图片）。每部作品要下载若干张图，数量多时请耐心等待。",
       icon: "info",
       confirmText: "开始补齐",
       danger: false,
@@ -700,10 +802,12 @@ async function backfillArtwork() {
     return;
   }
   try {
-    const p = await backfillStrmScrapeImages(sourceRef.value);
+    const p = await backfillStrmScrapeImages(sourceRef.value, picked);
     progress.value = p;
     progressPolling.sync();
-    toast.success("已开始补齐");
+    // 与「开始刮削」同一拍清勾选（不退模式），理由见 startScrape。
+    if (batchMode.value) clearBatchPicked();
+    toast.success(picked.length > 0 ? `已开始补齐：选中的 ${picked.length} 部` : "已开始补齐");
   } catch (e) {
     toast.error(getApiErrorMessage(e, "启动补齐失败"));
   }
@@ -1032,6 +1136,22 @@ function onDeleted() {
   stats.value = { ...stats.value, total: Math.max(0, stats.value.total - 1) };
 }
 
+// 换数据源：清空勾选（**退不退模式由用户决定** —— 勾选本身必须清）。
+//
+// ⚠️ 这条不是可选的：`id` 是 `pathToItemID(relKey)` 的哈希，而 `relKey` 是**相对
+// 库根**的路径 —— 换一个源之后同一个 id 完全可能指向另一部作品。不清就会「勾的是
+// 这部、刮的是那部」。`pickedForSubmit` 里那道源键判据是第二道保险（它保证刮不错，
+// 但不清的话界面上的勾会显得还在）。
+//
+// ⚠️ **不要**在这里给 `batchSourceKey` 播种。这个 watch 不带 `immediate`，首次
+// 挂载它不会跑 —— 而这里若写一句 `batchSourceKey = selectedKey`，运行时它只把值
+// 更新到「上一个源」上，于是首屏之后第一次勾选会因为「源键是 null ≠ 当前源」
+// 而被 `pickedForSubmit` 静默降级成整根扫。留空（null）+ 非空勾选才判源键，
+// 这两个条件合起来已经足够：空勾选本来就走整根扫。
+watch(selectedKey, () => {
+  clearBatchPicked();
+});
+
 watch(selectedTaskId, () => {
   void loadScope();
   if (!booted.value) return;
@@ -1090,9 +1210,6 @@ const wall = useWallDetail();
 
 defineExpose({
   startScrape,
-  // 「AI 识别刮削」：只在本地目录源上出现（父组件按 isLocalSource 判）。
-  // 动作住在实现这一侧，页头只做入口 —— 与其他几个同一条规矩。
-  startAIScrape,
   stopScrape,
   backfillArtwork,
   // 番号任务的「在线刮削」在子组件（StrmJavWall）里，页头那颗按钮要转调它 ——
@@ -1112,11 +1229,23 @@ defineExpose({
   // ⚠️ 对外叫 `isJavSource`：它同时涵盖**任务**与**本地目录**两种源（判据是
   // 数据源的 media_kind，两者同一套词）。父组件原先读的是 `isJavTask`。
   isJavSource,
-  // 父组件（辅助工具页）用它决定「AI 识别刮削」显不显示：那样一颗按钮对
-  // STRM 任务毫无意义（后端也只对本地目录源开 AI），所以只在这边亮出来。
+  // 父组件（辅助工具页）用它决定页头那几颗按钮显不显示：「补齐剧照与演员」与番号的
+  // 那两颗都只对**任务**源有意义，本地目录不显示。
   // ⚠️ 与同文件里那些 `computed(() => ref.value)` 包装不同，这里必须直接暴露 computed
   // 本身 —— 裸 ref 不会被父组件解包。
   isLocalSource,
+  // 批量选择（点名刮削 / 点名补齐）：按钮长在页头（辅助工具页那边），
+  // 状态与动作都在这一侧 —— 与番号墙那几个同一条规矩，页头只做入口。
+  // 「开着但一部没勾 → 禁用」的判据两侧都有：这里是可见的那一道。
+  //
+  // ⚠️ 名字带 `tmdb` 前缀，**不能**直接叫 `batchMode` —— 上面那组（番号墙那个
+  // `javWallRef.batchMode`）已经占了这个键名，同名的后写者会把它整个盖掉，
+  // 番号那两颗页头按钮会立刻失灵。两面墙的勾选是两套独立状态，键名也该是两套。
+  tmdbBatchMode: computed(() => batchMode.value),
+  tmdbBatchModeLabel: batchModeLabel,
+  tmdbPickedCount: pickedCount,
+  tmdbBatchDisabled: batchDisabled,
+  tmdbToggleBatchMode: toggleBatchMode,
   refresh: refreshAll,
   refreshing,
   running,
@@ -1449,12 +1578,20 @@ defineExpose({
               v-for="item in wallVisibleItems"
               :key="item.id"
               class="scrape-card"
-              :class="{ 'scrape-card--busy': isItemBusy(item) }"
+              :class="{
+                'scrape-card--busy': isItemBusy(item),
+                'scrape-card--picking': batchMode,
+                'scrape-card--picked': batchMode && isPicked(item),
+              }"
               role="button"
               tabindex="0"
-              :title="`《${item.title}》· 点开详情`"
-              @click="wall.openTMDB(sourceRef, item)"
-              @keydown.enter.prevent="wall.openTMDB(sourceRef, item)"
+              :title="
+                batchMode ? `《${item.title}》· 点击选择` : `《${item.title}》· 点开详情`
+              "
+              :aria-pressed="batchMode ? isPicked(item) : undefined"
+              @click="onCardClick(item)"
+              @keydown.enter.prevent="onCardClick(item)"
+              @keydown.space.prevent="onCardClick(item)"
             >
               <div class="scrape-card__poster">
                 <!-- 加载失败也落到统一占位图（以前只有「没有 URL」才有兜底）。 -->
@@ -1479,6 +1616,7 @@ defineExpose({
                      番号墙一致：悬停/聚焦才显形，触屏常显。点开的是确认弹窗、
                      不是直接删。 -->
                 <button
+                  v-if="!batchMode"
                   type="button"
                   class="scrape-card__del"
                   title="删除这一部（本地文件与网盘那一份）"
@@ -1488,6 +1626,42 @@ defineExpose({
                   <i class="fas fa-trash-can" />
                 </button>
 
+                <!-- 批量选择开着时，卡片**正中**那个勾选圈（视觉与番号墙 / TMDB 订阅
+                     那套勾选圈一致）。
+                     未选 = 圈里一个加号；已选 = 打勾。
+
+                     ⚠️ 这个圈是**纯装饰**：`pointer-events: none`（见样式）。
+                     让它自己收点击的话，圈上停一次、article 上再翻一次 ——
+                     等于永远选不上。这条是番号墙那边踩出来的。 -->
+                <span
+                  v-if="batchMode"
+                  class="scrape-card__pick"
+                  :class="{ 'scrape-card__pick--on': isPicked(item) }"
+                  aria-hidden="true"
+                >
+                  <svg viewBox="0 0 24 24" width="26" height="26" focusable="false">
+                    <template v-if="isPicked(item)">
+                      <path
+                        d="M5 12.5l4.2 4.2L19 7"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2.4"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                    </template>
+                    <template v-else>
+                      <path
+                        d="M12 6.5v11M6.5 12h11"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2.2"
+                        stroke-linecap="round"
+                      />
+                    </template>
+                  </svg>
+                </span>
+
                 <div v-if="isItemBusy(item)" class="scrape-card__busy" title="正在刮削">
                   <BusySpinner :size="22" color="#fff" />
                   <span>刮削中</span>
@@ -1495,7 +1669,7 @@ defineExpose({
 
                 <div class="scrape-card__shade" aria-hidden="true"></div>
 
-                <div class="scrape-card__actions">
+                <div v-if="!batchMode" class="scrape-card__actions">
                   <button
                     v-if="canConfirmDoubt(item)"
                     type="button"
@@ -2209,6 +2383,51 @@ defineExpose({
 @media (hover: none) { .scrape-card__del { opacity: 1; } }
 .scrape-card__del:hover { background: var(--danger); }
 .scrape-card__del:focus-visible { opacity: 1; outline: 2px solid var(--danger); outline-offset: 1px; }
+
+/* ————————————————— 批量选择 —————————————————
+
+   勾选圈在卡片**正中**，视觉与番号墙（`StrmJavWall.vue` 的 `.jav-card__pick`）
+   和 TMDB 订阅那套逐条对齐 —— 与上面 `.scrape-card__del` 同一条规矩：
+   两面临时各写一份（这个组件是 `scoped`），改一边要跟着改另一边。
+
+   ⚠️ **`pointer-events: none` 是必须的**：点击统一走 article（`onCardClick`），
+   让圈自己收一次点击再冒泡到 article 就是勾了又取消 —— 表现成「永远选不上」。
+   ⚠️ 圈**不平移**（`top:50% left:50%` 居中就好，不加 transform）：卡片既非
+   `will-change` 也不该为它建层 —— 那是番号墙当初选居中的理由。
+   ⚠️ 与 `.scrape-card__del` 一样**常驻**（不照抄「指过去才出现」）：批量选择开着
+   就该看得见，用户要从一排圈里点。 */
+.scrape-card__pick {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 4;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  pointer-events: none;
+  color: #fff;
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 1px 6px rgba(15, 23, 42, 0.45);
+  transition: background 0.12s, border-color 0.12s;
+}
+/* 选中：亮色实心 + 打勾。用 brand 而不是纯白，扫一眼就能把「选中的那几部」分出来。 */
+.scrape-card__pick--on {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+/* 选中那一张的封面描一圈，与圈本身互相印证（圈可能被深色海报吃掉对比度）。 */
+.scrape-card--picked .scrape-card__poster { outline: 2px solid var(--brand); outline-offset: -2px; }
+/* 键盘用户：卡片本身是 role=button + tabindex，聚焦时给一圈可见的焦点环。 */
+.scrape-card--picking:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+/* 批量选择开着时，悬停浮出来的那排操作键不显示（点了就不是勾选而是重刮了）——
+   模板里已经 `v-if="!batchMode"`，这里只是把「不显示」这件事也写进样式层，
+   防止以后有人在样式里给它强制显形。 */
+.scrape-card--picking .scrape-card__actions { display: none; }
 .scrape-card__busy {
   position: absolute;
   inset: 0;

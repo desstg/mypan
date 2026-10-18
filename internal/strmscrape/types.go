@@ -95,6 +95,12 @@ type Progress struct {
 
 type Settings struct {
 	WriteMode string `json:"write_mode"`
+	// AIBackfill 是「刮削时要不要用 AI 补认规则认不出的那批」。
+	//
+	// ⚠️ 它是一个**设置**，不是请求参数：入口只有一颗「开始刮削」，没有第二颗按钮
+	// 去承载这个意图；而这件事会花钱，得让用户在设置里显式勾。
+	// 仍然**只对本地目录源生效**（任务源永不走 AI，见 aiEnabledFor）。
+	AIBackfill bool `json:"ai_backfill"`
 
 	TmdbAPIKey            string `json:"tmdb_api_key"`
 	TmdbLanguage          string `json:"tmdb_language"`
@@ -135,13 +141,11 @@ type RunRequest struct {
 	// LocalDirID 非空时优先，表示「刮的是墙上挂的那个本地目录」。
 	LocalDirID string `json:"local_dir_id,omitempty"`
 	WriteMode  string `json:"write_mode,omitempty"`
-	// UseAI 表示这次刮削「用 AI 补认规则认不出的那批」（「AI 识别刮削」按钮）。
+	// ItemIDs 非空时**只刮这几部**（页头「批量选择」勾中的作品）。
 	//
-	// 只在**本地目录源**上生效（run() 里按源判）：STRM 任务的时间/结果必须与
-	// 改造前一致，用户明确要求「不能影响现在所有的功能」。
-	//
-	// AI 没配时这个字段等于没发 —— 后端不报错、不提示，照常走规则那条路。
-	UseAI bool `json:"use_ai,omitempty"`
+	// 元素是 `buildItem` 给的条目 id（`pathToItemID(relKey)` 的十六进制）。
+	// 空 = 整根扫（老行为逐字不变）。
+	ItemIDs []string `json:"item_ids,omitempty"`
 }
 
 type Scope struct {
