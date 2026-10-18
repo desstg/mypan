@@ -168,10 +168,21 @@ export function saveStrmScrapeSettings(settings: Partial<StrmScrapeSettings>) {
   return http.put<StrmScrapeSettings>("/admin/strm-scrape/settings", settings);
 }
 
-export function runStrmScrape(ref: number | WallSourceRef, writeMode?: StrmScrapeWriteMode) {
+/**
+ * 起一次刮削。
+ *
+ * `useAI` 只在本地目录源上生效（「AI 识别刮削」按钮）：规则认不出的片名交给 AI 认，
+ * 认出来再搜 TMDB。**AI 没配时后端不报错** —— 照常走规则那套，结果与不传这个参数一致。
+ */
+export function runStrmScrape(
+  ref: number | WallSourceRef,
+  writeMode?: StrmScrapeWriteMode,
+  useAI?: boolean,
+) {
   return http.post<StrmScrapeProgress>("/admin/strm-scrape/run", {
     ...sourceParams(ref),
     write_mode: writeMode,
+    ...(useAI ? { use_ai: true } : {}),
   });
 }
 

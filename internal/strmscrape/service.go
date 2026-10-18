@@ -41,6 +41,11 @@ type Options struct {
 	// **可以为 nil**（测试、或某个装配路径没接上）：那时源媒体信息退化成只显示文件名
 	// 与路径，不报错。
 	FileInfo FileInfoLookup
+	// AI 是 AI 辅助识别（海报墙刮削的「补认」那一档，见 scrape_ai.go）。
+	//
+	// **可以为 nil**：nil 时 `run()` 的 AI 分支整段不进入，刮削与改造前逐字相同。
+	// 用户没开 AI 也是同一条路（`Available()` 为假，见 run() 里 `useAI` 的算法）。
+	AI AIEnhancer
 }
 
 // FileInfoLookup 是「按 file_id 查源文件信息」的最小接口。
@@ -69,6 +74,8 @@ type Service struct {
 	// javOnline 是在线刮削的进度（与 TMDB 那套 Progress 分开，见 javwall_online.go）。
 	javOnlineMu sync.Mutex
 	javOnline   *JavOnlineScrapeProgress
+	// ai 是 AI 辅助识别（可为 nil，见 Options.AI）。
+	ai AIEnhancer
 
 	mu          sync.Mutex
 	operationMu sync.Mutex
@@ -110,6 +117,7 @@ func New(opts Options) *Service {
 		strmDir:       strmDir,
 		log:           log,
 		files:         opts.FileInfo,
+		ai:            opts.AI,
 		javWallCache:  map[string]*javWallSnapshot{},
 		javTitleCache: map[string]javTitleEntry{},
 		thumbs: thumbcache.New(opts.DataDir, func(msg string, args ...any) {
@@ -165,8 +173,17 @@ func normalizeItemListQuery(in ItemListQuery) ItemListQuery {
 	return out
 }
 
+// ListItems 是「按任务 id 列」的老入口（自动刮削 / 老前端）。
+//
+// 内部转调 ListItemsByRef：本地目录源与任务源因此**必然同源** —— 两边各写一份
+// 迟早会漂成「任务能列、本地目录不能」。
 func (s *Service) ListItems(ctx context.Context, strmTaskID int64, query ItemListQuery) (ItemListResult, error) {
-	src, err := s.taskSource(ctx, strmTaskID)
+	return s.ListItemsByRef(ctx, WallSourceRef{StrmTaskID: strmTaskID}, query)
+}
+
+// ListItemsByRef 按请求侧的选择器列（`local_dir_id` 优先，见 wall_source.go）。
+func (s *Service) ListItemsByRef(ctx context.Context, ref WallSourceRef, query ItemListQuery) (ItemListResult, error) {
+	src, err := s.resolveSource(ctx, ref)
 	if err != nil {
 		return ItemListResult{}, err
 	}
@@ -199,8 +216,15 @@ func (s *Service) ListItemsBySource(ctx context.Context, src *wallSrc, query Ite
 }
 
 // RefreshIndex 扫盘重建索引并返回列表（海报墙刷新按钮）。
+//
+// 与 ListItems 同一条规矩：老入口转调源版，两种数据源走同一份实现。
 func (s *Service) RefreshIndex(ctx context.Context, strmTaskID int64, query ItemListQuery) (ItemListResult, error) {
-	src, err := s.taskSource(ctx, strmTaskID)
+	return s.RefreshIndexByRef(ctx, WallSourceRef{StrmTaskID: strmTaskID}, query)
+}
+
+// RefreshIndexByRef 按请求侧的选择器重建索引并返回列表。
+func (s *Service) RefreshIndexByRef(ctx context.Context, ref WallSourceRef, query ItemListQuery) (ItemListResult, error) {
+	src, err := s.resolveSource(ctx, ref)
 	if err != nil {
 		return ItemListResult{}, err
 	}
@@ -640,6 +664,12 @@ func (s *Service) run(ctx context.Context, src *wallSrc, req RunRequest) error {
 		interval = 300 * time.Millisecond
 	}
 
+	// AI 补认只在「本地目录源 + 用户这次点了 AI 按钮 + AI 真的配好了」三条同时成立时开启。
+	// 关着时下面的循环**一个分支都不多走** —— 进度、失败计数、日志与改造前逐字相同。
+	useAI := s.aiEnabledFor(src, req)
+	// pending 只装「规则没认出来、留给 AI 再试一次」的作品（见 scrape_ai.go）。
+	pending := make([]aiPendingWork, 0)
+
 	for i, g := range works {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -667,6 +697,24 @@ func (s *Service) run(ctx context.Context, src *wallSrc, req RunRequest) error {
 			reason := "未返回有效的 TMDB 匹配结果"
 			if matchErr != nil {
 				reason = matchErr.Error()
+			}
+			if useAI {
+				// 先记下来，统一问 AI；失败原因原样留着 —— AI 也救不回来时按这条收尾。
+				// Done 照常前进（这一部已经处理过了），Failed 等 AI 结果出来再定。
+				pending = append(pending, aiPendingWork{
+					idx:     i,
+					g:       g,
+					display: displayName,
+					itemID:  item.ID,
+					reason:  reason,
+				})
+				s.setProgress(func(p *Progress) {
+					p.Done = i + 1
+					p.CurrentItemID = ""
+					p.Message = "待 AI 识别：" + displayName
+				})
+				time.Sleep(interval)
+				continue
 			}
 			failures = append(failures, s.logScrapeFailure(src, g, displayName, ScrapeFailureStageMatch, reason))
 			s.setProgress(func(p *Progress) {
@@ -710,6 +758,9 @@ func (s *Service) run(ctx context.Context, src *wallSrc, req RunRequest) error {
 		})
 		time.Sleep(interval)
 	}
+	// 规则没认出来的那批：一次性问 AI，认出来就接着搜 TMDB 并写入（见 scrape_ai.go）。
+	// 认不出来 / 搜不到 / AI 整批失败的，按原来那条匹配失败路径收尾。
+	s.flushAIPending(ctx, client, src, root, pending, &failures, interval, mode == WriteModeOverwrite)
 	// 全量对账一次，去掉已删除作品
 	_ = s.RebuildIndex(ctx, src)
 	s.setProgress(func(p *Progress) {

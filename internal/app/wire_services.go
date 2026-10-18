@@ -84,6 +84,10 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		// 详情抽屉的「源媒体信息」要显示**网盘源文件**的大小与类型（TMDB 那面没有
 		// 侧车，只能按 .strm 里的 file_id 查一次）。只借它这一个查询。
 		FileInfo: fileSvc,
+		// 海报墙的「AI 识别刮削」：规则认不出的片名交给 AI 认（见 strmscrape/scrape_ai.go）。
+		// **可以为 nil**；用户在「系统设置 → AI 整理」里没开时它也等于没接 ——
+		// 两条路都让刮削退回纯规则那一套，不报错。
+		AI: aiOrganizeSvc,
 		// 番号墙的「在线刮削」要按番号打上游。jav 那边不 import strmscrape，
 		// 这个方向不成环（jav.New 在本文件更下面，所以这里先接 nil 再补上）。
 	})

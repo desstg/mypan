@@ -122,6 +122,8 @@ const selectedLocalDir = computed<WallLocalDir | null>(() => {
 const scopeOpen = ref(false);
 const scopeLoading = ref(false);
 const excludedScopeDirs = ref<string[]>([]);
+// loadScope 的竞态序号（同文件里 `loadItemsSeq` 那条规矩）。
+let scopeLoadToken = 0;
 const items = ref<StrmScrapeItem[]>([]);
 const stats = ref<StrmScrapeItemListStats>(emptyStats());
 const totalMatched = ref(0);
@@ -183,6 +185,8 @@ const sourceMediaKind = computed(
 // 数据源是不是「番号影片」：决定整面墙长什么样（番号有自己的一套）。
 // 任务与本地目录共用这一个判据 —— 后端也是同一套词（tmdb / jav）。
 const isJavSource = computed(() => sourceMediaKind.value === "jav");
+/** 当前选的是不是「挂上来的本地目录」源（与任务源区分开）。 */
+const isLocalSource = computed(() => selectedLocalDir.value !== null);
 // 只有**任务**源才谈得上「番号墙隐藏目录」那些按任务存的东西。
 const isJavTask = isJavSource;
 /**
@@ -261,14 +265,18 @@ function onJavHiddenSaved() {
 
 async function loadScope() {
   const ref = sourceRef.value;
+  // 竞态令牌：`sourceRef.value === ref` 那道判据**不够** —— A → B → A 时，
+  // 第一次 A 的迟到响应会被当成当前这份（页头「已排除 N 个目录」就对不上了）。
+  // 本地目录也能读范围之后这条路的对手变多了（以前只有任务），所以补上。
+  const token = ++scopeLoadToken;
   excludedScopeDirs.value = [];
   // 番号影片不吃「刮削范围」（那是 TMDB 索引那条路的东西），这一趟纯属白跑。
   if (!selectedKey.value || isJavSource.value) return;
   try {
     const data = await fetchStrmScrapeScope(ref);
-    if (sourceRef.value === ref) excludedScopeDirs.value = data.excluded_dirs ?? [];
+    if (token === scopeLoadToken) excludedScopeDirs.value = data.excluded_dirs ?? [];
   } catch (e) {
-    toast.error(getApiErrorMessage(e, "读取刮削范围失败"));
+    if (token === scopeLoadToken) toast.error(getApiErrorMessage(e, "读取刮削范围失败"));
   }
 }
 
@@ -276,6 +284,8 @@ async function saveScope(dirs: string[]) {
   const ref = sourceRef.value;
   if (!selectedKey.value || scopeLoading.value) return;
   scopeLoading.value = true;
+  // 保存后写回的是**新**值，别让一个还在飞的 loadScope 用旧值盖掉它。
+  scopeLoadToken++;
   try {
     const data = await saveStrmScrapeScope(ref, dirs);
     excludedScopeDirs.value = data.excluded_dirs ?? [];
@@ -620,6 +630,32 @@ async function startScrape() {
     progress.value = p;
     progressPolling.sync();
     toast.success("已开始刮削");
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "启动刮削失败"));
+  }
+}
+
+/**
+ * 「AI 识别刮削」：与普通刮削同一套，只多带 `use_ai`。
+ *
+ * 差别在后端：规则解析不出片名 / 搜不到 TMDB 的那批**攒起来问一次 AI**，
+ * 认出来再拿片名去搜 TMDB，然后照常写 nfo 与海报（见 strmscrape/scrape_ai.go）。
+ *
+ * ⚠️ **AI 没配时不报错、不提示**（用户明确要求）：后端 `Available()` 为假时
+ * 整条 AI 分支不进，这次刮削就等于普通刮削 —— 调用方拿到的仍是正常进度。
+ * 所以这里也不去查设置、不弹「先配置 AI」。
+ */
+async function startAIScrape() {
+  if (!selectedKey.value) {
+    toast.error("请先选择任务或本地目录");
+    return;
+  }
+  if (running.value) return;
+  try {
+    const p = await runStrmScrape(sourceRef.value, undefined, true);
+    progress.value = p;
+    progressPolling.sync();
+    toast.success("已开始刮削（AI 补认识别）");
   } catch (e) {
     toast.error(getApiErrorMessage(e, "启动刮削失败"));
   }
@@ -1054,6 +1090,9 @@ const wall = useWallDetail();
 
 defineExpose({
   startScrape,
+  // 「AI 识别刮削」：只在本地目录源上出现（父组件按 isLocalSource 判）。
+  // 动作住在实现这一侧，页头只做入口 —— 与其他几个同一条规矩。
+  startAIScrape,
   stopScrape,
   backfillArtwork,
   // 番号任务的「在线刮削」在子组件（StrmJavWall）里，页头那颗按钮要转调它 ——
@@ -1073,6 +1112,11 @@ defineExpose({
   // ⚠️ 对外叫 `isJavSource`：它同时涵盖**任务**与**本地目录**两种源（判据是
   // 数据源的 media_kind，两者同一套词）。父组件原先读的是 `isJavTask`。
   isJavSource,
+  // 父组件（辅助工具页）用它决定「AI 识别刮削」显不显示：那样一颗按钮对
+  // STRM 任务毫无意义（后端也只对本地目录源开 AI），所以只在这边亮出来。
+  // ⚠️ 与同文件里那些 `computed(() => ref.value)` 包装不同，这里必须直接暴露 computed
+  // 本身 —— 裸 ref 不会被父组件解包。
+  isLocalSource,
   refresh: refreshAll,
   refreshing,
   running,
@@ -1409,8 +1453,8 @@ defineExpose({
               role="button"
               tabindex="0"
               :title="`《${item.title}》· 点开详情`"
-              @click="wall.openTMDB(selectedTaskId ?? 0, item)"
-              @keydown.enter.prevent="wall.openTMDB(selectedTaskId ?? 0, item)"
+              @click="wall.openTMDB(sourceRef, item)"
+              @keydown.enter.prevent="wall.openTMDB(sourceRef, item)"
             >
               <div class="scrape-card__poster">
                 <!-- 加载失败也落到统一占位图（以前只有「没有 URL」才有兜底）。 -->

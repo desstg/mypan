@@ -135,6 +135,13 @@ type RunRequest struct {
 	// LocalDirID 非空时优先，表示「刮的是墙上挂的那个本地目录」。
 	LocalDirID string `json:"local_dir_id,omitempty"`
 	WriteMode  string `json:"write_mode,omitempty"`
+	// UseAI 表示这次刮削「用 AI 补认规则认不出的那批」（「AI 识别刮削」按钮）。
+	//
+	// 只在**本地目录源**上生效（run() 里按源判）：STRM 任务的时间/结果必须与
+	// 改造前一致，用户明确要求「不能影响现在所有的功能」。
+	//
+	// AI 没配时这个字段等于没发 —— 后端不报错、不提示，照常走规则那条路。
+	UseAI bool `json:"use_ai,omitempty"`
 }
 
 type Scope struct {

@@ -151,8 +151,14 @@ func (h *Handler) listStrmScrapeItems(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("strm_task_id")), 10, 64)
-	items, err := h.strmScrape.ListItems(r.Context(), taskID, parseStrmScrapeListQuery(r))
+	// 数据源：`local_dir_id` 优先（挂上来的本地目录也能列了）。
+	// 老前端只发 `strm_task_id`，行为逐字不变。
+	ref, err := strmScrapeSourceRef(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	items, err := h.strmScrape.ListItemsByRef(r.Context(), ref, parseStrmScrapeListQuery(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -165,7 +171,9 @@ func (h *Handler) refreshStrmScrapeIndex(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
-		StrmTaskID int64                   `json:"strm_task_id"`
+		StrmTaskID int64 `json:"strm_task_id"`
+		// LocalDirID 非空时优先（本地目录源）。老前端不发这个键。
+		LocalDirID string                  `json:"local_dir_id,omitempty"`
 		Offset     int                     `json:"offset"`
 		Limit      int                     `json:"limit"`
 		Keyword    string                  `json:"keyword"`
@@ -178,7 +186,15 @@ func (h *Handler) refreshStrmScrapeIndex(w http.ResponseWriter, r *http.Request)
 		writeErr(w, err)
 		return
 	}
-	items, err := h.strmScrape.RefreshIndex(r.Context(), req.StrmTaskID, strmscrape.ItemListQuery{
+	ref := strmscrape.WallSourceRef{
+		StrmTaskID: req.StrmTaskID,
+		LocalDirID: strings.TrimSpace(req.LocalDirID),
+	}
+	if ref.StrmTaskID <= 0 && ref.LocalDirID == "" {
+		writeErr(w, domain.Errorf(domain.CodeValidation, "缺少 strm_task_id 或 local_dir_id"))
+		return
+	}
+	items, err := h.strmScrape.RefreshIndexByRef(r.Context(), ref, strmscrape.ItemListQuery{
 		Offset:    req.Offset,
 		Limit:     req.Limit,
 		Keyword:   strings.TrimSpace(req.Keyword),

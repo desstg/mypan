@@ -425,12 +425,20 @@ func scanIndexItems(rows *sql.Rows, ref posterRef) ([]Item, error) {
 
 func readIndexStats(db *sql.DB) (ItemListStats, error) {
 	var stats ItemListStats
+	// ⚠️ 三个 SUM 都要 COALESCE：**空表**时聚合返回 NULL，直接 Scan 进 int 会
+	// "converting NULL to int is unsupported" → 整个列表接口 500。
+	//
+	// 这条以前踩不到，是因为任务源的索引库只在**有作品**时才建；现在的
+	// `refresh-index` 会先给目录建一个空索引再扫（本地目录首屏就是这条路），
+	// 于是「空的 items 表」成了常态：选一个刚挂上、里面还没扫出东西的目录，
+	// 或者**一个作品都没有的目录**，列表就整片报「服务内部错误」。
+	// COUNT(*) 天生返回 0，不受影响。
 	err := db.QueryRow(`
 SELECT
   COUNT(*),
-  SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status = 'miss' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status = 'doubt' THEN 1 ELSE 0 END)
+  COALESCE(SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN status = 'miss' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN status = 'doubt' THEN 1 ELSE 0 END), 0)
 FROM items
 `).Scan(&stats.Total, &stats.OK, &stats.Miss, &stats.Doubt)
 	return stats, err

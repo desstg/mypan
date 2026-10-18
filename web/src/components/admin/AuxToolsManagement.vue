@@ -121,6 +121,24 @@ async function handleDrawerSave() {
           >
             补齐剧照与演员
           </AppButton>
+          <!-- AI 识别刮削：只在**本地目录**源上出现。挂上来的媒体库往往是别的工具
+               产出的，命名千奇百怪，规则解析不出片名 → TMDB 搜不到 → 整批失败；
+               这一颗把那批「认不出的」攒起来问一次 AI，认出来再搜 TMDB 写元数据。
+
+               ⚠️ STRM 任务上不显示（后端也只对本地目录源开 AI）：任务那套的时间与结果
+               必须与改造前一致，而 AI 会多等一次网络往返。
+               ⚠️ AI 没配时**不报错、不提示**（用户明确要求）：那颗按钮照常可点，
+               这次刮削就等于普通刮削。所以这里不去读设置、不弹「先配置 AI」。 -->
+          <AppButton
+            v-if="scrapePanelRef?.isLocalSource"
+            type="button"
+            variant="secondary"
+            :disabled="scrapePanelRef?.running"
+            title="规则认不出片名的那批交给 AI 识别，再拿片名去 TMDB 搜；AI 未配置时等同于普通刮削"
+            @click="scrapePanelRef?.startAIScrape()"
+          >
+            AI 识别刮削
+          </AppButton>
           <AppButton
             v-if="scrapePanelRef?.running"
             type="button"

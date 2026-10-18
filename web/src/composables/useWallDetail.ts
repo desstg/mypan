@@ -86,10 +86,15 @@ export function useWallDetail() {
     }
   }
 
-  /** TMDB 影片墙。 */
-  async function openTMDB(taskId: number, item: StrmScrapeItem) {
-    if (!taskId) return;
-    await present(item.title, () => fetchStrmScrapeItemDetail(taskId, item.id));
+  /**
+   * TMDB 影片墙。`source` 是任务 id 或本地目录源（与 openJav 同形）。
+   *
+   * 两种源的详情接口是同一个，`local_dir_id` 优先（见后端 TMDBWallDetail）；
+   * 老调用点传裸 taskId，行为不变。
+   */
+  async function openTMDB(source: number | WallSourceRef, item: StrmScrapeItem) {
+    if (typeof source === "number" ? !source : !source.local_dir_id && !source.strm_task_id) return;
+    await present(item.title, () => fetchStrmScrapeItemDetail(source, item.id));
   }
 
   /** 番号影片墙。`source` 是任务 id 或本地目录源（见 api 的 WallSourceRef）。 */
