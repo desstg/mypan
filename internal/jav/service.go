@@ -498,19 +498,36 @@ func (s *Service) javdbClient() (JavdbClient, error) {
 //
 // 构造很便宜（一个 *http.Client + 一个 conn），唯一贵的是 timeouts，不占资源。
 //
-// 缓存键与改造前**同一组**（gap / timeout / javbus 基址 / 代理）—— 改了代理不重建
-// 就等于「设置保存了但没生效」。
+// 缓存键：**凡是会进 buildSiteEnrichers 的设置项都必须在这里**。
+//
+// 漏一项的表现是「设置保存了、界面显示已保存，但一个请求都不按新设置发」——
+// 而且**不报错**。真机踩过一次：用户填了 theporndb 的 key 之后怎么刮都还是
+// 刮不出来，因为 key 不在键里、那批客户端还是按「没有 key」建的
+// （`theporndb.Enrich` 没 key 时**立刻返回**、一个 HTTP 都不发）。
+// 用户当时的对照组（改请求间隔保存再改回来）也无效 —— 键里存的是**当前值**，
+// 改回原值就又是同一个键了。见 TestSiteClientKeyCoversEveryOption
+// （拿 siteOptions 的反射字段逐个改值、断言键都变）。
+func (s *Service) siteClientKey() string {
+	return strings.Join([]string{
+		strconv.Itoa(s.settings.Int(settings.KeyJavRequestGapMS)),
+		strconv.Itoa(s.settings.Int(settings.KeyJavTimeoutSec)),
+		s.settings.StringAllowEmpty(settings.KeyJavJavbusBase),
+		// 2026-10-18 补：这两项一直只读了一次、却不在键里。
+		//   - theporndb key：空 → 有名，这一档客户端必须重建（否则 Enrich 永远空转）；
+		//   - FlareSolverr 地址：它是**第三段出口**，改了地址等于换了整条破盾链路；
+		//   - 代理：最后一项（改代理不重建就等于「设置保存了但没生效」）。
+		s.settings.StringAllowEmpty(settings.KeyJavThePornDBKey),
+		s.settings.StringAllowEmpty(settings.KeyStrmFlareSolverrURL),
+		s.proxyURL(),
+	}, "|")
+}
+
 func (s *Service) ensureSiteClients() {
 	if s.settings == nil {
 		return
 	}
 	proxy := s.proxyURL()
-	key := strings.Join([]string{
-		strconv.Itoa(s.settings.Int(settings.KeyJavRequestGapMS)),
-		strconv.Itoa(s.settings.Int(settings.KeyJavTimeoutSec)),
-		s.settings.StringAllowEmpty(settings.KeyJavJavbusBase),
-		proxy,
-	}, "|")
+	key := s.siteClientKey()
 	s.synopsisMu.Lock()
 	defer s.synopsisMu.Unlock()
 	if s.siteEnrichers != nil && s.enricherKey == key {

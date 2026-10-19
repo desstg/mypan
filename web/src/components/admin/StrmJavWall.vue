@@ -14,7 +14,9 @@ import {
   type JavWallScrapeItem,
 } from "@/api/strmJavWall";
 import AppButton from "@/components/base/AppButton.vue";
+import AppContextMenu from "@/components/base/AppContextMenu.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
+import type { DropdownMenuItem } from "@/types/menu";
 import StrmJavMetaDrawer from "@/components/admin/StrmJavMetaDrawer.vue";
 import StrmJavWallDeleteModal from "@/components/admin/StrmJavWallDeleteModal.vue";
 import { confirm } from "@/composables/useConfirm";
@@ -201,8 +203,19 @@ function pickKey(item: JavWallItem): string {
 
 const pickedCount = computed(() => picked.value.size);
 
-/** 这一张卡选上了没。 */
+// ⚠️ 只给**画勾选圈**用（卡片是不是亮着）。而且只认当前这一张卡所在的 tab：
+// 整分类态下「本分类全部选中」，但**别的**分类的卡不该跟着亮（用户会以为下面那些
+// 也会被刮 —— 提交时服务端只认 `category` 那一档，别的分类确实不动）。
+//
+// ⚠️ **两种语义要一起翻面**，判据就是 `wholeCategoryOn`（它与 `picked` 是同一条规矩的
+// 两半：整分类态开着时 `picked` 装的是排除集）：
+//   * 点名态：`picked` 里有 = 选中；
+//   * 整分类态：`picked` 里**有** = 被**排除**了 —— 这一档默认全选，点一下是取消。
+// 写成「有就亮」的话，用户点掉一张卡它会**继续亮着**（而提交时它确实不被刮）。
 function isPicked(item: JavWallItem): boolean {
+  if (wholeCategoryOn.value && item.category === wholeCategory.value) {
+    return !picked.value.has(pickKey(item));
+  }
   return picked.value.has(pickKey(item));
 }
 
@@ -238,6 +251,9 @@ function exitBatchMode() {
   batchMode.value = false;
   picked.value = new Map();
   submittedCount.value = 0;
+  // 「整档都要」也是选择态的一部分，一起撤（它的排除集就是上面那份 picked，
+  // 已经清了；留着标记的话再开批量选择会莫名其妙地「整个分类都要」）。
+  wholeCategory.value = null;
 }
 
 function toggleBatchMode() {
@@ -248,6 +264,13 @@ function toggleBatchMode() {
   else batchMode.value = true;
 }
 
+/**
+ * 点一张卡：加进 / 移出 `picked`。
+ *
+ * ⚠️ 整分类态开着时这一份的语义**翻面**成「这一档里排除掉的」（见上面那一大段），
+ * 所以同一个动作在那时读作「取消这一部」——`isPicked` 在那一档里是取反的，
+ * 视觉与语义对得上（点掉一张卡，勾就没了，提交时它也确实不被刮）。
+ */
 function togglePick(item: JavWallItem) {
   const next = new Map(picked.value);
   const key = pickKey(item);
@@ -266,6 +289,154 @@ function onCardClick(item: JavWallItem) {
   else wall.openJav(props.source, item);
 }
 
+// —— 整个分类（分类 tab 上右键）——
+//
+// 用户 2026-10-19 要求：「点了批量选择之后，一个动作把整个分类选上」（例如「欧美 88 部」）。
+// 入口是**分类 tab 上的右键菜单**（不占工具栏位置），两项：全选本分类 / 取消本分类。
+//
+// ⚠️⚠️ **界面上根本不存在分类的完整成员列表** —— 墙是服务端分页的（200/页），
+// 528 部的分类要滚三屏才全进内存。所以这里**不假装选上了什么**：
+//
+//   * `wholeCategory` 只是「这一档整个都要」这个意思表示，**没有**一堆选中的卡片；
+//   * 提交时发的是 `category=<分类名>`，服务端拿**快照**（那份是全的）去收集目标；
+//   * 这一档里**取消掉的那几部**记在 `picked` 里 —— 它这时是**排除集**，不是选择集。
+//     服务端把两者求差（见 onlineScrapeJavWall 的说明）。这也是「取消几部」唯一
+//     表达得出来的形态：台上算不出「剩下哪几部」，排除集却是精确的。
+//
+// 于是 `picked` 有**两种语义**，由「整分类态开着没有」决定（与服务端 `items`
+// 随 `category` 一起翻转的那条规矩**同源**）：
+//
+//   * `wholeCategory === null` → 「点名的这几部」（老口径，跨 tab 累加）；
+//   * 整分类态开着          → 「这一档里排除掉的这几部」。
+//
+// ⚠️ 整分类态**只属于当前那一档**（下面那条 `category` watcher 会把切走之后的状态清掉）。
+// 刻意的：服务端一次只认一个 `category`，所以「整档欧美 + 另外点名几部有码」这种组合
+// 本来就要分两次跑；与其让按钮上的数对不上实际要刮的东西，不如让它一次只表达一件事。
+//
+// ⚠️ 「全部」那颗按钮与 `""`（根目录）那一档**不给菜单**（见 onCatContextMenu）：前者是
+// 「不过滤」，后者在前端与它撞成同一个值（都写 `category = ""`），点下去表达不出
+// 「只刮根目录那一档」的意思 —— 与其给一个会刮错的入口，不如不给。
+
+/** 整个要刮的分类名（`null` = 没走整分类）。 */
+const wholeCategory = ref<string | null>(null);
+
+/** 当前 tab 的整分类计数（取自 tab 上那个数，就是后端报的整分类部数）。 */
+const activeCatCount = computed(
+  () => categories.value.find((c) => c.name === category.value)?.count ?? 0,
+);
+
+/** 这一档整个都要（整分类态开着，且看的就是这一档）。 */
+const wholeCategoryOn = computed(
+  () => wholeCategory.value !== null && wholeCategory.value === category.value,
+);
+
+/**
+ * 「全选本分类」当前该不该是勾上的：整分类态且一部都没排除。
+ *
+ * ⚠️ 只跟**这一档**有关，所以整分类态看别的 tab 时它是假的（那个 tab 还没整档选）。
+ */
+const wholeCategoryAllPicked = computed(() => wholeCategoryOn.value && picked.value.size === 0);
+
+/**
+ * 现在到底有多少部会被刮（按钮与文案上那个数）。
+ *
+ * ⚠️ 只影响**显示**：真正刮哪些由服务端按 `category` + 排除集算（见 onlineScrape）。
+ * 整分类态下 `picked.size` 是**排除数**，所以是减法 —— 与提交上去的那两个维度同源。
+ */
+const pickedCountDisplay = computed(() => {
+  if (!wholeCategoryOn.value) return picked.value.size;
+  return Math.max(0, activeCatCount.value - picked.value.size);
+});
+
+/**
+ * 「全选本分类」：置一个标记 + **清掉选择集**（那几部在整档里本来就会被刮到）。
+ *
+ * ⚠️ 不清的话它们会当场翻个意思：整分类态下 `picked` 是**排除集**，原来点名的那几部
+ * 会变成「排除掉」—— 用户点一下「全选本分类」，那几部的勾反而没了。
+ *
+ * ⚠️ 清掉的是**整个**选择集，包括别的 tab 上点名的那些（它们在整分类态下发上去也只会
+ * 被当成别的目录的排除项、即无效）。所以要**如实说一句**，别让用户的勾无声消失。
+ */
+function pickWholeCategory() {
+  if (!batchMode.value || category.value === "") return;
+  const dropped = picked.value.size;
+  picked.value = new Map();
+  wholeCategory.value = category.value;
+  if (dropped > 0) {
+    toast.info(`改为整个分类：已放弃之前点名的 ${dropped} 部`);
+  }
+}
+
+/**
+ * 「取消本分类」：取消「整档都要」这个意思表示，并**丢掉那份排除集**。
+ *
+ * ⚠️ 排除集**必须**一起清（它是这个模式的产物）：整分类态一撤，`picked` 立刻恢复成
+ * 「点名要刮的」那一档 —— 留着排除集的话，刚被「整档里排除掉」的那几部会**反过来**
+ * 变成「就是要刮这几部」。
+ *
+ * 撤完之后台上那一档一部都没选（按钮回到「在线刮削」的禁用态），与「我刚取消了整档」
+ * 这件事一致；想只取消几部就别撤销整档，直接点那几张卡（它们在整档里是排除项）。
+ */
+function unpickWholeCategory() {
+  wholeCategory.value = null;
+  picked.value = new Map();
+}
+
+/**
+ * 分类 tab 上的右键菜单。
+ *
+ * ⚠️ 批量选择没开时**根本不打开**（判据在 `onCatContextMenu` 里，那是唯一会把它
+ * 置真的地方）：那个模式下点卡片是勾选，菜单里的两个动作才有意义。
+ */
+const catMenu = ref<{ open: boolean; x: number; y: number; name: string }>({
+  open: false,
+  x: 0,
+  y: 0,
+  name: "",
+});
+
+const catMenuItems = computed<DropdownMenuItem[]>(() => {
+  const all = wholeCategoryAllPicked.value;
+  return [
+    { key: "pick-all", label: "全选本分类", disabled: all, type: "action" },
+    // 没在整分类态时禁用（没有「整档都要」可取消）。
+    { key: "unpick-all", label: "取消本分类", disabled: !wholeCategoryOn.value, type: "action" },
+  ];
+});
+
+/**
+ * 开右键菜单。
+ *
+ * ⚠️ 只有真的会弹时才 `preventDefault()`：批量选择没开（或点在「根目录」那一档）时
+ * 把浏览器的原生右键菜单**留给用户**，而不是吞掉它什么都不出 —— 那看起来像卡了。
+ *
+ * ⚠️ 触摸屏上的「长按」也会走到这里（浏览器发的是 contextmenu）。
+ */
+function onCatContextMenu(name: string, ev: MouseEvent) {
+  if (!batchMode.value || name === "") return;
+  ev.preventDefault();
+  catMenu.value = { open: true, x: ev.clientX, y: ev.clientY, name };
+}
+
+function closeCatMenu() {
+  catMenu.value = { ...catMenu.value, open: false };
+}
+
+/**
+ * 菜单选中：**先切到那一档再执行**，两个动作都以「这一档」为目标。
+ *
+ * ⚠️ 切 tab 会触发重列（`watch([source, category, sort])` → `resetAndLoad()`）。
+ * ⚠️ 但**不能**被「切档就放弃整分类」那条 watcher 清掉 —— 它是靠「值等于新档」放行的
+ * （见那条 watcher 的说明），所以这里的顺序必须是**先切 tab、再置整分类**。
+ */
+function onCatMenuSelect(key: string) {
+  const name = catMenu.value.name;
+  closeCatMenu();
+  category.value = name;
+  if (key === "pick-all") pickWholeCategory();
+  else if (key === "unpick-all") unpickWholeCategory();
+}
+
 // —— 本页全选 ——
 //
 // 放在墙自己的工具条里（分类 tab 那一行右侧），因为它管的是「眼下这一页」——
@@ -275,8 +446,29 @@ const pageAllPicked = computed(
   () => items.value.length > 0 && items.value.every((it) => isPicked(it)),
 );
 
+/**
+ * 整分类态下「本页全部被排除」了没。
+ *
+ * ⚠️ 整分类态里 `pageAllPicked` **恒为真**（整档的卡片都画成选中），那颗按钮若还照旧
+ * 写「取消本页全选」、点了却什么都不做，看起来就是个坏按钮。所以那一档里它换一套
+ * 语义：**排除本页 / 恢复本页**（同一份 `picked`，在这里是排除集）。
+ */
+const pageAllExcluded = computed(
+  () => items.value.length > 0 && items.value.every((it) => picked.value.has(pickKey(it))),
+);
+
 function togglePageAll() {
   const next = new Map(picked.value);
+  if (wholeCategoryOn.value) {
+    // 整分类态：按钮管的是「这一页在排除集里要不要整页加/整页减」。
+    if (pageAllExcluded.value) {
+      for (const it of items.value) next.delete(pickKey(it));
+    } else {
+      for (const it of items.value) next.set(pickKey(it), { rel_dir: it.rel_dir, stem: it.stem });
+    }
+    picked.value = next;
+    return;
+  }
   if (pageAllPicked.value) {
     for (const it of items.value) next.delete(pickKey(it));
   } else {
@@ -300,16 +492,26 @@ let onlinePollTimer: number | undefined;
 /**
  * 在线刮削：打上游把**缺的**元数据补齐，写回 json 与 nfo。
  *
- * 两种口径（用户拍板）：
+ * 三种口径（用户拍板）：
  *   * **批量选择没开** → 整根 + 确认弹窗（老行为逐字不变）；
- *   * **开着** → 只刮勾中的那几部（勾选本身就是明确表达，不再弹确认）。
- *     开着但一部没勾时按钮是禁用的，这里再兜一道守卫。
+ *   * **开着** → 只刮那几部（勾选本身就是明确表达，不再弹确认）；
+ *   * **整分类态**（分类 tab 上右键「全选本分类」）→ 刮**整个分类**：发 `category`，
+ *     台上那几部勾这时是**排除集**（服务端求差，见上面那段说明）。
+ *
+ * ⚠️ 整分类那条路的部数**不由前端算**：台上只有当前那几页，`cat.count`（后端给的整分类
+ * 计数）才是整档的数；收尾文案的分母也来自服务端（`category_matched`）。
  */
 async function onlineScrape() {
   if (!props.source || onlineScraping.value) return;
   const batch = batchMode.value;
+  // 整分类那条路**只对当前那一档**生效（见上面那段说明）。
+  const cat = batch && wholeCategoryOn.value ? category.value : null;
+  // ⚠️ 两套语义的取舍就在这里：`cat === null` 时 items 是「要刮的」，
+  // 有 cat 时它是「要排除的」—— 与后端 items 随 category 翻面的那条规矩同源。
   const pickedItems = batch ? [...picked.value.values()] : [];
-  if (batch && pickedItems.length === 0) return; // 按钮已禁用，防误触
+  // 「开着但一部没勾」时按钮是禁用的（整分类态下它显示的是「整档减掉几部」，
+  // 那几部全被排除光时也确实没得刮）。这里再兜一道守卫。
+  if (batch && pickedItems.length === 0 && cat === null) return;
   if (!batch) {
     try {
       await confirm({
@@ -357,7 +559,15 @@ async function onlineScrape() {
   try {
     // **起任务**（接口立刻返回，活在后头跑）。结果从进度里读 —— 见 startOnlinePoll。
     // http.post 的第二参是 body、第三参才是 query（见 onlineScrapeJavWall）。
-    const res = await onlineScrapeJavWall(props.source, batch ? pickedItems : undefined);
+    //
+    // ⚠️ 整分类态下 `pickedItems` 是**排除集**（上面那段说明）—— 服务端拿到 `category`
+    // 之后就这么理解它。**一部都没排除时也要把这个空数组发上去**：那是「这一档全要」
+    // 的合法表达（见 onlineScrapeJavWall 里那条 `items && category !== undefined`）。
+    const res = await onlineScrapeJavWall(
+      props.source,
+      batch ? pickedItems : undefined,
+      cat ?? undefined,
+    );
     if (res?.not_started) {
       // 服务端那边已经有一条在跑（读进度与这次 POST 之间被人插了一脚）——
       // 这一轮的选择**根本没提交**，如实说清楚，并且**不认领**那条任务的收尾。
@@ -366,14 +576,20 @@ async function onlineScrape() {
       startOnlinePoll(undefined, baseline);
       return;
     }
-    // 真的起了自己的任务：记下「这一轮刮的是我提交的那几部」，收尾时据此清场。
+    // 真的起了自己的任务：记下「这一轮提交的是什么」，收尾时据此清场。
     if (batch) {
       pendingBatchItems = pickedItems;
-      submittedCount.value = pickedItems.length;
+      // 按钮上那个数用**提交上去的意思**，不是台上的勾数：整分类态下它是整档的部数
+      // （`pickedCountDisplay` 已经按那一档算好了）。
+      submittedCount.value = pickedCountDisplay.value;
       // 立刻清掉选择集与选择态：选择属于「提交前」，
       // 而收尾那几条分支靠 `pendingBatchItems` 这份独立副本，不依赖这里的勾。
       batchMode.value = false;
       picked.value = new Map();
+      // ⚠️ 整分类态**也要清**（与上面 `picked` 同一个道理，而且更隐蔽）：
+      // 它不进 `pendingBatchItems`，留着的话收尾清场只把 `batchMode` 关掉、它原样还在 ——
+      // 用户重新开批量选择时会**莫名其妙地整档都在要**（而台上一个勾都没有）。
+      wholeCategory.value = null;
     }
     // 不在这里等：轮询那条路会在 running 变 false 时弹结果并收尾。
     startOnlinePoll(undefined, baseline);
@@ -449,17 +665,26 @@ function startOnlinePoll(
         if (r.images) parts.push(`补图 ${r.images} 张`);
         if (r.skipped) parts.push(`跳过 ${r.skipped} 部`);
         if (r.failed) parts.push(`失败 ${r.failed} 部`);
+        // 「上游没有这一部」单独说（后端单独计数，见 JavWallOnlineScrapeResult.not_found）。
+        // 不说的话，用户只能看到「跳过 43 部」—— 那读起来像漏刮，实际是那批片
+        // JAVDB 与整条补缺链都不收录（换源或认命，改本地文件改不出来）。
+        if (r.not_found) parts.push(`其中 ${r.not_found} 部上游根本没有`);
+        // ⚠️ **报数的分母**：整分类那一轮后端会给 `category_matched`（整档一共几部）。
+        // 不能拿 `r.total` —— 整分类态下它按老口径回显的是**排除集**的长度
+        // （见 backend 那边的 `out.Total = len(items)`），于是「整档 88 部、排除了 3 部」
+        // 会被说成「提交 3 部、其中 85 部已不在墙上」，等于把用户吓一跳。
+        const denom = r.category_matched && r.category_matched > 0 ? r.category_matched : r.total;
         // 报名（0 部）那两档单独说，别报「补到 0 部」—— 那读起来像「一切正常」。
         // ⚠️ 判据从**服务端**来（见 JavWallOnlineScrapeResult.matched）：
         // 前端手上只有当前分类这一页，跨分类勾选时它自己数必然误判。
         if (r.matched === 0) {
           toast.error(
-            r.total > 0
-              ? `在线刮削完成：提交的 ${r.total} 部一部都没找到（可能已重命名或删除），没有补到任何东西`
+            denom > 0
+              ? `在线刮削完成：提交的 ${denom} 部一部都没找到（可能已重命名或删除），没有补到任何东西`
               : "在线刮削结束：这个数据源目录里没有扫到任何番号影片",
           );
         } else {
-          const missed = Math.max(0, r.total - r.matched);
+          const missed = Math.max(0, denom - r.matched);
           if (missed > 0) parts.push(`${missed} 部已不在墙上（可能已重命名或删除）`);
           toast.success(`在线刮削完成：${parts.join("，")}`);
         }
@@ -481,6 +706,8 @@ function startOnlinePoll(
       if (submitted) {
         batchMode.value = false;
         picked.value = new Map();
+        // 整分类态与 `picked` 是一对（前者是意思表示、后者是排除集），一起清。
+        wholeCategory.value = null;
       }
       await load();
     } catch {
@@ -508,13 +735,22 @@ const onlineProgress = ref<{ done: number; total: number } | null>(null);
 /**
  * 「在线刮削」那颗按钮的文案。
  *
- * 批量选择开着且勾了 N 部 → 「刮削选中（N）」。N 取**提交那一刻冻结**的那个值
- * （`submittedCount`）：提交成功后选择集就清了，实时数会立刻掉成 0，
- * 而那几部正在后头刮着 —— 按钮上写着「刮削选中（0）」是自相矛盾的。
+ * 批量选择开着 → 「刮削选中（N）」。**N 取 `pickedCountDisplay`**（不是 `picked.size`）：
+ * 整分类态下台上那几部勾是**排除集**，真正要刮的是「整档减掉排队的那些」，
+ * 直接报 `picked.size` 会说成「刮削选中（3）」而实际要跑 85 部。
+ *
+ * 整分类态还带上**档名**（`刮削选中（欧美 88）`）—— 那颗按钮长在页头，离墙上那句
+ * 「整个分类欧美」有一段距离，光一个数字看不出这一轮刮的是哪一档。
+ *
+ * 刮削中那个数取**提交那一刻冻结**的值（`submittedCount`）：提交成功后选择集就清了，
+ * 实时数会立刻掉成 0，而那几部正在后头刮着 —— 按钮上写着「刮削选中（0）」是自相矛盾的。
  */
 const onlineScrapeLabel = computed(() => {
   if (!onlineScraping.value) {
-    return pickedCount.value > 0 ? `刮削选中（${pickedCount.value}）` : "在线刮削";
+    const n = pickedCountDisplay.value;
+    if (n <= 0) return "在线刮削";
+    if (wholeCategoryOn.value) return `刮削选中（${category.value} ${n}）`;
+    return `刮削选中（${n}）`;
   }
   const p = onlineProgress.value;
   if (p && p.total > 0) return `刮削中… (${p.done}/${p.total})`;
@@ -523,16 +759,27 @@ const onlineScrapeLabel = computed(() => {
 });
 
 /**
- * 「在线刮削」在**批量选择开着但一部没勾**时禁用。
+ * 「在线刮削」在**批量选择开着但一部都没得刮**时禁用。
  *
- * 用户拍板的口径：这时点它既不该整根（那是没开批量选择时的行为），也不该什么都不做
- * ——禁用 + title 说清「勾几部，或关掉批量选择」比一个点了没反应的按钮好。
+ * 三档（见 pickedCountDisplay）：
+ *   * 点名态（`batch && picked.size === 0`）→ 禁用，用户拍板的口径；
+ *   * 整分类态 → 按 `pickedCountDisplay` 判（整档 88 部时**不**禁用；把 88 部全排除光了才禁用）；
+ *   * 没开批量选择 → 不禁用（整根那条路）。
  */
-const onlineScrapeDisabled = computed(() => batchMode.value && pickedCount.value === 0);
+const onlineScrapeDisabled = computed(() => batchMode.value && pickedCountDisplay.value === 0);
 
-/** 页头「批量选择」那颗按钮的文案（开了显示已选部数）。 */
+/**
+ * 页头「批量选择」那颗按钮的文案（开了显示已选部数）。
+ *
+ * ⚠️ 整分类态下如实说「整个分类」—— 报一个排除数（「已选 3 部」）会让用户点下去
+ * 之前以为只刮 3 部。
+ */
 const batchModeLabel = computed(() => {
   if (!batchMode.value) return "批量选择";
+  if (wholeCategoryOn.value) {
+    const n = pickedCountDisplay.value;
+    return `批量选择（整个分类 ${n} 部${picked.value.size > 0 ? `，已排除 ${picked.value.size}` : ""}）`;
+  }
   return pickedCount.value > 0 ? `批量选择（已选 ${pickedCount.value} 部）` : "批量选择（点卡片勾选）";
 });
 
@@ -934,6 +1181,9 @@ watch(() => props.source, () => {
   picked.value = new Map();
   pendingBatchItems = null;
   submittedCount.value = 0;
+  // 分类名是**按这个源盘上的目录**算出来的，换源之后同样作废。
+  wholeCategory.value = null;
+  catMenu.value = { ...catMenu.value, open: false };
   void adoptRunningScrape();
 });
 // 重列：换任务 / 换分类 / 换排序都走这一条。
@@ -952,6 +1202,26 @@ watch(() => props.source, () => {
 // 重列期间 `loading` 为真、模板会把整片网格换成「加载中…」，所以旧卡片不会
 // 停在屏幕上被点到。
 watch([() => props.source, category, () => props.sort], resetAndLoad);
+
+/**
+ * 切 tab：只有「切到**别的**档」才放弃整分类态。
+ *
+ * ⚠️ 判据必须是 `wholeCategory !== next`，不能是「`wholeCategory` 非空就清」——
+ * 菜单那条路是**先切 tab 再置整分类**（见 onCatMenuSelect），赋值本身会触发这个
+ * watcher（watcher 在 flush 时看到的是已经置好的新值）。写成「非空就清」的话，
+ * 右键「全选本分类」会当场把自己清掉，用户看到的就是「点了没反应」。
+ *
+ * ⚠️ 换档要连**排除集**一起丢：`picked` 在整分类态下是**排除集**，只对原来那一档
+ * 有意义。留着它跨档的话，切换到新档时那些勾会当场翻面成「点名要刮的这几部」。
+ */
+watch(category, (next) => {
+  if (wholeCategory.value !== null && wholeCategory.value !== next) {
+    wholeCategory.value = null;
+    picked.value = new Map();
+  }
+  // 切档时把右键菜单收掉（它浮在旧位置，动作里的「本分类」也已经是旧档）。
+  catMenu.value = { ...catMenu.value, open: false };
+});
 // 关键词来自页头那个输入框：那边是 v-model 直连，这里跟着 prop 变就重列（防抖）。
 let keywordTimer: number | undefined;
 watch(() => props.keyword, () => {
@@ -1040,6 +1310,14 @@ defineExpose({
   pickedCount: computed(() => picked.value.size),
   toggleBatchMode,
   onlineScrapeDisabled,
+  // 整分类那档（2026-10-19）：按钮上的部数现在要按「整档 / 整档减几部」算，
+  // 页头那颗「批量选择（已选 N 部）」若还读 `pickedCount`（排除集长度）会说反。
+  // `pickedCountDisplay` 是 computed，本来就是值；`wholeCategory` 是 ref，要包一层。
+  pickedCountDisplay,
+  wholeCategory: computed(() => wholeCategory.value),
+  // 菜单的两个动作也抛出去：将来别的入口（工具栏 / 快捷键）想复用，不必再进来找。
+  pickWholeCategory,
+  unpickWholeCategory,
 });
 </script>
 
@@ -1061,13 +1339,17 @@ defineExpose({
         >
           全部
         </button>
+        <!-- 分类 tab。批量选择开着时**右键 / 长按**出「全选本分类 / 取消本分类」——
+             入口放在 tab 上而不是工具栏里，是因为它管的就是「这一档」，语义贴着走。 -->
         <button
           v-for="cat in categories"
           :key="cat.name"
           type="button"
           class="jav-tab"
           :class="{ 'jav-tab--active': category === cat.name }"
+          :title="batchMode && cat.name ? '右键：全选 / 取消整个分类' : undefined"
           @click="category = cat.name"
+          @contextmenu="onCatContextMenu(cat.name, $event)"
         >
           {{ cat.name || "根目录" }}<span class="jav-tab__count">{{ cat.count }}</span>
         </button>
@@ -1078,6 +1360,11 @@ defineExpose({
            一排一排地点太慢（一页 200 张），而它管的就是「眼下这一页」：
            跨分类累加要靠用户自己切 tab 再点一次，语义清楚。 -->
       <div class="jav-wall__tools">
+        <!-- 整分类态一句话说清「在刮什么」：这个模式下**台上没有满屏的勾**
+             （分类的全部成员前台根本拿不到），不给句话用户会以为没选上。 -->
+        <span v-if="batchMode && wholeCategoryOn" class="jav-wall__whole-hint">
+          整个分类{{ category }}{{ picked.size > 0 ? `（已排除 ${picked.size} 部）` : "" }}
+        </span>
         <button
           v-if="batchMode"
           type="button"
@@ -1085,7 +1372,12 @@ defineExpose({
           :disabled="!items.length"
           @click="togglePageAll"
         >
-          {{ pageAllPicked ? "取消本页全选" : `全选本页（${items.length}）` }}
+          <template v-if="wholeCategoryOn">
+            {{ pageAllExcluded ? `恢复本页（${items.length}）` : `排除本页（${items.length}）` }}
+          </template>
+          <template v-else>
+            {{ pageAllPicked ? "取消本页全选" : `全选本页（${items.length}）` }}
+          </template>
         </button>
         <div class="jav-wall__view" role="group" aria-label="视图切换">
           <button
@@ -1273,6 +1565,16 @@ defineExpose({
       @close="deleting = null"
       @deleted="onDeleted"
     />
+
+    <!-- 分类 tab 的右键菜单（批量选择没开时 `open` 恒假 → 什么都不弹）。 -->
+    <AppContextMenu
+      :open="catMenu.open"
+      :x="catMenu.x"
+      :y="catMenu.y"
+      :items="catMenuItems"
+      @select="onCatMenuSelect"
+      @close="closeCatMenu"
+    />
   </div>
 </template>
 
@@ -1402,4 +1704,7 @@ defineExpose({
 }
 .jav-wall__pickall:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
 .jav-wall__pickall:disabled { opacity: 0.5; cursor: default; }
+/* 整分类态的提示：这个模式下台上**没有满屏的勾**（分类的全部成员前端拿不到），
+   所以得有一句话替它说「现在要刮的是整个这一档」。与「全选本页」同高。 */
+.jav-wall__whole-hint { font-size: 12px; color: var(--brand); }
 </style>

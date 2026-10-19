@@ -1121,10 +1121,27 @@ func (s *Service) ingestByNumber(ctx context.Context, number string, force bool)
 			return s.ingestMovieDetailOnly(ctx, m.ID)
 		}
 	}
-	// 没有精确命中时退回第一条 —— 用户已经明确输入了番号，
-	// 给他「未找到」不如给他最接近的那条让他自己判断。
+	// 没有精确命中：**不再退回第一条**（2026-10-18，用户要求「所有档位都收紧」）。
+	//
+	// # 为什么原来那条「给他最接近的一条」必须去掉
+	//
+	// 搜索是模糊的：`vixen.26.09.19` 搜回来的第一条可能是 `vixen.20.09.19`。
+	// 退回第一条 = 拿**另一部片**的详情入库，而且**写进这个番号的侧车与 nfo**。
+	// 真机踩到的就是这个：`tushy.26.09.06` 被写成 `tushy.20.09.06 Revenge`、
+	// `blacked.26.09.05` → `blacked.20.09.05 After Work`、
+	// `brazzersexxtra.26.03.19` → `BrazzersExxtra.20.03.19 Used`。
+	// 那一堆错误的侧车比「什么都没刮到」难收拾得多 —— 用户看到的是
+	// 「刮到了」，实际拿到的是别人的片名、封面、演员。
+	//
+	// 「番号对不上」在这条路上**就是上游没有这一部**（返回 CodeNotFound，
+	// 与搜索 0 结果完全同义）：在线刮削那边会把它记成 `NotFound`，
+	// 详情页那条直通口会照实报「没有找到番号」。
+	//
+	// ⚠️ 不报 CodeValidation 之类更「软」的码：那是输入有问题，这是上游没有，
+	// 两者的处置完全不同（一个该让用户改输入，一个该让用户接受）。
 	if len(movies) > 0 {
-		return s.ingestMovieDetailOnly(ctx, movies[0].ID)
+		return nil, domain.Errorf(domain.CodeNotFound,
+			"没有找到番号 %s（上游有 %d 条近似结果，番号都对不上）", number, len(movies))
 	}
 	return nil, domain.Errorf(domain.CodeNotFound, "没有找到番号 %s", number)
 }

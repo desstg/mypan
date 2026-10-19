@@ -381,7 +381,7 @@ func TestStartJavWallOnlineScrapeRunsInBackground(t *testing.T) {
 
 	svc := &Service{strm: &strm.Service{}}
 	// jav 为 nil：守卫要在**起任务之前**返回错误（进去之后错误只能落在进度里）。
-	if _, err := svc.StartJavWallOnlineScrape(context.Background(), WallSourceRef{StrmTaskID: 1}, nil); err == nil {
+	if _, err := svc.StartJavWallOnlineScrape(context.Background(), WallSourceRef{StrmTaskID: 1}, nil, nil); err == nil {
 		t.Fatal("番号服务未装配该报错")
 	}
 }
@@ -689,5 +689,161 @@ func TestJavScrapeTargetsForItemsSkipsUnreadableDir(t *testing.T) {
 	got := javScrapeTargetsForItems(root, []JavWallScrapeItem{{RelDir: "没这个目录", Stem: "X-1"}}, tokens, brands)
 	if len(got) != 0 {
 		t.Fatalf("目录不存在时该跳过，得到 %+v", got)
+	}
+}
+
+// ————————————— «整分类»（2026-10-19） —————————————
+//
+// 这一组钉的是「全选整个分类」那条路。判据全是**纯函数**（`javTargetMode` /
+// `javScrapeExcludeSet`）+ 一条走真快照的收集用例 —— 真机跑一轮整分类是十几分钟，
+// 档位判错的代价太大，必须在这里钉死。
+
+// TestJavTargetModeTruthTable 四档矩阵。
+//
+// ⚠️ 三个容易写反的点，每一条都对应一种真实的用户动作：
+//   - `category` 是**指针**：空串是合法值（根目录那一档），拿 `!= ""` 判会整档漏掉；
+//   - `category` 压过 `items`：前端「全部取消」发的是 `items: [], category: "欧美"`,
+//     那是「这档我全不要了」，不是「一部都没选」；
+//   - `items` 为 nil 与空切片同义（区别只在 HTTP 契约那一层）。
+func TestJavTargetModeTruthTable(t *testing.T) {
+	empty := ""
+	cat := "欧美"
+	two := []JavWallScrapeItem{{RelDir: "欧美", Stem: "A"}, {RelDir: "欧美", Stem: "B"}}
+
+	cases := []struct {
+		name     string
+		items    []JavWallScrapeItem
+		category *string
+		want     JavTargetMode
+	}{
+		{"都没有 = 整根", nil, nil, JavTargetWholeRoot},
+		{"空切片也当整根", []JavWallScrapeItem{}, nil, JavTargetWholeRoot},
+		{"点名", two, nil, JavTargetNamed},
+		{"整分类", nil, &cat, JavTargetCategory},
+		{"空 items + 分类 = 整分类", []JavWallScrapeItem{}, &cat, JavTargetCategory},
+		{"分类 + 排除集", two, &cat, JavTargetCategoryMinusItems},
+		{"空串分类合法（根目录那一档）", nil, &empty, JavTargetCategory},
+		{"空串分类 + 排除集", two, &empty, JavTargetCategoryMinusItems},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := javTargetMode(tc.items, tc.category); got != tc.want {
+				t.Fatalf("javTargetMode = %v，期望 %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJavScrapeExcludeSetNormalizes 排除集的键必须与比对口径**同源**。
+//
+// 归一化走 `normalizeJavRelDir`（列表侧、单品侧同一个函数）：大小写、斜杠、
+// 首尾斜杠的差异都在那里统一。自己 `filepath.Clean` 或按原样存，排除就会静默漏掉
+// —— 表现是「点了取消、那几部还是被刮了」，而那种错不报任何东西。
+func TestJavScrapeExcludeSetNormalizes(t *testing.T) {
+	set := javScrapeExcludeSet([]JavWallScrapeItem{
+		{RelDir: "欧美", Stem: "Tushy.26.09.06"},
+		{RelDir: "/欧美/", Stem: "blacked.26.09.05"}, // 周围斜杠要归一掉
+		{RelDir: "国产", Stem: "  "},                 // 空 stem：丢掉
+		{RelDir: "../etc", Stem: "X"},              // 相对穿越：归一化后为空但原文非空 → 丢掉
+		{RelDir: "有码", Stem: "a/b"},                // stem 含斜杠：丢掉
+	})
+	if len(set) == 0 {
+		t.Fatal("至少该收下两条合法项")
+	}
+	if !set["欧美"]["tushy.26.09.06"] {
+		t.Errorf("精确命中该在集合里：%v", set)
+	}
+	// 小写键：比对时两边都过 ToLower，所以存的是小写形态。
+	if !set["欧美"]["blacked.26.09.05"] {
+		t.Errorf("归一化后的 rel_dir 该是「欧美」：%v", set)
+	}
+	if _, ok := set["国产"]; ok {
+		t.Errorf("空 stem 不该建桶：%v", set)
+	}
+	for rel, stems := range set {
+		for stem := range stems {
+			if strings.ContainsAny(stem, `/\`) || stem == "" {
+				t.Errorf("非法坐标漏进来了：%q / %q", rel, stem)
+			}
+		}
+	}
+	if javScrapeExcludeSet(nil) != nil {
+		t.Error("没有排除项时该返回 nil（调用方拿它当「没有排除」）")
+	}
+}
+
+// TestJavScrapeTargetsForCategoryCollectsWholeTab 整分类收集：含隐藏档、按 stem 稳定排序、
+// 排除集精确生效。
+//
+// 真快照跑（`buildJavWallSnapshot`），所以顺带钉住「所见即所选」：
+// 墙上有几张卡，这里就该收几条 —— 隐藏档**照样收**（与整根刮削同口径，见函数注释）。
+func TestJavScrapeTargetsForCategoryCollectsWholeTab(t *testing.T) {
+	root := t.TempDir()
+	writeJavLibrary(t, root)
+
+	// ⚠️ `javWallCache` 必须自己建：`javWallRows` 命中/写入缓存都是往这个 map 里写，
+	// 裸 `&Service{}` 会让它 panic（与上面 `javTitleCache` 同一条规矩）。
+	svc := &Service{javTitleCache: map[string]javTitleEntry{}, javWallCache: map[string]*javWallSnapshot{}}
+	src := &wallSrc{Kind: "task", Root: root, MediaKind: javMediaKind, TaskID: 1}
+	tokens, brands := svc.javScrapeStationTokens()
+
+	// ① 整档「国产」：三个分片全收，按 stem 升序。
+	got, matched := svc.javScrapeTargetsForCategory(context.Background(), src, "国产", nil, tokens, brands)
+	if matched != 3 {
+		t.Fatalf("「国产」共 3 部，得到 %d", matched)
+	}
+	var stems []string
+	for _, g := range got {
+		stems = append(stems, g.stem)
+		if g.category != "国产" {
+			t.Errorf("category 该是「国产」：%+v", g)
+		}
+		if g.names.NFO == "" {
+			t.Errorf("names 必须算出来（否则写出的 nfo 文件名会与整根那条路分家）：%+v", g)
+		}
+	}
+	want := []string{"91CM-109-cd1", "91CM-109-cd2", "91CM-109-cd3"}
+	if strings.Join(stems, ",") != strings.Join(want, ",") {
+		t.Fatalf("stem 顺序 = %v，期望 %v", stems, want)
+	}
+
+	// ② 排除集：减掉 cd2 之后剩两条，`matched` 仍是「这一档一共几部」（3）。
+	got2, matched2 := svc.javScrapeTargetsForCategory(context.Background(), src, "国产",
+		[]JavWallScrapeItem{{RelDir: "国产/91CM-109", Stem: "91CM-109-cd2"}}, tokens, brands)
+	if matched2 != 3 {
+		t.Errorf("matched 是排除**之前**的档内总数，该是 3，得到 %d", matched2)
+	}
+	if len(got2) != 2 {
+		t.Fatalf("排除一部后该剩 2，得到 %d（%+v）", len(got2), got2)
+	}
+	for _, g := range got2 {
+		if g.stem == "91CM-109-cd2" {
+			t.Error("被排除的那部不该出现")
+		}
+	}
+
+	// ③ 排除整个分类 = 空（这是前端「取消本分类」的终局形态，不该报错）。
+	all := make([]JavWallScrapeItem, 0, len(got))
+	for _, g := range got {
+		all = append(all, JavWallScrapeItem{RelDir: "国产/91CM-109", Stem: g.stem})
+	}
+	got3, matched3 := svc.javScrapeTargetsForCategory(context.Background(), src, "国产", all, tokens, brands)
+	if len(got3) != 0 || matched3 != 3 {
+		t.Fatalf("全排除后该是空、matched 仍是 3，得到 %d / %d", len(got3), matched3)
+	}
+
+	// ④ 隐藏档**照样收**（与整根刮削同口径）。
+	hiddenGot, hiddenMatched := svc.javScrapeTargetsForCategory(context.Background(), src, "未匹配", nil, tokens, brands)
+	if hiddenMatched != 1 || len(hiddenGot) != 1 {
+		t.Fatalf("隐藏档也该收：得到 %d / %d", hiddenMatched, len(hiddenGot))
+	}
+
+	// ⑤ 空串分类 = 根目录下散落的那一档（合法值，不是「全部」）。
+	scatter, scatterMatched := svc.javScrapeTargetsForCategory(context.Background(), src, "", nil, tokens, brands)
+	if scatterMatched != 1 || len(scatter) != 1 {
+		t.Fatalf("根目录那一档该收 1 部：得到 %d / %d", scatterMatched, len(scatter))
+	}
+	if scatter[0].stem != "SCATTER-001" {
+		t.Errorf("根目录那部的 stem = %q", scatter[0].stem)
 	}
 }

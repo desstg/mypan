@@ -206,6 +206,8 @@ const javWallRef = ref<{
   batchMode?: boolean;
   batchModeLabel?: string;
   pickedCount?: number;
+  /** 要刮的部数（整分类态下是「整档减掉排除的」，与 `pickedCount` 不是一回事）。 */
+  pickedCountDisplay?: number;
   toggleBatchMode?: () => void;
   onlineScrapeDisabled?: boolean;
 } | null>(null);
@@ -1222,6 +1224,10 @@ defineExpose({
   batchMode: computed(() => Boolean(javWallRef.value?.batchMode)),
   batchModeLabel: computed(() => javWallRef.value?.batchModeLabel ?? "批量选择"),
   pickedCount: computed(() => javWallRef.value?.pickedCount ?? 0),
+  // 整分类那档（分类 tab 上右键「全选本分类」）：页头那颗按钮上的部数要用它 ——
+  // 整分类态下 `pickedCount` 是**排除集**的长度，拿它报数会把「整档 88 部」
+  // 说成「刮削选中（3）」。
+  pickedCountDisplay: computed(() => javWallRef.value?.pickedCountDisplay ?? 0),
   toggleBatchMode: () => javWallRef.value?.toggleBatchMode?.(),
   onlineScrapeDisabled: computed(() => Boolean(javWallRef.value?.onlineScrapeDisabled)),
   // 父组件（辅助工具页）要用它决定页头那几个按钮显不显示：番号那面跑 TMDB 刮削

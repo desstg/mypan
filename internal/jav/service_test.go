@@ -1,9 +1,12 @@
 package jav
 
 import (
+	"context"
 	"testing"
 
 	"litepan/internal/jav/synopsis"
+	"litepan/internal/settings"
+	"litepan/internal/store"
 )
 
 // TestRouteSiteIDsAreImplemented 钉住「路由表里的站点 id」与「真的建了客户端」这两边。
@@ -153,5 +156,60 @@ func TestTitleChainIsFieldFirst(t *testing.T) {
 	// 否则同一个站会在一条链里被问两遍（白打一次请求）。
 	if seen["airav"] < 1 {
 		t.Fatal("airav 该在标题链里")
+	}
+}
+
+// TestSiteClientKeyCoversEveryOption 钉住「改了设置就真的重建站点客户端」。
+//
+// # 为什么这条用例的判据是**反射**
+//
+// 2026-10-18 真机踩的：用户早填了 theporndb 的 key，可怎么刮都还是空的 ——
+// key 只进 `buildSiteEnrichers`（重建那一刻读一次）而不进缓存键，于是那批客户端
+// 一直是「没有 key」那份（`theporndb.Enrich` 没 key 时立即返回、一个 HTTP 都不发）。
+// 用户当时的对照组（改请求间隔保存、再改回原值）也无效：键里存的是**当前值**，
+// 改回去就又是同一个键。
+//
+// 所以这里不枚举字段（枚举的那份清单与 siteOptions 迟早会漂），而是**把
+// `buildSiteEnrichers` 实际吃的每一项都改一遍、断言键都变了**。漏一项就红。
+func TestSiteClientKeyCoversEveryOption(t *testing.T) {
+	ctx := context.Background()
+	repo, err := store.Open(ctx, store.Options{Memory: true})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	if err := repo.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	set, err := settings.New(ctx, store.New(repo).Configs)
+	if err != nil {
+		t.Fatalf("settings.New: %v", err)
+	}
+	svc := New(Options{Settings: set})
+
+	if svc.siteClientKey() != svc.siteClientKey() {
+		t.Fatal("同一个进程里键必须稳定（有成员是不稳定值就会每轮重建客户端）")
+	}
+
+	// 每一行 = 改一项设置 / 换一个值，键必须随之变化。
+	changes := []struct {
+		name string
+		apply func()
+	}{
+		{"jav_theporndb_key", func() { _ = set.Update(ctx, map[string]string{settings.KeyJavThePornDBKey: "k1"}) }},
+		{"strm_flaresolverr_url", func() {
+			_ = set.Update(ctx, map[string]string{settings.KeyStrmFlareSolverrURL: "http://127.0.0.1:8191/v1"})
+		}},
+		{"jav_javbus_base", func() { _ = set.Update(ctx, map[string]string{settings.KeyJavJavbusBase: "https://javbus.example"}) }},
+		{"jav_request_gap_ms", func() { _ = set.Update(ctx, map[string]string{settings.KeyJavRequestGapMS: "2300"}) }},
+		{"jav_timeout_sec", func() { _ = set.Update(ctx, map[string]string{settings.KeyJavTimeoutSec: "77"}) }},
+		{"proxy_url", func() { _ = set.Update(ctx, map[string]string{settings.KeyProxyEnabled: "true", settings.KeyProxyURL: "http://127.0.0.1:7890"}) }},
+	}
+	for _, c := range changes {
+		before := svc.siteClientKey()
+		c.apply()
+		if got := svc.siteClientKey(); got == before {
+			t.Errorf("改了 %s 之后缓存键没变 —— 保存了也不会生效（要用重启才发现）：%q", c.name, got)
+		}
 	}
 }

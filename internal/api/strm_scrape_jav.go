@@ -301,15 +301,31 @@ func (h *Handler) rebuildJavWallItem(w http.ResponseWriter, r *http.Request) {
 //   - **带了、非空** → 只刮点名的这几部；
 //   - **带了、空数组** → **校验错误**，绝不静默退化成整根 ——
 //     用户明明说「一部都没选」，服务端却把整个库跑一遍，那是十几分钟的白等。
+//
+// # category（整分类，2026-10-19 加的）
+//
+//   - **不带这个键**（`nil`）→ 与以前逐字相同；
+//   - **带了**（含空串 —— 空串是**根目录**那一档，合法值）→ 刮**整个分类**。
+//
+// ⚠️ 与 `items` 同时给时，`items` 的角色**从「要刮的」变成「要排除的」**：
+// 「这个分类里除了这几部以外都要」。理由是前端手上只有当前那一页 —— 分类的完整
+// 成员只有服务端快照里有，所以「取消」只能靠排除表达（见 JavTargetMode）。
+//
+// ⚠️ 上面那条「空数组 = 校验错误」只适用于**没有** `category` 的时候：
+// 带 category 时空数组是合法输入（= 整个分类都要，没有排除项）——
+// 前端在「全部取消」时就会发 `items: [], category: "欧美"`，那只是把这一档清空，
+// 不是「一部都没选」。硬报 400 会让「取消整个分类」这个动作在服务端炸掉。
 func (h *Handler) onlineScrapeJavWall(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
 		return
 	}
-	// ⚠️ items **必须内嵌在外层**：解内嵌字段的话它会变成 unknown field
+	// ⚠️ items / category **必须内嵌在外层**：解内嵌字段的话它们会变成 unknown field
 	// （见 javWallRef 上方那段说明）。
 	var body struct {
 		javWallRef
 		Items *[]strmscrape.JavWallScrapeItem `json:"items"`
+		// Category 是整分类的目标（指针：空串合法，见上面那段 ⚠️）。
+		Category *string `json:"category"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeErr(w, err)
@@ -323,7 +339,8 @@ func (h *Handler) onlineScrapeJavWall(w http.ResponseWriter, r *http.Request) {
 	var items []strmscrape.JavWallScrapeItem
 	if body.Items != nil {
 		items = *body.Items
-		if len(items) == 0 {
+		// 没有 category 时的空数组才是错的（见上面那段 ⚠️）。
+		if len(items) == 0 && body.Category == nil {
 			writeErr(w, domain.Errorf(domain.CodeValidation, "没有选中任何一部"))
 			return
 		}
@@ -337,7 +354,7 @@ func (h *Handler) onlineScrapeJavWall(w http.ResponseWriter, r *http.Request) {
 	//
 	// 原来是同步跑完再返回 —— 108 部要十几分钟，群晖那层反代等不了就回 502
 	// （实测跑到 20 部左右）。见 StartJavWallOnlineScrape 的说明。
-	out, err := h.strmScrape.StartJavWallOnlineScrape(r.Context(), srcRef, items)
+	out, err := h.strmScrape.StartJavWallOnlineScrape(r.Context(), srcRef, items, body.Category)
 	if err != nil {
 		writeErr(w, err)
 		return

@@ -307,7 +307,16 @@ export function fetchJavWallItemDetail(input: WallSourceRef & {
 export interface JavWallOnlineScrapeResult {
   total: number;
   scraped: number;
+  /** 已经齐了 / 取不到番号（**不含**上游没有的那一批）。 */
   skipped: number;
+  /**
+   * 「上游根本没有这一部」的部数：JAVDB 与整条补缺链都没给。
+   *
+   * 与 `skipped` / `scraped` 是**两个维度**：这一档说的是上游的事实，
+   * 那些片就算本地那份 json/nfo 被顺手修过（也算 scraped），它仍然是上游没有。
+   * 界面用它解释「为什么这批怎么刮都刮不出东西」—— 那是源的问题，不是漏刮。
+   */
+  not_found: number;
   failed: number;
   /** 补出来的图片 / 字幕文件数（封面、海报、剧照、字幕）。 */
   images: number;
@@ -318,6 +327,16 @@ export interface JavWallOnlineScrapeResult {
    * 这一页，跨分类勾选时会把别的 tab 上那几部误判成「已经不在墙上了」。
    */
   matched: number;
+  /**
+   * 整分类那一轮里「这一档一共几部」（`0` / 缺省 = 没走分类这条路）。
+   *
+   * 收尾文案**报数要用它做分母**：整分类 + 取消掉几部时，`total` 按老口径回显的是
+   * 「排除集有几部」，拿它当分母会说成「提交 3 部、匹配 85 部」。
+   * ⚠️ 它与 `matched` 不是一回事（`matched` = 提交的那些坐标在磁盘上找到几部）。
+   */
+  category_matched?: number;
+  /** 这一轮按哪个分类抓的（空串是**根目录**那一档的合法值；缺省 = 没走分类路）。 */
+  category?: string;
 }
 
 /** 在线刮削的进度（前端按钮上的「刮削中…」）。 */
@@ -363,14 +382,31 @@ export interface JavWallScrapeItem {
  * `items` **不给**（undefined）= 整根，老行为不变；给了非空数组 = 只刮这几部；
  * 给了空数组服务端会回 400（绝不静默退化成整根 —— 那是十几分钟的白等）。
  *
+ * # `category`（整分类，2026-10-19）
+ *
+ * 给了就是**整个分类**（`""` 是**根目录**那一档，合法值 —— 所以判据必须是
+ * `!== undefined` 而不是真值判断，与 listParams 里那条同源）。
+ * 与 `items` 同时给时，`items` 的角色**从「要刮的」变成「要排除的」**：
+ * 「这一档里除了这几部以外都要」。这是「取消某几部 / 取消整个分类」在服务端唯一
+ * 表达得出来的形态 —— 前端手上只有当前那一页，算不出「剩下哪几部」。
+ * 带 `category` 时 `items: []` 是**合法**的（= 这一档全要，不排除任何东西）。
+ *
  * 与「刷新元数据」的区别：那一条只重读本地磁盘（不联网），这一条会联网。
  * 番号按 **nfo 的 `<num>` → 侧车 json 的 number → 拆主干**（去掉 `-U`/`-C`/`-4K`
  * 那些质量后缀）三条取，**不拿文件名当番号**。
  */
-export function onlineScrapeJavWall(ref: number | WallSourceRef, items?: JavWallScrapeItem[]) {
+export function onlineScrapeJavWall(
+  ref: number | WallSourceRef,
+  items?: JavWallScrapeItem[],
+  category?: string,
+) {
   const body: Record<string, unknown> = { ...sourceParams(ref) };
-  // ⚠️ 键**只在真有 items 时才出现**：带上一个空数组会被服务端判成 400。
+  // ⚠️ 键**只在真有 items 时才出现**：不带 category 时，一个空数组会被服务端判成 400。
+  // 带了 category 时空数组是合法的（见上面那段），所以那一种照发。
   if (items?.length) body.items = items;
+  else if (items && category !== undefined) body.items = items;
+  // ⚠️ `category` 判 `!== undefined`（不是真值）：空串是「根目录」那一档的**合法值**。
+  if (category !== undefined) body.category = category;
   // http.post 的第二参是 body、第三参才是 query。
   return http.post<JavWallOnlineScrapeProgress>("/admin/strm-scrape/jav-wall/online-scrape", body);
 }

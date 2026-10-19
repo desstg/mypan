@@ -63,15 +63,44 @@ func (s *Service) SetJavService(j *jav.Service) {
 type JavWallOnlineScrapeResult struct {
 	Total   int `json:"total"`   // 真的扫到的作品数（点名刮削时 = 在磁盘上找到的那几部）
 	Scraped int `json:"scraped"` // 真的补到了东西的
-	Skipped int `json:"skipped"` // 已经齐了 / 取不到番号 / 上游没有
-	Failed  int `json:"failed"`  // 写盘失败
-	Images  int `json:"images"`  // 补出来的图片/字幕文件数
+	Skipped int `json:"skipped"` // 已经齐了 / 取不到番号（**不含**上游没有的那一批）
+	// NotFound 是「**上游确实没有这一部**」的部数（JAVDB 明确说没有 / 番号对不上）。
+	//
+	// 单独一个计数（2026-10-18）：「跳过」把「已经齐了」「取不到番号」「上游没有」
+	// 三件事揉在一起，用户看到「跳过 43 部」完全判断不出该不该去补源。
+	// 而这三件的处置完全不同 —— 只有这一档是**上游的问题**（换源 / 认命），
+	// 另外两档是本地的问题（文件名、侧车），改改就能救。
+	//
+	// ⚠️ **网络/代理/上游 5xx 不算进来**：那一档上游有没有这一部是未知的，
+	// 报成「上游根本没有」会把用户引去换源，而真正该修的是网络
+	// （见 jav.FetchSidecarFieldsByNumberWithMiss 的说明）。
+	//
+	// ⚠️ 它与 `skipped` / `scraped` 是**两个维度**（可能与 scraped 同时成立：
+	// 上游没有，但本地那份 json/nfo 被顺手修好了），不是加和关系。
+	NotFound int `json:"not_found"`
+	Failed   int `json:"failed"` // 写盘失败
+	Images   int `json:"images"` // 补出来的图片/字幕文件数
 	// Matched 是「点名刮削时，提交的那几部里真的有几步在磁盘上找到了」。
 	//
 	// 整根那条路等于 Total（提交的就是扫出来的）。⚠️ **必须由后端算**：
 	// 前端手上只有当前分类 tab 的这一页，跨分类勾选时它自己算会把别的 tab 上
 	// 那几部误判成「已经不在墙上了」。
 	Matched int `json:"matched"`
+	// CategoryMatched 是整分类那一轮里「这个分类一共几部」（`0` = 没走分类这条路）。
+	//
+	// 存在的理由只有一个：**收尾文案报数要报得对**。整分类 + 取消掉几部时，`Total`
+	// 按老口径回显的是「排除集有几部」，于是界面会说「提交 3 部、匹配 85 部」——
+	// 数字没算错，但读起来是错的。有了它，前端改成按 `CategoryMatched` 做分母。
+	//
+	// ⚠️ 它与 `Matched` **不是一回事**：`Matched` 是「提交的那些坐标里在磁盘上真找到了几部」，
+	// 这一条是「这个分类一共有几部」。整根那条路两个都不填（都等于 `Total`）。
+	CategoryMatched int `json:"category_matched,omitempty"`
+	// Category 是这一轮按哪个分类抓的（**空串 = 根目录那一档，是合法值**；
+	// `nil` = 没走分类这条路）。
+	//
+	// 回显给前端，好让收尾文案说出「欧美 88 部」这种话 —— 分类的总数只有服务端知道
+	// （前端手上只有当前那一页）。
+	Category *string `json:"category,omitempty"`
 }
 
 // JavWallScrapeItem 是「点名刮这一部」。
@@ -146,7 +175,7 @@ type JavOnlineScrapeProgress struct {
 // （群晖上实测：跑到 20 部左右就 502，把图片间隔调大只会更早 —— 因为更慢）。
 // HTTP 走 StartJavWallOnlineScrape（后台任务 + 轮询进度），这个方法留给
 // 测试与将来可能的后台联动。
-func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc, items []JavWallScrapeItem) (JavWallOnlineScrapeResult, error) {
+func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc, items []JavWallScrapeItem, category *string) (JavWallOnlineScrapeResult, error) {
 	var out JavWallOnlineScrapeResult
 	if s.jav == nil {
 		return out, domain.Errorf(domain.CodeInternal, "番号服务未装配")
@@ -162,23 +191,36 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc, items [
 	tokens, brands := s.javScrapeStationTokens()
 	var routes []jav.RouteInput
 	var targets []javScrapeTarget
-	if len(items) == 0 {
-		targets = collectJavScrapeTargets(root, tokens, brands)
-		out.Total = len(targets)
-		out.Matched = out.Total
-		// 路由线索**一次算好**（规则表只读一次，见 javScrapeRouteInputs）。
-		routes = s.javScrapeRouteInputs(targets, tokens)
-	} else {
+	// 档位由**纯函数**判（见 JavTargetMode）：这条路的形状只能靠单测守 ——
+	// 真机跑一轮整分类是十几分钟，判错一条的代价太大。
+	switch javTargetMode(items, category) {
+	case JavTargetCategory, JavTargetCategoryMinusItems:
+		// 整分类（可减去排除集）—— 见 JavTargetMode。
+		targets, out.CategoryMatched = s.javScrapeTargetsForCategory(ctx, src, *category, items, tokens, brands)
+		out.Category = category
+		// 有 items 时 `Total` 按老口径回显「排除集几部」，`CategoryMatched` 才是分类总数
+		// （前端报数用后者，见结果结构体里那段）。
+		if len(items) > 0 {
+			out.Total = len(items)
+		} else {
+			out.Total = out.CategoryMatched
+		}
+		out.Matched = len(targets)
+		routes = javScrapeRouteHints(targets, tokens)
+	case JavTargetNamed:
 		targets = javScrapeTargetsForItems(root, items, tokens, brands)
 		// Total 是**提交**了几部、Matched 是**真的找到**几部 —— 两者不等时前端要如实
 		// 告诉用户「其中几部已不在墙上」，而不是把「提交了 3 部、补到 0 部」读成失败。
 		out.Total = len(items)
 		out.Matched = len(targets)
 		// 点名这条路的每个目标自己带线索（见 javScrapeTarget.routeHint）。
-		routes = make([]jav.RouteInput, len(targets))
-		for i, t := range targets {
-			routes[i] = t.routeHint
-		}
+		routes = javScrapeRouteHints(targets, tokens)
+	default:
+		targets = collectJavScrapeTargets(root, tokens, brands)
+		out.Total = len(targets)
+		out.Matched = out.Total
+		// 路由线索**一次算好**（规则表只读一次，见 javScrapeRouteInputs）。
+		routes = s.javScrapeRouteInputs(targets, tokens)
 	}
 	if len(targets) == 0 {
 		return out, nil
@@ -197,7 +239,13 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc, items [
 			return out, err
 		}
 		s.setJavOnlineProgress(scopeKey, i+1, len(targets), "在线刮削："+t.stem)
-		scraped, failed := s.scrapeOneJav(ctx, t, routes[i])
+		scraped, notFound, failed := s.scrapeOneJav(ctx, t, routes[i])
+		// 上游没有的那一批**先记一笔**（它在 scraped/skipped 之外单独统计 ——
+		// 见结果结构体里 NotFound 的说明：那是**上游的事实**，与「本地补没补」
+		// 是两个维度，所以可能与 scraped 同时成立）。
+		if notFound {
+			out.NotFound++
+		}
 		switch {
 		case failed:
 			out.Failed++
@@ -247,7 +295,7 @@ func (s *Service) JavWallOnlineScrapeByTask(ctx context.Context, taskID int64) (
 	if err != nil {
 		return JavWallOnlineScrapeResult{}, err
 	}
-	return s.JavWallOnlineScrape(ctx, src, nil)
+	return s.JavWallOnlineScrape(ctx, src, nil, nil)
 }
 
 // StartJavWallOnlineScrape 起一个**后台**在线刮削任务，立刻返回当前进度。
@@ -272,8 +320,12 @@ func (s *Service) JavWallOnlineScrapeByTask(ctx context.Context, taskID int64) (
 // 少了它，前端会拿别人整根任务跑完的结果去消费自己那份选择集（选择被清空了，
 // 却一部都没刮，用户完全看不懂）。见 `JavOnlineScrapeProgress.NotStarted`。
 //
-// `items` 为空 = 整根；非空 = 只刮点名的这几部（上限见 MaxJavWallScrapeItems）。
-func (s *Service) StartJavWallOnlineScrape(ctx context.Context, ref WallSourceRef, items []JavWallScrapeItem) (JavOnlineScrapeProgress, error) {
+// `items` 为空且 `category` 为 nil = 整根；`items` 非空 = 只刮点名的这几部
+// （上限见 MaxJavWallScrapeItems）；**`category` 不为 nil = 整分类**
+// （可减去 `items` 里那几部，见 JavTargetMode）。分类与 items 同时给时，
+// `items` 的角色从「要刮的」变成「要**排除**的」—— 这是「取消某几部」能在服务端
+// 表达出来的唯一方式（前端手上只有当前那一页，算不出「剩下哪几部」）。
+func (s *Service) StartJavWallOnlineScrape(ctx context.Context, ref WallSourceRef, items []JavWallScrapeItem, category *string) (JavOnlineScrapeProgress, error) {
 	// 守卫放**起任务之前**：进去之后错误只能落在进度里，调用方拿不到。
 	if s.jav == nil {
 		return JavOnlineScrapeProgress{}, domain.Errorf(domain.CodeInternal, "番号服务未装配")
@@ -285,6 +337,9 @@ func (s *Service) StartJavWallOnlineScrape(ctx context.Context, ref WallSourceRe
 	if !src.isJav() {
 		return JavOnlineScrapeProgress{}, errNotJavTask
 	}
+	// 档位先判一次（纯函数）：`Scoped` 与收尾文案都要用它，别在两处各判一遍。
+	mode := javTargetMode(items, category)
+	scoped := mode != JavTargetWholeRoot
 	scopeKey := src.ScopeKey()
 	if s.javOnlineRunning(scopeKey) {
 		// 已在跑：返回当前进度，并**明确标记这一轮没提交**（见上面那段 ⚠️）。
@@ -294,17 +349,21 @@ func (s *Service) StartJavWallOnlineScrape(ctx context.Context, ref WallSourceRe
 	}
 
 	// 进度先立起来（前端下一次轮询就能看到 running=true 与总数）。
+	//
+	// ⚠️ `Scoped` 的判据是**档位**不是 `len(items) > 0`：整分类那一轮 items 可是空的，
+	// 按旧判据会被当成「整根」，前端就会拿别人整根任务的结果来消费自己这份选择
+	// （与 NotStarted 那段是同一类病）。
 	s.javOnlineMu.Lock()
 	s.javOnline = &JavOnlineScrapeProgress{
 		TaskID: src.TaskID, SourceKey: scopeKey, Running: true, Message: "准备中…",
-		Scoped: len(items) > 0,
+		Scoped: scoped,
 	}
 	s.javOnlineMu.Unlock()
 
 	// **不随请求结束**：这条 HTTP 请求马上就返回了，任务得自己活着。
 	runCtx := context.Background()
 	go func() {
-		res, runErr := s.JavWallOnlineScrape(runCtx, src, items)
+		res, runErr := s.JavWallOnlineScrape(runCtx, src, items, category)
 		s.javOnlineMu.Lock()
 		defer s.javOnlineMu.Unlock()
 		if s.javOnline == nil || s.javOnline.SourceKey != scopeKey {
@@ -317,14 +376,19 @@ func (s *Service) StartJavWallOnlineScrape(ctx context.Context, ref WallSourceRe
 		}
 		out := res
 		s.javOnline.Running = false
-		// 收尾那句话按**这一轮是什么**分开说，三种都别让人读错：
+		// 收尾那句话按**这一轮是什么**分开说，四种都别让人读错：
 		switch {
-		case len(items) > 0 && res.Matched == 0:
+		case mode == JavTargetNamed && res.Matched == 0:
 			// 点名刮削却一部都没在磁盘上找到：你选的那几部可能已经重命名 / 删除了，
 			// 该去核对的是**选择**，不是刮削。说「完成」会让人以为只是没料。
 			s.javOnline.Message = "选中的片子一部都没找到（可能已重命名或删除）"
+		case mode == JavTargetCategoryMinusItems && res.Matched == 0:
+			// 整个分类都被取消掉了（排除集覆盖了全部成员）：这不是故障，
+			// 是用户把这一档清空了 —— 说「一部都没找到」会让人以为片子丢了。
+			s.javOnline.Message = "这一分类已全部取消选中，没有要刮的片子"
 		case res.Total == 0:
-			// 整根扫下来一个目标都没有：输出目录是空的（或扫盘深度内没有 .strm）。
+			// 整根（或整个分类）扫下来一个目标都没有：输出目录是空的
+			// （或扫盘深度内没有 .strm）。
 			// 别报「在线刮削完成」—— 那读起来像「跑过了、库里那些都齐了」。
 			s.javOnline.Message = "没有扫到任何番号影片"
 		default:
@@ -467,6 +531,160 @@ func collectJavScrapeTargets(root string, tokens, brands []string) []javScrapeTa
 	}
 	walk(root, "", 0)
 	return out
+}
+
+// JavTargetMode 是「这一轮刮哪些」的档位（**纯函数**，好钉用例）。
+//
+// 四个档位看着琐碎，但每一条都对应一种真实的用户动作，写反一条的后果是
+// **静默刮错范围**（十几分钟打错上游），所以判据单独抽出来，不去读盘也不联网。
+type JavTargetMode int
+
+const (
+	// JavTargetWholeRoot 整根（老行为）：不带 `items` 也不带 `category`。
+	JavTargetWholeRoot JavTargetMode = iota
+	// JavTargetNamed 点名：`items` 非空且没有 `category`。
+	JavTargetNamed
+	// JavTargetCategory 整分类：有 `category` 且没有排除集。
+	JavTargetCategory
+	// JavTargetCategoryMinusItems 整分类减去排除集。
+	//
+	// 为什么要有它（**这是「取消某几部/整个分类」能在服务端表达出来的原因**）：
+	// 分类的完整成员只有服务端的快照里有，前端手上只有当前那一页 —— 所以「取消」
+	// 不能靠前端算出「剩下哪几部」，只能反过来说「除了这几部以外都要」。
+	// 对已加载的那些来说这个排除集是精确的（服务端一定有它们），
+	// 没加载的也从来没被选上。
+	JavTargetCategoryMinusItems
+)
+
+// javTargetMode 按 `items` 与 `category` 判这一轮的范围。
+//
+// ⚠️ 三个判据的顺序不能换：
+//   - `category != nil` **压过** `items` —— 空数组在前端是「我全不要了」，
+//     不是「校验错」；真正的空数组校验在 handler 那层（HTTP 契约不变）。
+//   - `category` 是**指针**不是字符串：空串是合法值（根目录散落的那一档，
+//     与 `JavWallCategory{Name: ""}` 对齐），拿 `category != ""` 判会把整档根目录漏掉。
+//   - `items` 为空切片与 nil 同义（都是「没有排除集」）—— 区别只在 HTTP 契约那一层。
+func javTargetMode(items []JavWallScrapeItem, category *string) JavTargetMode {
+	if category != nil {
+		if len(items) > 0 {
+			return JavTargetCategoryMinusItems
+		}
+		return JavTargetCategory
+	}
+	if len(items) > 0 {
+		return JavTargetNamed
+	}
+	return JavTargetWholeRoot
+}
+
+// javScrapeRouteHints 从目标自带的 routeHint 攒出路由线索（点名与整分类两条路共用）。
+//
+// 与整根那条 `javScrapeRouteInputs(targets, tokens)` 的区别：那边手上是整根、要展开
+// 规则表才能算；这两条路的每个目标自己就带着算好的线索（见 javScrapeTarget.routeHint）——
+// `jav.RouteOf` 与 `javrules.MatchStation` 都是纯函数，判据同一套。
+func javScrapeRouteHints(targets []javScrapeTarget, tokens []string) []jav.RouteInput {
+	out := make([]jav.RouteInput, len(targets))
+	for i, t := range targets {
+		out[i] = t.routeHint
+		// 兜底：万一某条目标的线索没算出来（category 路会算，但别让 nil token 静默毁掉路由）。
+		if out[i].Station == "" && out[i].Number != "" {
+			out[i].Station = javrules.MatchStation(t.stem, t.number, tokens)
+		}
+	}
+	return out
+}
+
+// javScrapeExcludeSet 把「排除这几部」折成一张可查的集合。
+//
+// 走的是与 `javScrapeTargetsForItems` **同一套**坐标判据（`normalizeJavRelDir` +
+// stem 合法性）—— 不然同一个字符串在一处算合法、在另一处算非法，排除就会静默漏掉。
+// 这里**不做** `isInside` 检查：查表时只拿键比对，不碰磁盘。
+//
+// `rel` 的键用归一化后的形态，stem 用小写（与列表侧、单品侧的比对口径一致）。
+func javScrapeExcludeSet(items []JavWallScrapeItem) map[string]map[string]bool {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]bool, len(items))
+	for _, it := range items {
+		rel := normalizeJavRelDir(it.RelDir)
+		if rel == "" && strings.TrimSpace(it.RelDir) != "" {
+			continue // 非法 rel_dir（归一化后为空但原文非空）
+		}
+		stem := strings.TrimSpace(it.Stem)
+		if stem == "" || strings.ContainsAny(stem, `/\`) || stem == "." || stem == ".." {
+			continue
+		}
+		key := strings.ToLower(stem)
+		set, ok := out[rel]
+		if !ok {
+			set = map[string]bool{}
+			out[rel] = set
+		}
+		set[key] = true
+	}
+	return out
+}
+
+// javScrapeTargetsForCategory 把「整分类（可减去排除集）」变成待补目标。
+//
+// # 为什么要走快照，而不是「整根扫完再筛」
+//
+// `collectJavScrapeTargets` 会把整根递归读一遍 —— 数据源可以是网盘 / SMB 上的目录，
+// 那是一次几秒到几十秒的往返（注释实测 242 次 stat 串行 7.1s）。而海报墙的快照
+// （`javWallRows`）**本来就在缓存里**，且已经在这一趟里做完了最贵的那一步：
+// 每个影片目录只 ReadDir 一次、顺手把 `number` / `flat` / `names` 全算了出来。
+// 复用它与「所见即所选」也是同一个口径 —— 墙显示的那些卡，就是这里收集的那些。
+//
+// 第二个参数 `exclude` 见 JavTargetCategoryMinusItems 的说明。
+//
+// 返回 `(targets, categoryMatched)`：后者是**这一档一共有几部**（排除之前），
+// 收尾文案要用它做分母（见 JavWallOnlineScrapeResult.CategoryMatched）。
+//
+// ⚠️ 三条与「整根那条路」必须一致的口径：
+//   - **不过滤隐藏档**：`hidden` 只影响 tab 显示（`javWallVisibleCategories` 那一层），
+//     `collectJavScrapeTargets` 压根不知道隐藏名单，整根刮削照样刮隐藏档。
+//     「整个分类」指的是这个分类里有什么，与用户藏没藏那一栏无关。
+//   - **不受关键词 / 排序影响**：那是列表的视角，不是分类的成员集合。
+//   - **不加 `created_after` 之类的增量过滤**：调用方要的是全量。
+func (s *Service) javScrapeTargetsForCategory(ctx context.Context, src *wallSrc, category string, exclude []JavWallScrapeItem, tokens, brands []string) ([]javScrapeTarget, int) {
+	snap, err := s.javWallRows(ctx, src, false)
+	if err != nil || snap == nil {
+		// 快照读不到（目录没了 / 权限）：这一轮就是空，交给调用方按 `Matched == 0` 报。
+		// 不往上抛错是有意的 —— 与点名那条路「磁盘上找不着不算错」同一个取向。
+		return nil, 0
+	}
+	excluded := javScrapeExcludeSet(exclude)
+	matched := 0 // 这一档一共有几部（排除之前）
+	out := make([]javScrapeTarget, 0, 64)
+	for _, row := range snap.rows {
+		if row.item.Category != category {
+			continue
+		}
+		matched++
+		rel := normalizeJavRelDir(row.item.RelDir)
+		if set := excluded[rel]; set != nil && set[strings.ToLower(strings.TrimSpace(row.item.Stem))] {
+			continue
+		}
+		t := javScrapeTarget{
+			absDir:   row.absDir,
+			stem:     row.item.Stem,
+			flat:     row.item.Flat,
+			number:   row.item.Number,
+			category: row.item.Category,
+			// names 与 `javScrapeTargetsInDir` **逐字同源**（那里也是
+			// `emby.TargetNames(stem, flat)`）—— 产物文件名两处必须一致，
+			// 不然「点名写的 nfo」与「整根写的 nfo」会落到不同文件名上。
+			names: emby.TargetNames(row.item.Stem, row.item.Flat),
+		}
+		t.routeHint = jav.RouteInput{
+			Number:   t.number,
+			Station:  javrules.MatchStation(t.stem, t.number, tokens),
+			Category: t.category,
+		}
+		out = append(out, t)
+	}
+	return out, matched
 }
 
 // javScrapeTargetsForItems 把「点名刮这几部」变成待补目标（只读点到的目录）。
@@ -733,19 +951,25 @@ func readJavNumberFromSidecar(absDir string, files map[string]os.DirEntry, stem 
 	return strings.TrimSpace(probe.Number)
 }
 
-// scrapeOneJav 处理一部片。返回 (补到了吗, 出错了)。
+// scrapeOneJav 处理一部片。返回 (补到了吗, 上游有这一部吗, 出错了)。
+//
+// 第二个返回值只在「没补到」时才有意义：`false` 表示 **JAVDB 与整条补缺链都没有
+// 这一部**（上游的事，换源或认命），`true` 表示上游有、只是没补出新东西来
+// （本地已经齐了，或者只修了本地那份 json/nfo）。两者在结果里分开计数
+// （见 JavWallOnlineScrapeResult.NotFound），否则用户看到的「跳过 43 部」
+// 根本判断不出该不该去补源。
 //
 // 写盘那一步复用 `internal/strm` 的 `writeFieldsIntoFile` / `fillNFOFieldsIfMissing`
 // —— 它们已经做完了「只补空、不覆盖用户的编辑」与「nfo 里元素存在就不动」这两条
 // 判据。这里再写一套的话，两条路的判据会分家。
-func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.RouteInput) (bool, bool) {
+func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.RouteInput) (scraped, notFound, failed bool) {
 	if strings.TrimSpace(t.number) == "" {
-		return false, false // 取不出番号：不猜
+		return false, false, false // 取不出番号：不猜
 	}
 	// 按**档位**选补缺链（FC2 走 FC2 那几家、有码走有码那几家）。
 	// 判据全在 jav.RouteOf 里（纯函数），这里只负责把线索传进去。
 	route := jav.RouteOf(ri)
-	fields, ok := s.jav.FetchSidecarFieldsByNumber(ctx, t.number, route)
+	fields, ok, miss := s.jav.FetchSidecarFieldsByNumberWithMiss(ctx, t.number, route)
 	if !ok || len(fields) == 0 {
 		// 上游没有这一部（国产厂牌 / 欧美片 / 日期序号型无码那批 —— 实测 116 里
 		// 有 13 部）。**不能就此什么都不做**：本地那份侧车 json 与 nfo 可能自己
@@ -766,7 +990,10 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 		// 反过来其实也行（重建走 ParseNFO→BuildNFOFromMeta，往返字节一致，
 		// 不会丢东西），只是要多绕一次重建 —— 选前者是因为它读起来就是那个顺序。
 		s.pushScrapedJavTitle(ctx, t, filepath.Join(t.absDir, t.stem+".json"))
-		return s.localJavRepair(t), false
+		// 第二个返回值 = 「**上游确实没有这一部**」（`miss`），不是「这次没补到」：
+		// 网络/代理/超时那一档上游有没有是**未知**，把它报成「上游根本没有」会
+		// 把用户引去换源，而真正该修的是网络（见 jav.FetchSidecarFieldsByNumberWithMiss）。
+		return s.localJavRepair(t), miss, false
 	}
 	// 侧车 json 名与 nfo 同主干（`<主干>.json`），只是扩展名不同 ——
 	// emby.Names 里没有 json 那一项（那是 nfo/图片的命名表），所以在这里拼。
@@ -801,11 +1028,11 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 		title, originTitle := s.jav.SidecarTitleByNumber(ctx, t.number)
 		doc := newJavSidecarDoc(t.number, fields, marks, title, originTitle)
 		if err := writeJSONFile(jsonPath, doc); err != nil {
-			return false, true
+			return false, true, true
 		}
 		// 写完 json 之后用同一条路补 nfo（它有「元素存在就不动」的判据兜着）。
 		if _, err := strm.WriteFieldsIntoFile(jsonPath, fields); err != nil {
-			return false, true
+			return false, true, true
 		}
 		// ⚠️ 上面那次回读**必然是「无改动」**：`fields` 里每一个非空的键都已经在
 		// 写盘前由 `setIfEmptyPathAny` 并进 doc 了，所以 `WriteFieldsIntoFile`
@@ -824,7 +1051,7 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 		// 而 `ApplySidecarTitleZHToFile` 同样按 title 重建一遍 —— 顺序反过来，
 		// 重建出来的那份又会被补缺改一次，形状与「编辑器保存」那条路对不上。
 		s.pushScrapedJavTitle(ctx, t, jsonPath)
-		return true, false
+		return true, true, false
 	}
 
 	// 已有侧车：先把缺的质量标记补进去（老侧车里 quality 是空的、而文件名带后缀
@@ -835,11 +1062,11 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 	}
 	changed, err := strm.WriteFieldsIntoFile(jsonPath, fields)
 	if err != nil {
-		return false, true
+		return false, true, true
 	}
 	// 同上：标题那一手放最后（这次它重建 nfo，就是这一部的收尾）。
 	s.pushScrapedJavTitle(ctx, t, jsonPath)
-	return changed, false
+	return changed, true, false
 }
 
 // pushScrapedJavTitle 把**中文标题**写进这一部刚刮完的侧车（连带重建 nfo 的 `<title>`）。

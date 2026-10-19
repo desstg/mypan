@@ -102,8 +102,10 @@ func (s *ThePornDB) Enrich(ctx context.Context, number string) (FieldPatch, erro
 	if query == "" {
 		return FieldPatch{}, nil
 	}
-	// 期望的日期（从番号里抽）—— 命中判据用它。抽不到就只能靠「唯一一条结果」。
+	// 期望的日期与品牌（从番号里抽）—— 两个都是命中判据：日期管「是不是那天」，
+	// 品牌管「是不是那一家」（见下面那段 ⚠️）。
 	wantDate := westernNumberDate(query)
+	brand, _ := westernBrandAndDate(query)
 
 	items, err := s.search(ctx, query)
 	if err != nil {
@@ -112,9 +114,21 @@ func (s *ThePornDB) Enrich(ctx context.Context, number string) (FieldPatch, erro
 	for _, it := range items {
 		// ⚠️ **只按日期判命中，不看 sku**：实测这个 API 的 `sku` 恒为 `null`
 		// （2026-10-16 反复验过）—— 拿它当判据等于永远不命中。
-		// 而 `site` 与 `date` 两个参数已经把它们卡死了（实测 `site=tushyraw&date=2026-08-20`
-		// 精确回 1 条），所以日期相同就是那一部。
 		if wantDate != "" && dateOnlyOf(it.Date) != wantDate {
+			continue
+		}
+		// ⚠️ **还必须自己对一遍站点**（2026-10-18 真机挖出来的）。
+		//
+		// `site` 参数只对**它认识的** short_name 生效；不认识的名字会被**静默忽略**，
+		// 接口退化成「按日期翻全站」—— 实测 `site=dpg&date=2025-05-05` 回的是
+		// `bijouclassics` / `seancody` / `jalifstudio` 的片，日期全都对得上。
+		// 只按日期判命中的话，那一部就会被写成**当天随便一部别人的片**：
+		// 假简介、假演员、假封面，而且看起来一切正常（正是这个项目最怕的静默错配）。
+		//
+		// 所以这里再核一次 `site.short_name`：条目里有站点信息就必须与原品牌同源，
+		// 否则跳过继续看下一条。没有站点信息（字段缺失）时按老规矩信日期 ——
+		// 那种条目在实测里不存在，为它把整条链卡死反而更坏。
+		if !westernSiteMatches(it.Site, brand) {
 			continue
 		}
 		// 搜索结果本身就是 SceneDataObject，简介通常已经在里面；缺了才去取详情。
@@ -126,11 +140,42 @@ func (s *ThePornDB) Enrich(ctx context.Context, number string) (FieldPatch, erro
 			if derr != nil {
 				return FieldPatch{}, derr
 			}
+			if !westernSiteMatches(full.Site, brand) {
+				continue
+			}
 			return ParseThePornDBMovie(full, wantDate, query), nil
 		}
 		return ParseThePornDBMovie(it, wantDate, query), nil
 	}
 	return FieldPatch{}, nil
+}
+
+// westernSiteMatches 核「这条结果的站点」与「番号里的品牌」是不是同一个。
+//
+// 为什么要自己核：theporndb 的 `site` 查询参数对不认识的 short_name **静默失效**
+// （见 Enrich 里那段 ⚠️）。比的是 `short_name` 与 `name` 两个字段，**都归一**后再比：
+// 番号里的品牌大小写不定（`TushyRaw` / `tushyraw`），而站点表里 `name` 是
+// `Tushy Raw` 这种带空格的写法。
+//
+// `site` 字段缺失（`{}` / null / 空串）时返回 **true**：没有信息就不否决，
+// 交给日期判据。这条是「宁可少一条误配，也不把整条链卡死」的取向。
+func westernSiteMatches(rawSite json.RawMessage, brand string) bool {
+	want := westernKey(brand)
+	if want == "" {
+		return true
+	}
+	var obj struct {
+		ShortName string `json:"short_name"`
+		Name      string `json:"name"`
+	}
+	if len(rawSite) == 0 || json.Unmarshal(rawSite, &obj) != nil {
+		return true
+	}
+	short, name := westernKey(obj.ShortName), westernKey(obj.Name)
+	if short == "" && name == "" {
+		return true
+	}
+	return short == want || name == want
 }
 
 // search 搜一批候选（**site + date**，这是实测出来的正确姿势）。

@@ -197,14 +197,36 @@ func (s *Service) sidecarFieldsForMovie(ctx context.Context, movie *domain.JavMo
 // （磁盘侧能算出站名与目录名线索）。预算收紧到 `onlineScrapeEnrichBudget`
 // （60 秒/部）—— 理由见那里：108 部 × 3 分钟 = 5.4 小时，不可接受。
 //
-// ok=false 表示上游没有这一部（或番号无效）—— 调用方跳过，不算失败。
+// ok=false 表示**上游没有这一部**（或番号无效）—— 调用方跳过，不算失败。
+//
+// # ⚠️ 与 `UpstreamMiss` 的分工（2026-10-18）
+//
+// `ok=false` 这个返回值把两件事混在一起了：**上游真的没有这一部**（404 / 搜索 0 结果）
+// 与**这一趟没打通**（代理挂了、502、超时）。以前混着没事 —— 两条都是「跳过」；
+// 但海报墙那边现在要把「上游没有」单独报给用户（见 JavWallOnlineScrapeResult.NotFound），
+// 混进去的话，一次代理故障会显示成「43 部上游根本没有」，用户会照着去换源，
+// 而真正的修法是修网络。需要区分时用下面那个入口。
 //
 // `route` 为空串时**跳过补缺**（只入库），与改造前的行为一致 —— 这样
 // 其它调用方（若有）不传档位时不会突然多花 60 秒。
 func (s *Service) FetchSidecarFieldsByNumber(ctx context.Context, number string, route JavRoute) (map[string]any, bool) {
+	fields, ok, _ := s.FetchSidecarFieldsByNumberWithMiss(ctx, number, route)
+	return fields, ok
+}
+
+// FetchSidecarFieldsByNumberWithMiss 与上面那条同一条路，多返回一个 `miss`：
+//
+//   - `miss = true` → **上游确实没有这一部**（CodeNotFound：搜索 0 结果 /
+//     有近似结果但番号对不上 / JAVDB 明确说没有）；
+//   - `miss = false` + `ok = false` → **这一趟没打通**（网络、代理、限流、写库失败），
+//     上游有没有这一部**未知**。调用方不该把它记成「上游没有」。
+//
+// 判据只看错误码，不猜文案：`ingestByNumber` 的两条出口都以 `CodeNotFound` 收尾，
+// 其它一律走 `upstreamErr` 的 `CodeDriverError`（见 errors.go）。
+func (s *Service) FetchSidecarFieldsByNumberWithMiss(ctx context.Context, number string, route JavRoute) (fields map[string]any, ok, miss bool) {
 	number = strings.TrimSpace(number)
 	if number == "" || s.movies == nil {
-		return nil, false
+		return nil, false, false
 	}
 	// **强制打上游**（`IngestByNumberFresh`，不是带缓存短路的那个）——
 	// 在线刮削的判据是「上游现在有什么」，不是「库里存过什么」。
@@ -214,7 +236,11 @@ func (s *Service) FetchSidecarFieldsByNumber(ctx context.Context, number string,
 		if err != nil {
 			s.logInfo("jav online scrape upstream miss", "number", number, "err", err)
 		}
-		return nil, false
+		// 只有「上游说没有」才算 miss；其余（代理 / 502 / 超时）是这一趟没打通。
+		if ae, isApp := domain.AsAppError(err); isApp && ae.Code == domain.CodeNotFound {
+			miss = true
+		}
+		return nil, false, miss
 	}
 	// 入库之后再补缺（顺序不能反：JAVDB 那份必须先落库，见 ingestMovie 的注释）。
 	if route != "" {
@@ -228,11 +254,11 @@ func (s *Service) FetchSidecarFieldsByNumber(ctx context.Context, number string,
 	if fresh, gerr := s.movies.Get(ctx, movie.ID); gerr == nil && fresh != nil {
 		movie = fresh
 	}
-	fields, ok := s.sidecarFieldsForMovie(ctx, movie)
+	fields, ok = s.sidecarFieldsForMovie(ctx, movie)
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
-	return fields, len(fields) > 0
+	return fields, len(fields) > 0, false
 }
 
 // SidecarTitleByNumber 取「该写进侧车的那份标题」与日文原名（按番号查**本地库**）。

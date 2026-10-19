@@ -630,21 +630,31 @@ func TestIngestByNumberPrefersExactMatch(t *testing.T) {
 	}
 }
 
-func TestIngestByNumberFallsBackToFirstHit(t *testing.T) {
+// TestIngestByNumberNoExactHitIsNotFound 钉住「所有档位都收紧」：
+// 上游有近似结果、但番号都对不上时**不许退回第一条**。
+//
+// 退回第一条的代价是真机踩出来的：`tushy.26.09.06` 被写成
+// `tushy.20.09.06 Revenge` 那一部的侧车 —— 用户看到「刮到了」，
+// 拿到的却是别人的片名、封面、演员。那批错侧车比「什么都没刮到」难收拾得多。
+func TestIngestByNumberNoExactHitIsNotFound(t *testing.T) {
 	f := newCatalogFixture(t)
 	ctx := context.Background()
 
-	// 一个都不精确匹配时，返回最接近的那条 —— 用户已经明确输入了番号，
-	// 给他「未找到」不如给他一条让他自己判断。
-	f.db.searchResult = []javdb.Movie{{ID: "only", Number: "ABC-999", Title: "唯一结果"}}
-	f.db.movieResult = javdb.Movie{ID: "only", Number: "ABC-999", Title: "唯一结果"}
+	// 一个都不精确匹配：上游确实有结果，但都不是这个番号。
+	f.db.searchResult = []javdb.Movie{{ID: "only", Number: "ABC-999", Title: "别的片"}}
+	f.db.movieResult = javdb.Movie{ID: "only", Number: "ABC-999", Title: "别的片"}
 
 	got, err := f.svc.IngestByNumber(ctx, "SSIS-001")
-	if err != nil {
-		t.Fatalf("IngestByNumber: %v", err)
+	if err == nil {
+		t.Fatalf("非精确命中时不该返回影片，got %q", got.ID)
 	}
-	if got.ID != "only" {
-		t.Fatalf("应当退回第一条，got %q", got.ID)
+	ae, ok := domain.AsAppError(err)
+	if !ok || ae.Code != domain.CodeNotFound {
+		t.Fatalf("错误码应当是 NotFound（与「搜索 0 结果」同义），got %v", err)
+	}
+	// 关键：**那条近似结果一定不许被抓详情**（抓了就会入库 + 写别人的侧车）。
+	if len(f.db.movieCalls) != 0 {
+		t.Errorf("非精确命中时不该抓任何详情，got %v", f.db.movieCalls)
 	}
 }
 

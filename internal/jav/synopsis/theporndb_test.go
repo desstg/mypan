@@ -3,6 +3,8 @@ package synopsis
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -160,5 +162,81 @@ func TestThePornDBSearchNeedsDate(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Errorf("抽不出日期时该直接返回空，得到 %d 条", len(items))
+	}
+}
+
+// TestThePornDBRejectsForeignSite 钉住 2026-10-18 真机挖出来的那个坑：
+//
+// theporndb 的 `site` 参数对**不认识的 short_name 会静默失效**，接口退化成
+// 「按日期翻全站」。实测 `site=dpg&date=2025-05-05` 回的是 bijouclassics /
+// seancody / jalifstudio 的片，日期全都对得上。只按日期判命中的话，
+// 这一部就会被写成当天随便一部别人的片 —— 假简介、假演员、假封面，且看起来正常。
+//
+// 判据：站点对不上一律跳过（继续看下一条），一条都不剩就**什么都不填**。
+func TestThePornDBRejectsForeignSite(t *testing.T) {
+	const body = `{"data":[
+	 {"id":"x1","date":"2025-05-05","description":"别人的剧情","site":{"short_name":"bijouclassics","name":"Bijou Classics"}},
+	 {"id":"x2","date":"2025-05-05","description":"还是别人的","site":{"short_name":"seancody","name":"Sean Cody"}}
+	]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/movies" {
+			// 详情那条路不该走到 —— 走到的说明判据在就跳过了。
+			t.Errorf("不该请求详情：%s", r.URL.String())
+		}
+		if got := r.URL.Query().Get("site"); got != "dpg" {
+			t.Errorf("site 参数 = %q，期望 dpg", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	s := NewThePornDB(ThePornDBOptions{BaseURL: srv.URL, APIKey: "k"})
+	p, err := s.Enrich(context.Background(), "dpg.25.05.05")
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if !p.Empty() {
+		t.Errorf("站点对不上却填了字段（他人的剧情/演员/封面会写进侧车）：%v", p.Filled)
+	}
+
+	// 反向：站点对得上就必须收下（不然这条判据把正常路径也挡了）。
+	const good = `{"data":[
+	 {"id":"y1","date":"2025-05-05","description":"就是这个","site":{"short_name":"dpg","name":"DPG"}}
+	]}`
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(good))
+	}))
+	defer srv2.Close()
+	s2 := NewThePornDB(ThePornDBOptions{BaseURL: srv2.URL, APIKey: "k"})
+	p2, err := s2.Enrich(context.Background(), "dpg.25.05.05")
+	if err != nil {
+		t.Fatalf("Enrich: %v", err)
+	}
+	if p2.Summary != "就是这个" {
+		t.Errorf("站点对得上却没填简介：%+v", p2)
+	}
+}
+
+// TestWesternSiteMatches 站点比对的归一规则（大小写 / 空格 / 纯字符串形态）。
+func TestWesternSiteMatches(t *testing.T) {
+	cases := []struct {
+		site  string
+		brand string
+		want  bool
+	}{
+		{`{"short_name":"tushyraw","name":"Tushy Raw"}`, "TushyRaw", true},
+		{`{"short_name":"tushy","name":"Tushy"}`, "Tushy", true},
+		{`{"name":"Club Sweethearts"}`, "ClubSweethearts", true},
+		{`{"short_name":"blacked","name":"Blacked"}`, "BlackedRaw", false},
+		{`{}`, "Blacked", true},   // 站点字段缺失：不否决，交给日期判据
+		{`null`, "Blacked", true}, // 同上
+		{`{"short_name":"dpg","name":"DPG"}`, "BSurprise", false},
+	}
+	for _, c := range cases {
+		if got := westernSiteMatches(json.RawMessage(c.site), c.brand); got != c.want {
+			t.Errorf("westernSiteMatches(%s, %q) = %v，期望 %v", c.site, c.brand, got, c.want)
+		}
 	}
 }
