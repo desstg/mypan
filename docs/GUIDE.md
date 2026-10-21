@@ -176,6 +176,11 @@ Emby 认的元数据，全部落在 `.strm` 同层：
 扫描 STRM 任务产出的目录，自动匹配 TMDB，写出 **NFO**（`movie.nfo` / `tvshow.nfo` / 分季分集 NFO）和 **海报图**，让 Emby / Jellyfin 直接就有海报墙。
 
 - 界面上是一个**海报墙**，可以直接看到哪些匹配上了、哪些没匹配上
+- **数据源可以是 STRM 任务，也可以是「本地目录」** —— 手里已有别的工具产出的媒体库
+  （`.strm` + nfo + 图片齐全，但不在任何任务之下）时，把它映射进容器
+  （compose 里 `- /path/to/media:/app/media`）后，在「数据源 → 本地目录」里登记
+  **容器内路径** `/app/media` 即可挂到墙上。登记项只是「墙上的一条记录」，
+  **删掉登记不会删磁盘上的任何文件**
 - 单条操作：**重新匹配**（换 TMDB ID）、**重新刮削**（同 ID 重跑）、**标记为正常**（清掉错误匹配）
 - 写入模式：只补缺失 / 全部覆盖
 - 支持电视剧的**连载状态跟踪**（已完结 / 连载中）
@@ -409,6 +414,12 @@ services:
       - ./data:/app/data
       - ./strm:/app/strm
       - ./mounts:/app/mounts:shared
+      # 宿主机上的媒体库目录（海报墙「数据源 → 本地目录」要用它）。
+      # 左边换成你自己在宿主机上的媒体库路径，右边固定 /app/media；
+      # 程序里注册「本地目录」时填的是**容器内路径**（/app/media），不是左边那个。
+      # 要挂多个就照下面那行加，注意每个的容器内路径别重名。
+      - /path/to/media:/app/media
+      # - /path/to/media2:/app/media2 # 其他媒体库
 
       # 可选：把 FUSE 读缓存单独放到更快的盘上
       # - ./fuse_read_cache:/app/data/fuse_read_cache
@@ -454,6 +465,10 @@ docker compose up -d
 > **`mounts` 后面的 `:shared` 不能省。** FUSE 在容器内挂载后需要把挂载点传播到宿主机，去掉 `:shared` 挂载会失效。
 >
 > **`privileged: true` + `/dev/fuse` + `pid: "host"` 三件套也不能省**，少任何一个 FUSE 都用不了。如果你确定不用 FUSE 挂载，这三项可以去掉。
+>
+> **`/path/to/media:/app/media` 这一行**是给海报墙用的：把宿主机上已有的媒体库目录（别的工具产出的
+> `.strm` + nfo + 图片）映射进容器，然后在「海报墙 → 数据源 → 本地目录」里登记 **`/app/media`**
+> （登记容器内路径，不是左边那个宿主机路径）。不用这个功能就删掉这行，其余功能不受影响。
 
 ### 方式二：host 网络（省掉端口映射）
 
@@ -474,6 +489,8 @@ services:
       - /vol1/1000/docker/MyPan/data:/app/data
       - /vol1/1000/docker/MyPan/strm:/app/strm
       - /vol1/1000/docker/MyPan/mounts:/app/mounts:shared
+      # 媒体库目录（海报墙「数据源 → 本地目录」）。左边换成你的媒体库路径。
+      - /vol1/1000/Media:/app/media
     devices:
       - /dev/fuse:/dev/fuse
     pid: "host"
@@ -497,6 +514,7 @@ docker run -d \
   -v /volume1/docker/MyPan/data:/app/data \
   -v /volume1/docker/MyPan/strm:/app/strm \
   -v /volume1/docker/MyPan/mounts:/app/mounts:shared \
+  -v /volume1/Media:/app/media \
   desstg/mypan:latest
 ```
 
@@ -585,6 +603,7 @@ docker run -d --name pansou -p 805:80 ghcr.io/fish2018/pansou-web
 | `./data` | `/app/data` | SQLite 数据库、全部配置、日志、密钥文件 |
 | `./strm` | `/app/strm` | STRM 文件输出位置 |
 | `./mounts` | `/app/mounts` | FUSE 挂载点目录（**必须 `:shared`**） |
+| `/path/to/media` | `/app/media` | 可选，宿主机上的媒体库目录。海报墙「数据源 → 本地目录」登记的就是**容器内路径**（`/app/media`），不是左边这个宿主机路径 |
 | `./fuse_read_cache` | `/app/data/fuse_read_cache` | 可选，FUSE 读缓存，建议放 SSD |
 
 **`data` 目录是全部身家**，备份它等于备份了整个 MyPan。注意复制时要把 `MyPan.db-wal` 和 `MyPan.db-shm` 一起复制，否则可能丢最近的数据。

@@ -32,6 +32,12 @@ services:
       - ./data:/app/data
       - ./strm:/app/strm
       - ./mounts:/app/mounts:shared
+      # 宿主机上的媒体库目录（海报墙「数据源 → 本地目录」要用它）。
+      # 左边换成你自己在宿主机上的媒体库路径，右边固定 /app/media；
+      # 程序里注册「本地目录」时填的是**容器内路径**（/app/media），不是左边那个。
+      # 要挂多个就照下面那行加，注意每个的容器内路径别重名。
+      - /path/to/media:/app/media
+      # - /path/to/media2:/app/media2 # 其他媒体库
 
       # 可选：将 FUSE 读缓存单独映射，建议放到更快的磁盘
       # - ./fuse_read_cache:/app/data/fuse_read_cache

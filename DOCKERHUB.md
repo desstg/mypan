@@ -168,6 +168,12 @@ services:
       - ./data:/app/data
       - ./strm:/app/strm
       - ./mounts:/app/mounts:shared
+      # 宿主机上的媒体库目录（海报墙「数据源 → 本地目录」要用它）。
+      # 左边换成你自己在宿主机上的媒体库路径，右边固定 /app/media；
+      # 程序里注册「本地目录」时填的是**容器内路径**（/app/media），不是左边那个。
+      # 要挂多个就照下面那行加，注意每个的容器内路径别重名。
+      - /path/to/media:/app/media
+      # - /path/to/media2:/app/media2 # 其他媒体库
 
       # 可选：将 FUSE 读缓存单独映射，建议放到更快的磁盘
       # - ./fuse_read_cache:/app/data/fuse_read_cache
@@ -223,6 +229,9 @@ services:
 访问 `http://你的IP:5211`，默认管理员密码为 `admin`。
 
 需要 FUSE 时请确保宿主机具备 `/dev/fuse` 权限。
+
+> **媒体库目录**：compose 里那行 `/path/to/media:/app/media` 是给海报墙的「数据源 → 本地目录」用的 ——
+> 左边换成你宿主机上的媒体库路径，然后在界面里登记**容器内路径** `/app/media`。不用就删掉这行。
 
 ### 四、盘搜（搜索转存 / 影视订阅的「搜网盘」都靠它）
 
