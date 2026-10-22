@@ -276,6 +276,8 @@ watch(
     }
     wall.close();
     closeDetail();
+    // 浮层整块被卸载：观察器连同它盯着的哨兵一起作废（重开是新的 DOM）。
+    disconnectSentinel();
     closeLayer();
   },
 );
@@ -326,17 +328,26 @@ async function reload() {
     movies.value = res.movies ?? 0;
     maleCount.value = res.male_count ?? 0;
     if (scrollEl.value) scrollEl.value.scrollTop = 0;
-    await nextTick();
-    bindSentinel();
-    scheduleAvatarFill();
   } catch (e) {
     if (seq !== loadSeq) return;
     items.value = [];
     total.value = 0;
     error.value = getApiErrorMessage(e, "加载演员列表失败");
-  } finally {
-    if (seq === loadSeq) loading.value = false;
   }
+  if (seq !== loadSeq) return;
+  // ⚠️ **必须先落 `loading`，再等下一拍去挂哨兵**。
+  //
+  // 哨兵写在模板的 `v-else` 那一支里（`v-if="loading"` / `v-else-if="error"` 都把它替换掉），
+  // 所以 `loading` 还开着的时候 `sentinelEl` 是 null，`bindSentinel()` 会**静默早退**，
+  // 之后再也没有人补挂 —— 观察者永远不观察哨兵，`loadMore()` 一次都不会被触发。
+  //
+  // 用户 2026-10-22 报的正是这个：「演员页好像只能显示 60 个」= 永远停在第一页。
+  // 这是本项目的「静默变空」家族：不报错、不抛异常，只是少了一半东西。
+  loading.value = false;
+  await nextTick();
+  if (seq !== loadSeq) return;
+  bindSentinel();
+  scheduleAvatarFill();
 }
 
 // 勾 / 取消「显示男演员」：从第一页重来（分页是按这一档算的，接着翻会错位）。
@@ -371,14 +382,20 @@ async function loadMore() {
     items.value = [...items.value, ...(res.items ?? [])];
     total.value = res.total ?? total.value;
     totalPage.value = res.total_page ?? totalPage.value;
-    await nextTick();
-    bindSentinel();
-    scheduleAvatarFill();
   } catch (e) {
     if (seq === loadSeq) error.value = getApiErrorMessage(e, "加载更多失败");
   } finally {
     if (seq === loadSeq) loadingMore.value = false;
   }
+  if (seq !== loadSeq) return;
+  // 与 `reload()` 同一个理由：挂完哨兵再补头像。
+  //
+  // 这里还要**先落 `loadingMore` 再 `bindSentinel`**：`observe()` 会立刻回一次
+  // 当前是否可见，那一刻 `loadingMore` 还开着的话 `loadMore()` 直接早退 ——
+  // 若追加完的这一页仍然不够一屏，观察器之后就再也不会回调，列表停在这里。
+  await nextTick();
+  bindSentinel();
+  scheduleAvatarFill();
 }
 
 // —————————————————— 拉到底续加载 ——————————————————
@@ -386,25 +403,43 @@ async function loadMore() {
 // scrollHeight（几百张图的长列表里那是一次布局查询）。哨兵常驻 DOM，重复
 // observe 同一元素是幂等的，每次列表变长后补一次即可。
 let observer: IntersectionObserver | null = null;
+/**
+ * 观察器当前绑的滚动容器。
+ *
+ * 浮层是 `v-if="open"`，关掉再打开时 `scrollEl` 是**另一个 DOM 元素** ——
+ * 旧观察器的 `root` 已经脱离文档，`observe()` 到新哨兵上也不会再有任何回调。
+ * 所以 root 换了就得重建观察器（否则「关一次再开就再也翻不了页」）。
+ */
+let observerRoot: HTMLElement | null = null;
+
+function disconnectSentinel() {
+  observer?.disconnect();
+  observer = null;
+  observerRoot = null;
+}
 
 function bindSentinel() {
-  if (!sentinelEl.value || !scrollEl.value) return;
-  if (!observer) {
+  const root = scrollEl.value;
+  const target = sentinelEl.value;
+  if (!root || !target) return;
+  if (typeof IntersectionObserver === "undefined") return;
+  if (!observer || observerRoot !== root) {
+    observer?.disconnect();
     observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((e) => e.isIntersecting)) void loadMore();
       },
-      { root: scrollEl.value, rootMargin: "200px" },
+      { root, rootMargin: "200px" },
     );
+    observerRoot = root;
   } else {
     observer.disconnect();
   }
-  observer.observe(sentinelEl.value);
+  observer.observe(target);
 }
 
 onBeforeUnmount(() => {
-  observer?.disconnect();
-  observer = null;
+  disconnectSentinel();
   if (searchTimer) clearTimeout(searchTimer);
 });
 </script>
