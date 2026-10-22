@@ -26,6 +26,7 @@ import (
 	_ "embed"
 	"encoding/xml"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -35,6 +36,13 @@ type xmlActor struct {
 	ZhCN    string `xml:"zh_cn,attr"`
 	ZhTW    string `xml:"zh_tw,attr"`
 	Keyword string `xml:"keyword,attr"`
+	// Href 是演员在 JAVDB 的主页（`https://javdb.com/actors/z0GW`）。
+	//
+	// 表里 8000 多条几乎都填了它。**我们不打开那个页面**（要登录，302 → /login），
+	// 只从里面取那个短 id —— 头像地址就是由它拼出来的：
+	// `https://c0.jdbstatic.com/avatars/<id 前两位小写>/<id>.jpg`。
+	// 见 strmscrape 的演员资料层。
+	Href string `xml:"href,attr"`
 }
 
 type xmlRoot struct {
@@ -46,7 +54,48 @@ type xmlRoot struct {
 // 零值不可用（map 是 nil），请用 Parse / Default 取。
 type Table struct {
 	byAlias map[string]string
-	entries int
+	// byUnified 反查：统一名 → 别名列表（保序、**不含统一名本身**）。
+	// 演员详情页要显示「别名」，靠的就是它。
+	byUnified map[string][]string
+	// byJavdbID 反查：统一名 → JAVDB 演员短 id（`z0GW` 这种）。
+	//
+	// 表里的 `href` 就带这个 id，而 JAVDB 的头像地址可以直接由它拼出来
+	// （见 javdbActorAvatarURL）。**不打开那个页面** —— 它要登录。
+	byJavdbID map[string]string
+	entries   int
+}
+
+// Aliases 返回某个统一名对应的别名（保序、不含统一名本身）。
+//
+// 查不到（没这条、或统一名写法对不上）返回 nil —— 调用方照常显示即可。
+func (t *Table) Aliases(unified string) []string {
+	if t == nil || t.byUnified == nil {
+		return nil
+	}
+	return t.byUnified[strings.TrimSpace(unified)]
+}
+
+// JavdbID 返回某个统一名对应的 JAVDB 演员短 id（`z0GW`）。
+//
+// 查不到返回空串。id 只用来拼头像地址，**不用来打开** JAVDB 的演员页
+// （那个页面要登录，匿名访问会 302 到 /login）。
+func (t *Table) JavdbID(unified string) string {
+	if t == nil || t.byJavdbID == nil {
+		return ""
+	}
+	return t.byJavdbID[strings.TrimSpace(unified)]
+}
+
+// Lookup 查这个名字在表里归到哪一条。ok 为假时调用方应原样使用输入名。
+//
+// 与 Resolve 的区别是它把「表里没有」与「表里有、统一名恰好等于原名」分开 ——
+// 后者 `Resolve` 同样返回原名，但界面上可以据此知道「这条是索引表认识的」。
+func (t *Table) Lookup(name string) (string, bool) {
+	if t == nil || t.byAlias == nil {
+		return "", false
+	}
+	unified, ok := t.byAlias[strings.TrimSpace(name)]
+	return unified, ok
 }
 
 // Len 返回条目数（不是别名数）—— 给日志与测试看。
@@ -98,7 +147,22 @@ func Parse(data []byte) (*Table, error) {
 	if err := xml.Unmarshal(data, &root); err != nil {
 		return nil, err
 	}
-	t := &Table{byAlias: make(map[string]string, len(root.Actors)*2)}
+	t := &Table{
+		byAlias:   make(map[string]string, len(root.Actors)*2),
+		byUnified: make(map[string][]string, len(root.Actors)),
+		byJavdbID: make(map[string]string, len(root.Actors)),
+	}
+	// href 单独记一份：同一统一名可能有多条（极少见），先出现的赢 ——
+	// 与别名裁决的「先出现优先」同一口径，免得两份表各按各的规则。
+	for _, a := range root.Actors {
+		if unified := outputName(a); unified != "" {
+			if id := javdbIDFromHref(a.Href); id != "" {
+				if _, dup := t.byJavdbID[unified]; !dup {
+					t.byJavdbID[unified] = id
+				}
+			}
+		}
+	}
 	// firstSeen 记「这个别名是不是第一次见」，配合 exact 的升级实现
 	// 「原文相等优先、其次先出现」—— 见下面循环里的两条分支。
 	exact := make(map[string]bool, len(root.Actors)*2)
@@ -122,7 +186,30 @@ func Parse(data []byte) (*Table, error) {
 			exact[alias] = alias == unified
 		}
 	}
+	// 反查表要**在裁决之后**建：别名被别人抢走的那一条不该再列出来，
+	// 否则演员详情里会显示一个其实指向别人的名字。
+	t.buildUnifiedIndex()
 	return t, nil
+}
+
+// buildUnifiedIndex 按最终裁决结果重建「统一名 → 别名」。
+//
+// 别名本身等于统一名时不列（那是「本人」，不是别名）；同一个别名只归一处
+// （`byAlias` 已经裁决过），所以这里不会重复。
+func (t *Table) buildUnifiedIndex() {
+	if t.byUnified == nil {
+		t.byUnified = make(map[string][]string, t.entries)
+	}
+	for alias, unified := range t.byAlias {
+		if alias == unified {
+			continue
+		}
+		t.byUnified[unified] = append(t.byUnified[unified], alias)
+	}
+	// map 遍历是无序的 —— 排一下，让「别名」那行的顺序在每次打开时都一样。
+	for unified := range t.byUnified {
+		sort.Strings(t.byUnified[unified])
+	}
 }
 
 // outputName 取这个条目要输出的统一名：**zh_cn 优先，没有就 zh_tw**（用户定的）。
@@ -137,8 +224,34 @@ func outputName(a xmlActor) string {
 	return strings.TrimSpace(a.ZhTW)
 }
 
-// splitKeywords 拆 `,A,B,C,` 形式的别名表。
+// javdbIDFromHref 从 `https://javdb.com/actors/z0GW` 里取 `z0GW`。
 //
+// 不引 net/url 也不做严格解析：这是随二进制发的数据，形态就这一种；
+// 拿到别的东西（空串、别人家的链接）时返回空串，调用方当作「没有」。
+// id 的字符集实测是大小写字母 + 数字。
+func javdbIDFromHref(href string) string {
+	href = strings.TrimSpace(href)
+	if href == "" {
+		return ""
+	}
+	const marker = "/actors/"
+	idx := strings.LastIndex(href, marker)
+	if idx < 0 {
+		return ""
+	}
+	id := strings.Trim(strings.TrimSpace(href[idx+len(marker):]), "/")
+	if id == "" || strings.ContainsAny(id, "/?&# ") {
+		return ""
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return ""
+		}
+	}
+	return id
+}
+
+// splitKeywords 拆 `,A,B,C,` 形式的别名表。//
 // 首尾那两个逗号是原表的写法（也为精确匹配服务），拆的时候当空段丢掉。
 // 顺带按 `,` 切分而不是按子串找 —— 别名里本身可能含空格、点、连字符。
 func splitKeywords(raw string) []string {

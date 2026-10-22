@@ -156,6 +156,16 @@ type javWallSnapshot struct {
 	// 用 sync.Once 而不是「判一个 bool」：快照是**多个请求共享**的，两个请求同时首列
 	// 会一起往里写（数据竞争）。
 	fillMetaOnce sync.Once
+
+	// rowActors 是每一行的演员（侧车优先、nfo 兜底），与 rows 一一对应。
+	//
+	// 由演员墙那条路读一次并缓存（actorsOnce），理由与 fillMetaOnce 相同：
+	// 每部片两次读盘，而海报墙的数据源可能是网盘 / SMB —— 打开一次演员墙、
+	// 敲一个字、换一页都重读一遍的话，那面墙根本用不了。
+	//
+	// ⚠️ 它**不随快照失效**是安全的：快照一旦重建，这份也跟着从零开始。
+	actorsOnce sync.Once
+	rowActors  [][]javActorRef
 }
 
 // javWallRow 是卡片 + 标题缓存的键（nfo 的 mtime/size）。

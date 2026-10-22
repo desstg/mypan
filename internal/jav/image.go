@@ -11,6 +11,7 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/jav/javdb"
+	"litepan/internal/settings"
 )
 
 // 图片代理。
@@ -52,6 +53,17 @@ var allowedImageHosts = map[string]struct{}{
 	"javbus.com":       {},
 	"www.javbus.com":   {},
 	"pics.javbus.com":  {},
+	// pics.dmm.co.jp 是 avbase 给演员头像用的那个图床（`mono/actjpgs/*.jpg`）。
+	// 本机直连不通，与 JAVDB 那两个 CDN 一样要经后端；见 javwall_actor_profile.go。
+	"pics.dmm.co.jp": {},
+	// 维基的图床：演员资料层的**高清人像**（960 宽）来自这里，比 JAVDB 的
+	// 300×300、dmm 的 90×122 大一个量级。⚠️ 这两个域名对 `Go-http-client`
+	// 直接 403，必须带浏览器 UA —— FetchImage 用的正是那个 UA。
+	//
+	// `thumb.` 那个只在理论上需要：资料层解析时已经把域名换成 `upload.`
+	// （`thumb.` 在本机直连会挂死 20 秒，见 strmscrape.stripWikiQuery）。
+	"upload.wikimedia.org": {},
+	"thumb.wikimedia.org":  {},
 }
 
 // imageAllowedHost 判断域名是否在白名单里。
@@ -105,15 +117,32 @@ func (s *Service) FetchImage(ctx context.Context, rawURL string) ([]byte, string
 	req.Header.Set("User-Agent", imgUA)
 	// Referer 按站点给：两家 CDN 都有防盗链，给错了会拿到 403 或者一张占位图。
 	// 而占位图同样是 200 + 图片类型 —— 不报错，只是显示成别人的图，很难发现。
-	if strings.Contains(parsed.Hostname(), "javbus") {
+	switch {
+	case strings.Contains(parsed.Hostname(), "javbus"):
 		req.Header.Set("Referer", "https://www.javbus.com/")
-	} else {
+	case strings.Contains(parsed.Hostname(), "dmm"):
+		// dmm 实测不校验 Referer，但给自家站更稳妥。
+		req.Header.Set("Referer", "https://www.dmm.co.jp/")
+	default:
 		req.Header.Set("Referer", "https://javdb.com/")
 	}
 
 	resp, err := s.imageClient.Do(req)
 	if err != nil {
-		return nil, "", upstreamErr(err)
+		// 直连不通时**再走一次代理**。
+		//
+		// 为什么要有这一层：`imageClient` 是直连的（封面的 CDN 直连更快），
+		// 但白名单里现在还有 `pics.dmm.co.jp`（avbase 的演员头像）—— 那个域名
+		// 在本机直连必超时，只有经代理才通。不让它走代理的话，演员头像永远
+		// 是一张占位图，而日志里只有一行「网络错误」，很难想到是「这台机器直连
+		// 打不通这个域名」。
+		if alt := s.proxiedImageClient(); alt != nil {
+			req2 := req.Clone(req.Context())
+			resp, err = alt.Do(req2)
+		}
+		if err != nil {
+			return nil, "", upstreamErr(err)
+		}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -129,6 +158,37 @@ func (s *Service) FetchImage(ctx context.Context, rawURL string) ([]byte, string
 		data = decodeScrambled(data)
 	}
 	return data, imageContentType(parsed.Path), nil
+}
+
+// proxiedImageClient 是图片代理的**备用出口**：直连失败后再经代理试一次。
+//
+// 只看「代理地址填了没有」（`settings.ConfiguredProxyURL`），**不看「启用代理」开关**。
+// 理由与那个函数本身的说明一致：取图是锦上添花，失败是**静默**的（界面上就是一张
+// 占位图），用户根本不会想到是某个开关没开。而且这条只在直连已经失败之后才走 ——
+// 开关关着、直连又能通的场景完全不受影响。
+//
+// 需要它的是 `pics.dmm.co.jp`（avbase 的演员头像）：本机直连必超时，只有经代理才通。
+func (s *Service) proxiedImageClient() *http.Client {
+	if s.settings == nil {
+		return nil
+	}
+	proxy := settings.ConfiguredProxyURL(s.settings)
+	if proxy == "" {
+		return nil
+	}
+	pu, err := url.Parse(proxy)
+	if err != nil {
+		return nil
+	}
+	return &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyURL(pu),
+			MaxIdleConns:        8,
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     60 * time.Second,
+		},
+	}
 }
 
 // decodeScrambled 解码 JAVDB 的混淆图片。

@@ -324,6 +324,38 @@ func (c *Client) lookupMovie(ctx context.Context, id int) (json.RawMessage, erro
 	return c.lookupPlain(ctx, id, mediaTypeMovie)
 }
 
+// SearchPerson 按人名搜 TMDB（`search/person`）。
+//
+// 番号演员与 TMDB 的演职员是**两套 id**，没有可靠的映射，只能按名字查；
+// 查不到就什么也不做（演员详情页那一段整块不出现）。调用方负责取舍
+// 「第一条是不是这个人」，见 strmscrape.javActorTMDBInfo。
+func (c *Client) SearchPerson(ctx context.Context, query string) ([]json.RawMessage, error) {
+	if c == nil || c.apiKey == "" {
+		return nil, fmt.Errorf("tmdb: missing api key")
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("tmdb: empty query")
+	}
+	q := c.lookupQuery()
+	q.Set("query", query)
+	return c.search(ctx, c.apiBaseURL()+"/search/person", q)
+}
+
+// LookupPerson 取一个人的详情（简介 / 生日 / 出生地 / 头像 / 别名）。
+//
+// **不带 append_to_response**：演员墙只要正文那几项，而 `combined_credits`
+// 动辄几百 KB（作品多的人上千条），为一段简介多付这个体积不划算。
+func (c *Client) LookupPerson(ctx context.Context, personID int) (json.RawMessage, error) {
+	if c == nil || c.apiKey == "" {
+		return nil, fmt.Errorf("tmdb: missing api key")
+	}
+	if personID <= 0 {
+		return nil, fmt.Errorf("tmdb: invalid person id %d", personID)
+	}
+	return c.get(ctx, fmt.Sprintf("%s/person/%d", c.apiBaseURL(), personID), c.lookupQuery())
+}
+
 func (c *Client) lookupTV(ctx context.Context, id int) (json.RawMessage, error) {
 	return c.lookupPlain(ctx, id, mediaTypeTV)
 }

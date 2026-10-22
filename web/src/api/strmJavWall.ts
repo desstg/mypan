@@ -477,3 +477,206 @@ export function deleteJavWallItem(ref: number | WallSourceRef, relDir: string, s
     stem,
   });
 }
+
+// ————————————————————— 演员墙 —————————————————————
+//
+// 数据是**所有番号墙上的影片自己的**演员（侧车 json 优先、nfo 兜底），不是上游的
+// 演员库。「N 部」= 墙上有几部片出现了这位演员。
+
+/** 演员墙上的一个卡片。 */
+export interface JavWallActorCard {
+  /**
+   * 详情要原样带回来的标识：有上游 id 就是 id，否则 `name:<小写名字>`。
+   *
+   * ⚠️ 与 `name` 不是一回事：`name` 会被索引表换成**中文统一名**，`key` 仍然是
+   * 聚合时用的那个键（id 或侧车里的原始名字）。
+   */
+  key: string;
+  /** 上游演员 id，空串 = 只在 nfo 里见过这个名字。 */
+  id?: string;
+  /** 显示名：索引表里有这位演员时是**中文统一名**，否则是侧车 / nfo 里的原名。 */
+  name: string;
+  /**
+   * 别名（不含 name 本身）。同样来自索引表；表里没有这位演员时为空。
+   *
+   * 用户要求（2026-10-21）：详情页把别名一并列出来。
+   */
+  aliases?: string[];
+  /** 1 = 男。0 = 侧车没说。 */
+  gender: number;
+  /** 上游原始地址（可能经 XOR 混淆），**必须**走 javImageURL 包一层。 */
+  avatar_url?: string;
+  /** 墙上有几部影片出现了这位演员。 */
+  movies_count: number;
+}
+
+/** TMDB 的个人档案（`/person/{id}` 里那几项）。 */
+export interface JavWallActorTMDB {
+  id: number;
+  name: string;
+  /** TMDB 图片路径（`/abc.jpg`），**不是完整地址** —— 走 `javActorPhotoURL()` 代理。 */
+  profile_path?: string;
+  birthday?: string;
+  deathday?: string;
+  place_of_birth?: string;
+  /** Acting / Directing / …（TMDB 原文，不翻译）。 */
+  known_for_department?: string;
+  biography?: string;
+  also_known_as?: string[];
+}
+
+/** 演员参演的一部**墙上的**影片（点开走那一面墙的详情抽屉）。 */
+export interface JavWallActorMovie {
+  /** 数据源：任务 id 或本地目录 id，二者恰有一个非空。 */
+  strm_task_id?: number;
+  local_dir_id?: string;
+  /** 这面墙的名字（任务名 / 本地目录显示名）—— 片子可能来自好几面墙。 */
+  source_name: string;
+  /** 海报墙上那张卡的 id（只在那一面墙里唯一）。 */
+  id: string;
+  rel_dir: string;
+  stem: string;
+  number: string;
+  title: string;
+  category?: string;
+  release_date?: string;
+  added_at?: string;
+  poster_url?: string;
+  thumb_url?: string;
+}
+
+export interface JavWallActorListResult {
+  items: JavWallActorCard[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_page: number;
+  /** 聚合了几面粉号墙 / 一共几部墙上的片（空列表时用来解释「为什么是空的」）。 */
+  sources: number;
+  movies: number;
+  /**
+   * 这次被**「不显示男演员」**挡掉的位数（只数关键词命中的那批）。
+   *
+   * 默认口径不列男优，所以空列表可能是「有演员、但都是男优」——
+   * 没有这个数，那种情况会显示成「一条演员都没有」，看着像坏了。
+   */
+  male_count?: number;
+}
+
+export interface JavWallActorDetailResult {
+  actor: JavWallActorCard;
+  items: JavWallActorMovie[];
+  total: number;
+}
+
+/**
+ * 演员墙的一页。
+ *
+ * ⚠️ **不带数据源**：要的是所有番号墙上的演员，不是当前选中那一面
+ * （见后端 listJavWallActors 的说明）。
+ *
+ * `include_male` 默认**不传**（= 不列男优，用户 2026-10-21 定的默认口径）。
+ *
+ * `anchor` 是「点名」：这位演员一定出现在结果里，不受关键词与男优口径影响。
+ * 从详情页点别名去搜时用它，否则别名（avbase / JAVDB 的罗马音、旧艺名）在墙上
+ * 的索引里查不到，用户会看到「一个都没有」。
+ */
+export function fetchJavWallActors(
+  params: { keyword?: string; page?: number; page_size?: number; include_male?: boolean; anchor?: string } = {},
+) {
+  const query: Record<string, string | number> = {};
+  if (params.keyword) query.keyword = params.keyword;
+  if (params.page) query.page = params.page;
+  if (params.page_size) query.page_size = params.page_size;
+  // 只在**要男演员**时才带这个键：后端判 `==1`，缺省就是不要。
+  if (params.include_male) query.include_male = 1;
+  if (params.anchor) query.anchor = params.anchor;
+  return http.get<JavWallActorListResult>("/admin/strm-scrape/jav-wall/actors", query);
+}
+
+/**
+ * 一位演员 + 参演的墙上影片。
+ *
+ * `key` 走 query 而不是路径段：名字里可能有空格与斜杠，编码进路径迟早出事。
+ */
+export function fetchJavWallActorDetail(key: string) {
+  return http.get<JavWallActorDetailResult>("/admin/strm-scrape/jav-wall/actor", { key });
+}
+
+/**
+ * 一位演员的 TMDB 补充档案（简介 / 生日 / 出生地 / 别名）。
+ *
+ * **与详情分开请求**：详情要「立刻看到片」，而 TMDB 可能很慢 / 不通（后端那侧
+ * 也给它单独设了预算）。这条失败 / 回 null 时详情页照常显示，只是少一段补充资料。
+ */
+export function fetchJavWallActorTMDB(key: string) {
+  return http.get<JavWallActorTMDB | null>("/admin/strm-scrape/jav-wall/actor/tmdb", { key });
+}
+
+/**
+ * 一位演员的**资料档案**（生日 / 出身 / 三围 / 头像 / 别名）。
+ *
+ * 后端把三个源拼成一份（avbase → JAVDB 搜索 → 索引表的 href），**不打开** JAVDB
+ * 的演员主页（那个要登录）。与 TMDB 那条一样是独立的补充请求：它要打外站，
+ * 慢和不通都是常态，回来就补上面板，没回来也就少一段资料。
+ */
+export interface JavWallActorProfile {
+  /** 上游给的名字（通常是日文原名）；显示名仍然是卡片上的中文统一名。 */
+  name?: string;
+  /** 三个源并集后的别名（不含主名）。 */
+  aliases?: string[];
+  /** 1 = 男（侧车没给时由 avbase 的「男優」标签补）。 */
+  gender?: number;
+  /** 上游原始地址，**必须**走 javImageURL 包一层（JAVDB CDN 直连不通）。 */
+  avatar_url?: string;
+  /**
+   * 维基条目首图（960 宽），比 `avatar_url` 那张（JAVDB 300×300 / dmm 90×122）
+   * 清楚一个量级。**只给详情抽屉用** —— 墙上一屏几十张卡，拉大图是白花流量，
+   * 后端因此把它单独放在这个字段里，没有并进 `avatar_url`。
+   */
+  avatar_hd_url?: string;
+  birthday?: string;
+  birthplace?: string;
+  /** 身高 / 三围（cm），0 = 不知道。 */
+  height?: number;
+  bust?: number;
+  waist?: number;
+  hip?: number;
+  /** 罩杯（`J` / `E`），空 = 不知道。 */
+  cup?: string;
+  blood_type?: string;
+  hobby?: string;
+  /** avbase 的站点标签（`男優` / `舞ワイフ` 这类），原文照给。 */
+  note?: string;
+  /** JAVDB 演员短 id（`z0GW`）。 */
+  javdb_id?: string;
+  /**
+   * 维基导言那一段（**介绍**）。avbase / JAVDB 都没有这个字段，只有维基有。
+   *
+   * 中文条目存在时是中文，否则是日文原文（看 `intro_lang` 决定要不要标「日文原文」）。
+   */
+  intro?: string;
+  /** `intro` 的语言：`zh` / `ja`。 */
+  intro_lang?: string;
+  /** 维基条目页地址（「去维基看全文」）。 */
+  wiki_url?: string;
+  /** 拼出这份档案的源：`actormap` / `avbase` / `javdb` / `wikipedia`。 */
+  sources?: string[];
+}
+
+/** 演员资料档案。查不到时后端回 `null`（不是错误）。 */
+export function fetchJavWallActorProfile(key: string) {
+  return http.get<JavWallActorProfile | null>("/admin/strm-scrape/jav-wall/actor/profile", { key });
+}
+
+/**
+ * TMDB 人像的代理地址（`actor.tmdb.profile_path` → 可直接当 src 用）。
+ *
+ * 与番号封面同一个理由：image.tmdb.org 在国内浏览器经常打不开，必须由后端转发。
+ * 空路径原样返回空串，让 `<img v-if>` 正常跳过。
+ */
+export function javActorPhotoURL(path: string | undefined | null, size = "w185"): string {
+  const p = (path ?? "").trim();
+  if (!p) return "";
+  return `/api/admin/strm-scrape/jav-wall/actor/photo?path=${encodeURIComponent(p)}&size=${encodeURIComponent(size)}`;
+}

@@ -2167,13 +2167,36 @@
   border-radius: 0;
   background: transparent;
   cursor: default;
+  /* 有 `key` 的演员渲染成 <button>（点头像开演员详情），按钮会带自己的字体与
+     text-align —— 不重置的话名字会变成浏览器的默认字体、居中也会丢。 */
+  font: inherit;
+  color: inherit;
+  text-align: left;
 }
 
-/* 把 `.jd-actor:hover` 那条也压掉：演员图**不可点**，hover 变品牌色是骗人的
-   （番号那面的胶囊是可点的——跳演员搜索——这一面不是）。 */
+/* 把 `.jd-actor:hover` 那条也压掉：演员图默认**不可点**，hover 变品牌色是骗人的。
+   （番号那面的胶囊是可点的——跳演员搜索——这一面不是。） */
 .wall-detail__actor:hover {
   border-color: transparent;
   color: var(--text);
+}
+
+/* 番号那面：演员能点开详情（`openActor`），这时给出可点的反馈。
+   用名字变色 + 头像轻微上浮，与「点了会开一层」这件事对得上；
+   TMDB 那面没有 key，走上面那条 default。 */
+.wall-detail__actor--link {
+  cursor: pointer;
+}
+.wall-detail__actor--link:hover .wall-detail__actor-name {
+  color: var(--brand);
+}
+.wall-detail__actor--link:hover .wall-detail__actor-photo {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 55%, transparent);
+}
+.wall-detail__actor--link:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+  border-radius: 8px;
 }
 
 .wall-detail__actor-photo {

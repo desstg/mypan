@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import AdminSettingsDrawer from "@/components/admin/AdminSettingsDrawer.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
 import { javImageURL } from "@/api/jav";
-import type { PlayableFile, WallDetail } from "@/api/strmScrape";
+import type { PlayableFile, WallActor, WallDetail } from "@/api/strmScrape";
 import "@/styles/jav.css";
 
 /**
@@ -50,6 +50,14 @@ const emit = defineEmits<{
   close: [];
   /** 请求播放某一集（`path` 是 `.strm` 正文里那行地址，`subtitles` 是同目录字幕）。 */
   play: [file: PlayableFile];
+  /**
+   * 点了某位演员（番号那面才有）：由外层打开演员详情。
+   *
+   * 不在本组件里自己开：演员详情是 elevated（10040）一档的兄弟浮层，两个兄弟
+   * 叠在一起谁在上面只看 DOM 顺序。交给外层（`StrmJavWall` / `JavActorWall`）
+   * 统一挂、统一管 Esc，面包屑才是干净的。
+   */
+  openActor: [actor: WallActor];
 }>();
 
 /** 选集面板：剧集（多条可播文件）点播放键时先弹它。 */
@@ -275,17 +283,29 @@ watch(lightboxIndex, (v) => {
         </div>
       </div>
 
-      <!-- 演员：**矩形图，不裁圆**（用户要求）。没有头像的画占位人形。 -->
+      <!-- 演员：**矩形图，不裁圆**（用户要求）。没有头像的画占位人形。
+           每个演员是一颗按钮：点一下打开**演员详情**（用户 2026-10-21 的要求）。
+           `a.key` 由后端算好（聚合口径只在后端那一处），TMDB 那面没有 key，
+           那时整块退化成不可点 —— 那种墙本来也没有演员墙可跳。 -->
       <div v-if="detail.actors?.length" class="jd-card" style="margin-top: 18px">
         <div class="jd-card__title"><i class="fas fa-user" /> 演员 ({{ detail.actors.length }})</div>
         <div class="jd-actors wall-detail__actors">
-          <div v-for="a in detail.actors" :key="a.id || a.name" class="jd-actor wall-detail__actor">
+          <component
+            :is="a.key ? 'button' : 'div'"
+            v-for="a in detail.actors"
+            :key="a.key || a.id || a.name"
+            class="jd-actor wall-detail__actor"
+            :class="{ 'wall-detail__actor--link': a.key }"
+            :type="a.key ? 'button' : undefined"
+            :title="a.key ? `查看 ${a.name} 的资料` : a.name"
+            @click="a.key && emit('openActor', a)"
+          >
             <div class="jd-actor__avatar wall-detail__actor-photo">
               <img v-if="a.avatar_url" :src="actorAvatar(a)" :alt="a.name" loading="lazy" />
               <i v-else class="fas fa-user" aria-hidden="true" />
             </div>
             <div class="wall-detail__actor-name" :title="a.name">{{ a.name }}</div>
-          </div>
+          </component>
         </div>
       </div>
 

@@ -470,6 +470,20 @@ func NewRouter(d Deps) http.Handler {
 					// ⚠️ 这两条**会真的删本地文件与网盘目录**，前端必须先弹确认。
 					r.Post("/jav-wall/item/delete-preview", h.previewJavWallDelete)
 					r.Post("/jav-wall/item/delete", h.deleteJavWallItem)
+
+					// 演员墙：把**所有**番号墙（每个番号任务 + 每个番号本地目录）上的演员
+					// 聚起来。数据是墙上那些影片自己的侧车 / nfo，不是上游的演员库。
+					// 详情要带 `key` 回来（演员 id 或 `name:<名字>`），所以走 query 而不是路径段
+					// —— 名字里可能有空格 / 斜杠。
+					r.Get("/jav-wall/actors", h.listJavWallActors)
+					r.Get("/jav-wall/actor", h.getJavWallActorDetail)
+					// TMDB 补充档案单独一条：它可以慢、可以失败，不该拖着详情一起等。
+					r.Get("/jav-wall/actor/tmdb", h.getJavWallActorTMDB)
+					// 资料档案（生日 / 出身 / 三围 / 头像）：avbase + JAVDB + 索引表拼出来的，
+					// 同样单独一条 —— 它要打外站，慢和不通都是常态。
+					r.Get("/jav-wall/actor/profile", h.getJavWallActorProfile)
+					// 演员详情里那张 TMDB 人像的代理（image.tmdb.org 国内直连打不开）。
+					r.Get("/jav-wall/actor/photo", h.getJavWallActorPhoto)
 				})
 				r.Route("/automation", func(r chi.Router) {
 					r.Get("/rules", h.listAutomationRules)

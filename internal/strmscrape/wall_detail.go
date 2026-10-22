@@ -33,6 +33,13 @@ import (
 type WallActor struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Key 是这位演员在**演员墙聚合**里的标识（`javActorKey`：有上游 id 就是 id，
+	// 否则 `name:<小写名字>`）。
+	//
+	// 抽屉里点演员头像会去打开演员详情，那条请求要的就是这个键。由后端算而不是
+	// 前端拼：聚合时「nfo 里只有名字的那批会被并到侧车那份的 id 上」这条规则
+	// 只存在于聚合代码里，前端照抄一份迟早漂。
+	Key string `json:"key,omitempty"`
 	// Gender 是上游性别码（1 = 男）。抽屉只用它决定头像占位图标画人还是画女。
 	Gender int `json:"gender"`
 	// AvatarURL 是**原始上游地址**（可能经 XOR 混淆）。
@@ -151,8 +158,15 @@ func (s *Service) JavWallDetail(ctx context.Context, srcRef WallSourceRef, relDi
 			if name == "" {
 				continue
 			}
+			avatar := strings.TrimSpace(a.Avatar)
+			if avatar == "" {
+				// 侧车没带头像时用索引表的 JAVDB id 拼一张（零网络）。抽屉里
+				// 演员那一格一屏也就十来个，浏览器取不到自然落占位图。
+				avatar = javdbAvatarFromIndex(name)
+			}
 			detail.Actors = append(detail.Actors, WallActor{
-				ID: a.ID, Name: name, Gender: a.Gender, AvatarURL: strings.TrimSpace(a.Avatar),
+				ID: a.ID, Name: name, Gender: a.Gender, AvatarURL: avatar,
+				Key: javActorKey(a.ID, name),
 			})
 		}
 	}
@@ -212,7 +226,11 @@ func (s *Service) JavWallDetail(ctx context.Context, srcRef WallSourceRef, relDi
 			if len(detail.Actors) == 0 {
 				for _, name := range meta.Actors {
 					if name = strings.TrimSpace(name); name != "" {
-						detail.Actors = append(detail.Actors, WallActor{Name: name})
+						detail.Actors = append(detail.Actors, WallActor{
+							Name:      name,
+							AvatarURL: javdbAvatarFromIndex(name),
+							Key:       javActorKey("", name),
+						})
 					}
 				}
 			}

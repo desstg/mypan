@@ -19,6 +19,9 @@ import MediaImage from "@/components/base/MediaImage.vue";
 import type { DropdownMenuItem } from "@/types/menu";
 import StrmJavMetaDrawer from "@/components/admin/StrmJavMetaDrawer.vue";
 import StrmJavWallDeleteModal from "@/components/admin/StrmJavWallDeleteModal.vue";
+import JavWallActorDetailDrawer from "@/components/admin/JavWallActorDetailDrawer.vue";
+import type { JavWallActorCard } from "@/api/strmJavWall";
+import type { WallActor } from "@/api/strmScrape";
 import { confirm } from "@/composables/useConfirm";
 import { findScrollBox, useFillViewport } from "@/composables/useFillViewport";
 import { toast } from "@/composables/useToast";
@@ -1286,10 +1289,65 @@ onUnmounted(() => {
   disconnectLoadMoreObserver();
   document.removeEventListener("scroll", onAnyScroll, { capture: true } as EventListenerOptions);
   window.removeEventListener("resize", scheduleBudgetRefresh);
+  window.removeEventListener("keydown", onActorLayerKey);
 });
 
 // 卡片点击 → 详情抽屉 → 从抽屉里播放。**卡片上不再有播放键**（用户要求）。
 const wall = useWallDetail();
+
+/**
+ * 影片详情里点了某位演员 → 打开演员详情（用户 2026-10-21 的要求）。
+ *
+ * # 为什么这里要说一句「这一面墙没有演员页」
+ *
+ * 从**演员墙**（`JavActorWall`）点进来的演员详情是叠在那一页上的，关掉就回到演员
+ * 列表；而这里是从海报墙的影片详情点进来的，底下没有演员墙 —— 关掉就是回海报墙。
+ * 所以在这一面传 `:searchable="false"`（别名不可点去搜），`:raised="true"`
+ * （压过影片详情，两个都是 elevated 同档）。
+ *
+ * `JavWallActorCard` 只填 key / name / gender / avatar：详情抽屉拿到 key 就自己
+ * 去后端取完整的那份（片单 + 资料档案），这里给的那几项只是**首屏占位**，
+ * 免得抽屉打开的头几百毫秒是一条「加载中…」。
+ */
+const actorDetailOpen = ref(false);
+const actorDetailCard = ref<JavWallActorCard | null>(null);
+
+function openActorFromMovie(actor: WallActor) {
+  if (!actor.key) return;
+  actorDetailCard.value = {
+    key: actor.key,
+    id: actor.id,
+    name: actor.name,
+    gender: actor.gender ?? 0,
+    // 影片详情里那张已经是索引表拼过的地址（侧车没头像时），直接沿用 ——
+    // 详情抽屉的探针会再换一张更可靠的，换不到就显示这张。
+    avatar_url: actor.avatar_url,
+    movies_count: 0,
+  };
+  actorDetailOpen.value = true;
+}
+
+// Esc：影片详情抽屉自己不挂键盘处理（`useWallDetail` 也不挂），而演员详情是
+// 从它里面开出来的一层。这一面没有别的浮层栈可挂，所以在这里收口：
+// 播放窗 → 演员详情 → 影片详情，一层一层关。
+//
+// 顺序与**叠放**一致：演员详情在模板里传了 `raised`（压过影片详情那一档），
+// 所以它在上，先关它 —— 关掉就回到影片详情，再按一次才回到海报墙。
+function onActorLayerKey(e: KeyboardEvent) {
+  if (e.key !== "Escape") return;
+  if (wall.playerOpen.value) {
+    wall.closePlayer();
+    return;
+  }
+  if (actorDetailOpen.value) {
+    actorDetailOpen.value = false;
+    return;
+  }
+  if (wall.open.value) {
+    wall.close();
+  }
+}
+onMounted(() => window.addEventListener("keydown", onActorLayerKey));
 
 defineExpose({
   refreshMeta,
@@ -1525,6 +1583,17 @@ defineExpose({
       :error="wall.error.value"
       @close="wall.close"
       @play="wall.play"
+      @open-actor="openActorFromMovie"
+    />
+    <!-- 演员详情：从上面那个影片详情里点演员进来（用户 2026-10-21 的要求）。
+         `raised` 让它压过影片详情 —— 两个都是 elevated 同档，只靠 DOM 顺序不稳。
+         `:searchable="false"`：这一面底下没有演员墙，别名点了没法去搜。 -->
+    <JavWallActorDetailDrawer
+      :open="actorDetailOpen"
+      :actor="actorDetailCard"
+      raised
+      @close="actorDetailOpen = false"
+      @open-movie="(source, movie) => wall.openJav(source, movie)"
     />
     <WallPlayer
       v-if="wall.playerOpen.value"

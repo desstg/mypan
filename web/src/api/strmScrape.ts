@@ -352,6 +352,12 @@ export interface WallSource {
  */
 export interface WallActor {
   id?: string;
+  /**
+   * 演员墙聚合里的标识（`javActorKey`：有上游 id 就是 id，否则 `name:<小写名字>`）。
+   *
+   * 番号那面会给，用来「点头像 → 打开演员详情」；TMDB 那面不填（它没有演员墙）。
+   */
+  key?: string;
   name: string;
   /** 上游性别码：1 = 男。TMDB 那面不填（它没有这个字段）。 */
   gender?: number;

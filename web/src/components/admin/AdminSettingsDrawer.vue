@@ -15,8 +15,16 @@ withDefaults(
      * 那些弹窗是 2000~3000 一段，默认档会被它们整个盖住。
      */
     elevated?: boolean;
+    /**
+     * 再往上抬一档，压过**另一个 elevated 抽屉**。
+     *
+     * 给「从 elevated 抽屉里再开一层」用（例如影片详情里点演员 → 演员详情）。
+     * 两个 elevated 抽屉的 z-index 相同，谁在上面只看 DOM 顺序 —— 那种耦合
+     * 在组件树挪一下就会翻，所以这里给被压住的那一侧一个明确的档位。
+     */
+    raised?: boolean;
   }>(),
-  { saving: false, canSave: false, hideFoot: false, elevated: false },
+  { saving: false, canSave: false, hideFoot: false, elevated: false, raised: false },
 );
 
 const emit = defineEmits<{
@@ -33,6 +41,7 @@ const emit = defineEmits<{
       :class="{
         'admin-settings-drawer--open': open,
         'admin-settings-drawer--elevated': elevated,
+        'admin-settings-drawer--raised': raised,
       }"
     >
       <div
@@ -96,6 +105,12 @@ const emit = defineEmits<{
    才压得住这里的 10040 —— 抬本抽屉时记得一并看一眼那类浮层。 */
 .admin-settings-drawer--elevated {
   z-index: calc(var(--z-dropdown) - 10);
+}
+
+/* 再抬一档：压过**另一个 elevated 抽屉**（同一 z-index 时只看 DOM 顺序，
+   那种耦合挪一下组件树就翻）。仍留在全局叠层之下 —— 确认框 / toast 照样盖得住。 */
+.admin-settings-drawer--raised {
+  z-index: calc(var(--z-dropdown) - 9);
 }
 
 .admin-settings-drawer__backdrop {

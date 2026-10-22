@@ -137,6 +137,54 @@ func TestParseExactMatchOnly(t *testing.T) {
 	}
 }
 
+// TestAliases 反查：统一名 → 别名（不含统一名本身、保序去重）。
+//
+// 演员详情页显示「别名」就靠这一条。**别名被别人抢走的那一条不该再列出来** ——
+// 否则会显示一个其实指向别人的名字。
+func TestAliases(t *testing.T) {
+	const raw = `<actor>
+  <a zh_cn="AIKA" keyword=",AIKA,優木あいか,本田愛華,"/>
+  <a zh_cn="彩月七緒" keyword=",彩月七緒,彩月,"/>
+</actor>`
+	tbl, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := tbl.Aliases("AIKA")
+	if strings.Join(got, "|") != "優木あいか|本田愛華" {
+		t.Errorf("Aliases(AIKA) = %v，期望 [優木あいか 本田愛華]（不含统一名本身）", got)
+	}
+	if got := tbl.Aliases("彩月七緒"); len(got) != 1 || got[0] != "彩月" {
+		t.Errorf("Aliases(彩月七緒) = %v", got)
+	}
+	if got := tbl.Aliases("查无此人"); len(got) != 0 {
+		t.Errorf("查不到的应当为空，got %v", got)
+	}
+	var nilTbl *Table
+	if got := nilTbl.Aliases("AIKA"); got != nil {
+		t.Errorf("nil 表的 Aliases 应当返回 nil，got %v", got)
+	}
+}
+
+// TestLookup 把「表里没有」与「有但统一名恰好等于原名」分开。
+func TestLookup(t *testing.T) {
+	const raw = `<actor><a zh_cn="AIKA" keyword=",AIKA,優木あいか,"/></actor>`
+	tbl, _ := Parse([]byte(raw))
+	if unified, ok := tbl.Lookup("AIKA"); !ok || unified != "AIKA" {
+		t.Errorf("Lookup(AIKA) = %q,%v", unified, ok)
+	}
+	if unified, ok := tbl.Lookup("優木あいか"); !ok || unified != "AIKA" {
+		t.Errorf("Lookup(優木あいか) = %q,%v", unified, ok)
+	}
+	if _, ok := tbl.Lookup("查无此人"); ok {
+		t.Error("表里没有的不该报 ok")
+	}
+	var nilTbl *Table
+	if _, ok := nilTbl.Lookup("AIKA"); ok {
+		t.Error("nil 表不该报 ok")
+	}
+}
+
 func TestParseRejectsGarbage(t *testing.T) {
 	if _, err := Parse([]byte("not xml at all")); err == nil {
 		t.Error("非 XML 应当报错")
@@ -206,5 +254,42 @@ func TestLoadOverride(t *testing.T) {
 	ResetToBuiltin()
 	if Default().Len() < 8000 {
 		t.Error("ResetToBuiltin 之后应当回到内置表")
+	}
+}
+
+// href → JAVDB 演员 id：索引表里 8000 多条都带 `https://javdb.com/actors/<id>`，
+// 有了 id 就能**零网络**拼出演员头像（见 strmscrape 的 javdbActorAvatarURL）。
+func TestJavdbIDFromHref(t *testing.T) {
+	tbl := Default()
+	// 从表里随便取几条真的（不写死具体 id：那张表是可以更新的外部数据）
+	found := 0
+	for _, name := range []string{"波多野结衣", "楪カレン", "河北彩花", "七濑爱丽丝"} {
+		unified, ok := tbl.Lookup(name)
+		if !ok || unified == "" {
+			continue
+		}
+		id := tbl.JavdbID(unified)
+		if id == "" {
+			continue
+		}
+		found++
+		if strings.ContainsAny(id, "/ \t") {
+			t.Errorf("%q 的 id = %q，不该带斜杠或空白", unified, id)
+		}
+	}
+	if found == 0 {
+		t.Fatal("表里一个 href id 都没取到 —— 解析 xml 那一段可能坏了")
+	}
+}
+
+// 表里没有的演员 / 空串：返回空 id（与 Resolve 一致的「没有就原样」口径）。
+func TestJavdbIDUnknown(t *testing.T) {
+	tbl := Default()
+	if got := tbl.JavdbID("完全不存在的演员XYZ"); got != "" {
+		t.Errorf("未知演员的 id = %q，期望空", got)
+	}
+	var nilTable *Table
+	if got := nilTable.JavdbID("波多野结衣"); got != "" {
+		t.Errorf("nil 表应返回空，得到 %q", got)
 	}
 }

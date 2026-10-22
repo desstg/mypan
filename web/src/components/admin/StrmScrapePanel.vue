@@ -9,6 +9,7 @@ import { fetchStrmTasks, type StrmTask } from "@/api/strm";
 import StrmJavWall from "@/components/admin/StrmJavWall.vue";
 import StrmJavWallHiddenDirsModal from "@/components/admin/StrmJavWallHiddenDirsModal.vue";
 import StrmWallLocalDirDialog from "@/components/admin/StrmWallLocalDirDialog.vue";
+import JavActorWall from "@/components/admin/JavActorWall.vue";
 import StrmTmdbWallDeleteModal from "@/components/admin/StrmTmdbWallDeleteModal.vue";
 import { JAV_WALL_SORTS } from "@/api/strmJavWall";
 import {
@@ -100,6 +101,17 @@ const tasks = ref<StrmTask[]>([]);
  */
 const wallDirs = ref<WallLocalDir[]>([]);
 const localDirOpen = ref(false);
+/**
+ * 演员墙（页头那颗人像图标）。
+ *
+ * 它读的是**所有番号墙上的影片自己的**演员（侧车 json 优先、nfo 兜底），与当前
+ * 选的是哪一面番号墙无关 —— 打开就是要看全部番号墙的演员。
+ *
+ * ⚠️ 但**入口只在番号墙上显示**（用户 2026-10-21 的要求）：当前数据源是 TMDB
+ * 那几档墙时，这颗按钮整颗不渲染。演算是「番号」这个概念的外围，挂在 TMDB 墙上
+ * 只会让人以为TMDB 影人也在这里。
+ */
+const actorWallOpen = ref(false);
 /**
  * 下拉当前选中的是**哪个数据源**，值是 `"T:12"`（任务）或 `"L:<id>"`（本地目录）。
  *
@@ -1286,17 +1298,43 @@ defineExpose({
         >
           {{ scopeLabel }}
         </AppButton>
-        <!-- 「本地目录」入口：把不在任何任务之下的媒体库目录挂到墙上。 -->
-        <AppButton
-          variant="secondary"
-          size="md"
-          class="scrape-panel__scope-button"
-          :disabled="running"
-          title="把本地的媒体库目录挂到海报墙上"
-          @click="localDirOpen = true"
-        >
-          <i class="fas fa-folder-plus" />&nbsp;本地目录
-        </AppButton>
+        <!-- 「本地目录」入口：把不在任何任务之下的媒体库目录挂到墙上。
+             原来是颗带文字的按钮，按用户要求换成图标（与右侧那排图标按钮同一套观感，
+             气泡承担原来的 title 文案）。 -->
+        <span class="scrape-tip">
+          <button
+            type="button"
+            class="scrape-icon-btn"
+            :disabled="running"
+            aria-label="本地目录"
+            @click="localDirOpen = true"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-10z" />
+              <path d="M12 11.5v4M10 13.5h4" />
+            </svg>
+          </button>
+          <span class="scrape-tip__bubble">本地目录（把媒体库目录挂到海报墙上）</span>
+        </span>
+        <!-- 演员墙：点开是一整页演员列表（上方搜索框、下方卡片，卡片大小与番号墙一致）。
+             数据是**所有番号墙上的影片带着的**演员（侧车 json / nfo），不是上游演员库。
+             ⚠️ 只在番号墙上出现（`v-if="isJavSource"`）：TMDB 墙没有番号演员这个概念。 -->
+        <span v-if="isJavSource" class="scrape-tip">
+          <button
+            type="button"
+            class="scrape-icon-btn"
+            aria-label="演员"
+            @click="actorWallOpen = true"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="9" cy="8" r="3.2" />
+              <path d="M3.2 19c.7-3 2.9-4.6 5.8-4.6s5.1 1.6 5.8 4.6" />
+              <path d="M16 5.4a3 3 0 0 1 0 5.6" />
+              <path d="M18.3 19c-.2-1.5-.6-2.7-1.3-3.6 2.2.2 3.5 1.5 4 3.6" />
+            </svg>
+          </button>
+          <span class="scrape-tip__bubble">演员（所有番号墙上的演员）</span>
+        </span>
       </div>
       <div class="scrape-panel__head-actions">
         <div class="scrape-search-expand" :class="{ 'scrape-search-expand--open': searchOpen }">
@@ -1419,6 +1457,9 @@ defineExpose({
       @close="localDirOpen = false"
       @changed="onWallDirsChanged"
     />
+
+    <!-- 演员墙：整页浮层（上面搜索框、下面卡片，点卡片开详情抽屉）。 -->
+    <JavActorWall :open="actorWallOpen" @close="actorWallOpen = false" />
 
     <!-- TMDB 墙的删除确认弹窗（电影删这一部 / 剧集删整部）。 -->
     <StrmTmdbWallDeleteModal
@@ -1952,6 +1993,17 @@ defineExpose({
 .scrape-icon-btn--active {
   color: var(--text);
   border-color: var(--brand);
+}
+/* 「本地目录」那颗在刮削期间禁用（与原来那颗 AppButton 的 :disabled 同语义）。
+   以前这排图标按钮没有禁用态，新加的两颗用到了，补上 —— 否则按下去毫无反应
+   又看不出原因。 */
+.scrape-icon-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.scrape-icon-btn:disabled:hover {
+  color: var(--text-muted);
+  border-color: var(--border);
 }
 .scrape-icon-btn svg {
   width: 16px;

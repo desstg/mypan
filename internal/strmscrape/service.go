@@ -95,6 +95,18 @@ type Service struct {
 	javTitleMu    sync.Mutex
 	javTitleCache map[string]javTitleEntry
 
+	// javActorTMDB 是演员详情里那段 TMDB 补充档案的缓存（键是查过的名字）。
+	// 只存内存、24h 过期 —— 见 javwall_actor_tmdb.go 顶部那段。
+	javActorTMDBMu sync.Mutex
+	javActorTMDB   map[string]javActorTMDBEntry
+
+	// javActorProfile 是演员**资料层**的缓存（生日 / 出身 / 三围 / 头像）。
+	// 与 TMDB 那层分开：那个是补充档案，这个是番号圈自己的源（avbase / JAVDB），
+	// 命中率与字段完全不同，混一张表会让两套 TTL 互相污染。
+	// 见 javwall_actor_profile.go。
+	javActorProfileMu sync.Mutex
+	javActorProfile   map[string]javActorProfileEntry
+
 	// thumbs 是按需缩放的图片磁盘缓存（见 internal/thumbcache）。
 	// 海报墙上那些图只有一百多像素宽，原图直接发是五六倍的浪费。
 	thumbs *thumbcache.Cache

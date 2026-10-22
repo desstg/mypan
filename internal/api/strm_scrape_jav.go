@@ -468,3 +468,89 @@ func (h *Handler) deleteJavWallItem(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOK(w, out)
 }
+
+// listJavWallActors 演员墙的一页。
+//
+// 与其它 jav-wall 接口**不同**：它**不带数据源**。演员墙要的是「所有番号墙上的演员」，
+// 不是当前选中那一面 —— 多一面墙就少一半人，用户打开它就是为了看全集。
+//
+// `include_male=1` 才列男演员：默认不列（女优占绝大多数，男优混进来只冲稀列表）。
+//
+// `anchor=<key>` 是「点名」：不管关键词与男优口径，这一位一定在结果里。演员详情
+// 里点别名就是走它 —— 那些别名常常来自 avbase / JAVDB，墙上的索引里没有这个写法。
+func (h *Handler) listJavWallActors(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	pageSize, _ := strconv.Atoi(q.Get("page_size"))
+	includeMale := q.Get("include_male") == "1" || q.Get("include_male") == "true"
+	out := h.strmScrape.ListJavWallActors(r.Context(), q.Get("keyword"), page, pageSize, includeMale, q.Get("anchor"))
+	writeOK(w, out)
+}
+
+// getJavWallActorDetail 一位演员 + 他参演的墙上影片。
+//
+// `key` 是列表里原样带回来的那个（有上游 id 就是 id，否则 `name:<名字>`）——
+// 走 query 而不是路径段，因为名字里可能有空格与斜杠。
+//
+// 响应里还可能带 `actor.tmdb`：TMDB 那边的同名档案（简介 / 生日 / 别名）。
+// 那是**补充**，查不到就没有这个字段。
+func (h *Handler) getJavWallActorDetail(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	out, err := h.strmScrape.JavWallActorDetail(r.Context(), r.URL.Query().Get("key"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, out)
+}
+
+// getJavWallActorTMDB 一位演员的 TMDB 补充档案（简介 / 生日 / 出生地 / 别名）。
+//
+// **单独一条路**，与详情分开：TMDB 可能很慢、也可能不通，而「这位演员演过墙上的
+// 哪几部」不该陪着它一起等。查不到时 `data` 是 null（不是错误）。
+func (h *Handler) getJavWallActorTMDB(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	writeOK(w, h.strmScrape.ActorTMDB(r.Context(), r.URL.Query().Get("key")))
+}
+
+// getJavWallActorProfile 一位演员的**资料档案**（生日 / 出身 / 三围 / 头像 / 别名）。
+//
+// 与 TMDB 那条一样是**独立的补充请求**，理由也相同：它要打外站（avbase / JAVDB），
+// 慢和不通都是常态，不该拖着「名字 + 参演影片」一起等。查不到时 `data` 是 null。
+//
+// 前端打开演员详情时并行发这一条，回来就补上面板；没回来也就少一段资料。
+func (h *Handler) getJavWallActorProfile(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	writeOK(w, h.strmScrape.ActorProfile(r.Context(), r.URL.Query().Get("key")))
+}
+
+// getJavWallActorPhoto 代理 TMDB 人像（`actor.tmdb.profile_path`）。
+//
+// 与 TG 订阅的海报代理同一条理由：image.tmdb.org 在国内浏览器经常打不开，
+// 所以演员详情页的人像一律经后端转发（后端带全局代理设置）。
+// ⚠️ 只接受以 `/` 开头的 TMDB 路径（`normalizeActorPhotoSize` 限定尺寸）——
+// 这个参数不能变成一个「替服务器打任意地址」的入口。
+func (h *Handler) getJavWallActorPhoto(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	q := r.URL.Query()
+	data, contentType, err := h.strmScrape.FetchJavActorPhoto(r.Context(), q.Get("path"), q.Get("size"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	// TMDB 的图不可变（路径带内容哈希），缓存一天。
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	_, _ = w.Write(data)
+}
