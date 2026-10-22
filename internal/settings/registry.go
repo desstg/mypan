@@ -67,6 +67,10 @@ const (
 	KeyStrmISOFilenameEnabled    = "strm_iso_filename_enabled"
 	KeyStrmMinFileSizeMB         = "strm_min_file_size_mb"
 	KeyStrmConflictPolicy        = "strm_conflict_policy"
+	// KeyStrmEpisodeUpgrade 是「洗版」：同一集有多份画质不同的文件时，
+	// 关（默认）= 本地已有那份优先、只在首次扫描时挑最好的；
+	// 开 = 永远挑最好的，更好的出现就替换。见 internal/strm/episode_dedup.go。
+	KeyStrmEpisodeUpgrade        = "strm_episode_upgrade"
 	KeyStrmTaskConcurrency       = "strm_task_concurrency"
 	KeyStrmMetadataExtensions    = "strm_metadata_extensions"
 	KeyStrmMetadataMaxSizeMB     = "strm_metadata_max_size_mb"
@@ -498,6 +502,7 @@ func defaultSpecs() []Spec {
 		boolSpec(KeyStrmISOFilenameEnabled, "strm", "ISO 使用 .iso.strm 文件名", "开启后网盘 .iso 文件生成“文件名.iso.strm”，方便 Infuse 识别 ISO。关闭时保持现有“文件名.strm”命名。", "false"),
 		intSpec(KeyStrmMinFileSizeMB, "strm", "小文件过滤", "忽略小于该大小的媒体文件，0 表示不过滤。", "0", "MB", 0, 10240),
 		stringSpec(KeyStrmConflictPolicy, "strm", "同名冲突策略", "同目录同名不同后缀时保留哪一个：size_desc / size_asc / name_asc。", "size_desc"),
+		boolSpec(KeyStrmEpisodeUpgrade, "strm", "同集洗版", "同一集有多份不同画质的文件时：关 = 先到先得（本地已有的那份不动，只在首次生成时挑最清楚的）；开 = 永远保留最清楚的那份，更好的出现就替换旧的 .strm。", "false"),
 		intSpec(KeyStrmTaskConcurrency, "strm", "STRM 任务并发", "同时运行的 STRM 扫描任务上限。", "3", "", 1, 10),
 		stringSpec(KeyStrmMetadataExtensions, "strm", "元数据扩展名", "任务开启同步元数据时使用的扩展名，英文分号分隔。", "srt;ass;ssa;sub;sup;idx;vtt;nfo;jpg;jpeg;png;webp;bmp;gif"),
 		intSpec(KeyStrmMetadataMaxSizeMB, "strm", "元数据大小上限", "同步元数据时忽略超过该大小的文件。", "10", "MB", 1, 1024),

@@ -75,6 +75,13 @@ export interface StrmSettings {
   iso_filename_enabled: boolean;
   min_file_size_mb: number;
   conflict_policy: string;
+  /**
+   * 「同集洗版」：同一集有多份不同画质的文件时怎么办。
+   *
+   * 关（默认）= 先到先得：本地已有那份 .strm 不动，只在首次生成时挑最清楚的；
+   * 开 = 永远保留最清楚的，更好的出现就替换旧的 .strm。
+   */
+  episode_upgrade: boolean;
   task_concurrency: number;
   metadata_extensions: string;
   metadata_max_size_mb: number;
@@ -300,6 +307,7 @@ export function saveStrmSettings(body: Partial<Record<keyof StrmSettings, string
     ["iso_filename_enabled", (v) => (v ? "true" : "false")],
     ["min_file_size_mb", (v) => String(v)],
     ["conflict_policy", (v) => String(v)],
+    ["episode_upgrade", (v) => (v ? "true" : "false")],
     ["task_concurrency", (v) => String(v)],
     ["metadata_extensions", (v) => String(v)],
     ["metadata_max_size_mb", (v) => String(v)],

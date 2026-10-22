@@ -58,6 +58,7 @@ type StrmSettingsForm = Pick<
   | "iso_filename_enabled"
   | "min_file_size_mb"
   | "conflict_policy"
+  | "episode_upgrade"
   | "task_concurrency"
   | "metadata_extensions"
   | "metadata_max_size_mb"
@@ -99,6 +100,7 @@ const {
     iso_filename_enabled: false,
     min_file_size_mb: 0,
     conflict_policy: "size_desc",
+    episode_upgrade: false,
     task_concurrency: 3,
     metadata_extensions: "",
     metadata_max_size_mb: 10,
@@ -179,6 +181,7 @@ function applySettings(data: Awaited<ReturnType<typeof fetchStrmSettings>>) {
     iso_filename_enabled: !!data.iso_filename_enabled,
     min_file_size_mb: parseSettingNumber(data.min_file_size_mb),
     conflict_policy: data.conflict_policy || "size_desc",
+    episode_upgrade: !!data.episode_upgrade,
     task_concurrency: parseSettingNumber(data.task_concurrency) || 3,
     metadata_extensions: data.metadata_extensions ?? "",
     metadata_max_size_mb: parseSettingNumber(data.metadata_max_size_mb) || 10,
@@ -221,6 +224,7 @@ async function saveSettings() {
       iso_filename_enabled: settings.iso_filename_enabled,
       min_file_size_mb: settings.min_file_size_mb,
       conflict_policy: settings.conflict_policy,
+      episode_upgrade: settings.episode_upgrade,
       task_concurrency: settings.task_concurrency,
       metadata_extensions: settings.metadata_extensions,
       metadata_max_size_mb: settings.metadata_max_size_mb,
@@ -482,6 +486,24 @@ defineExpose(
           </template>
           <template #control>
             <AppSelect v-model="settings.conflict_policy" :options="conflictPolicyOptions" />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow :show-changed-badge="true" :changed="isSettingChanged('episode_upgrade')">
+          <template #info>
+            <div class="settings-row__label">
+              <span>同集洗版</span>
+              <SettingsHelpTooltip title="同集洗版说明">
+                <p>网盘上同一集常有几份不同画质的文件（1080p / 2160p / 不同音轨）。
+                  开启后每集<b>只生成一个 .strm</b>，保留最清楚的那份。</p>
+                <p>关闭时也是每集只留一个，但<b>先到先得</b>：本地已经有的那份不动，
+                  只在第一次生成时挑最清楚的 —— 换掉意味着 Emby 里那一集重新识别一遍。</p>
+                <p>开启后上游出现更好的画质会替换：旧的 .strm 会在同一次扫描的清理步骤里删掉。</p>
+              </SettingsHelpTooltip>
+            </div>
+          </template>
+          <template #control>
+            <SettingsBoolSegment v-model="settings.episode_upgrade" label="同集洗版" />
           </template>
         </SettingsRow>
       </SettingsCard>

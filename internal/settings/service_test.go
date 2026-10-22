@@ -196,6 +196,47 @@ func TestAnnouncementURLSettingIsVisibleAndWritable(t *testing.T) {
 	}
 }
 
+// 「同集洗版」必须真的登记进 defaultSpecs()：没登记的话 settings.Update 会以
+// 「未知设置项」拒绝（界面只表现为「开关点了、刷新又回默认」），
+// 而且 STRM 设置页那一行永远读得到 false。
+func TestStrmEpisodeUpgradeIsRegisteredAndDefaultsOff(t *testing.T) {
+	specs := defaultSpecs()
+	var spec *Spec
+	for i := range specs {
+		if specs[i].Key == KeyStrmEpisodeUpgrade {
+			spec = &specs[i]
+			break
+		}
+	}
+	if spec == nil {
+		t.Fatalf("%q 未在 registry 登记 Spec", KeyStrmEpisodeUpgrade)
+	}
+	if spec.Hidden {
+		t.Errorf("%q 被标记为 Hidden，STRM 设置页上不会出现这一行", KeyStrmEpisodeUpgrade)
+	}
+	if spec.Category != "strm" {
+		t.Errorf("category = %q，期望 strm", spec.Category)
+	}
+	if spec.Default != "false" {
+		t.Errorf("默认值 = %q，期望 false（洗版默认关：不主动换掉已有的 .strm）", spec.Default)
+	}
+
+	repo := &memoryConfigRepo{values: map[string]string{}}
+	svc, err := New(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.Bool(KeyStrmEpisodeUpgrade) {
+		t.Error("未设置时应当为 false")
+	}
+	if err := svc.Update(context.Background(), map[string]string{KeyStrmEpisodeUpgrade: "true"}); err != nil {
+		t.Fatalf("写入失败：%v", err)
+	}
+	if !svc.Bool(KeyStrmEpisodeUpgrade) {
+		t.Error("写入 true 后读回 false")
+	}
+}
+
 // 未显式设置时，「不删除的文件类型」的默认值应当保护元数据扩展名。
 func TestJavDeleteExcludeDefaultProtectsMetadata(t *testing.T) {
 	repo := &memoryConfigRepo{values: map[string]string{}}

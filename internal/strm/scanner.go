@@ -31,6 +31,11 @@ type ScanSettings struct {
 	DefaultExtensions     string
 	MinFileSizeMB         int
 	ConflictPolicy        string
+	// EpisodeUpgrade 是「洗版」开关：同一集有多份画质不同的文件时，
+	// 关 = 先到先得（本地已有那份优先，只是首次扫描时挑最好的）；
+	// 开 = 永远挑最好的，更好的出现就替换（旧的 .strm 由清理步骤删掉）。
+	// 判据见 episode_dedup.go。
+	EpisodeUpgrade        bool
 	MetadataExtensions    string
 	MetadataMaxSizeMB     int
 	MetadataParentEnabled bool
@@ -282,6 +287,26 @@ func finalizeScan(
 	subtreeHasMedia := harvest.subtreeHasMedia
 
 	selected, _ := selectConflictWinners(candidates, deps.Settings.ConflictPolicy)
+	// 再收一次口：同一集只留一份（见 episode_dedup.go）。
+	//
+	// 这一步**必须**在 selectConflictWinners 之后、写文件之前：先按「同名不同后缀」
+	// 收一轮，再按「同集不同画质」收一轮，两套判据互不重叠。
+	//
+	// ⚠️ **只对 tmdb 任务生效**。番号任务不能用这套判据：番号文件名
+	// （`MOIL-001-UC-4K`）会被解析器读成 `S01E01 剧名 MOIL`，一个目录里有
+	// MOIL-001～MOIL-005 就凑够「这是一部剧」的信号，于是同一番号的不同版本
+	// 会被并成一份 —— 而番号墙的语义是「一部片一个条目」，它有自己的洗版逻辑。
+	//
+	// exists 查的是本地**已有的 .strm** —— 洗版关着时「本地那份优先」全靠它。
+	if task.MediaKind != domain.StrmMediaKindJav {
+		localStrmExists := func(item mediaCandidate) bool {
+			relPath := LocalRelPath(taskRelDir, item.relDirs, item.fileName, deps.Settings.ISOFilenameEnabled)
+			_, err := os.Stat(filepath.Join(root, relPath))
+			return err == nil
+		}
+		selected, _ = selectEpisodeWinners(selected, deps.Settings.EpisodeUpgrade,
+			deps.Settings.ConflictPolicy, localStrmExists)
+	}
 	metadataItems = alignMetadataItems(taskRelDir, selected, metadataItems, deps.Settings.ISOFilenameEnabled)
 	seen := make(map[string]struct{})
 	// 番号任务：本轮新增 / 更新的 .strm（本地相对路径），第 ④ 步按它生成元数据。

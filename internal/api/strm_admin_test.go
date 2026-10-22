@@ -35,6 +35,27 @@ func TestMapStrmSettingAliasesCoversJavWallHiddenDirs(t *testing.T) {
 	}
 }
 
+// TestMapStrmSettingAliasesCoversEpisodeUpgrade 钉住「同集洗版」这个新键。
+//
+// 与上面那条同一个道理：别名表漏一行，保存时会以「未知设置项」被拒，
+// 而界面只表现为「开关点了、刷新又回默认」—— 是这个项目里反复踩的那一族静默失败。
+// 「注册表里有没有这一项」由 settings 包自己的测试钉（那边才拿得到 defaultSpecs）。
+func TestMapStrmSettingAliasesCoversEpisodeUpgrade(t *testing.T) {
+	in := map[string]string{"episode_upgrade": "true"}
+	mapStrmSettingAliases(in)
+
+	if _, still := in["episode_upgrade"]; still {
+		t.Errorf("别名 %q 没有被换掉", "episode_upgrade")
+	}
+	got, ok := in[settings.KeyStrmEpisodeUpgrade]
+	if !ok {
+		t.Fatalf("episode_upgrade 没有映射到 %q", settings.KeyStrmEpisodeUpgrade)
+	}
+	if got != "true" {
+		t.Errorf("值没传过去：%q", got)
+	}
+}
+
 // TestMapStrmSettingAliasesKeepsJavWatermarkKeys 钉住水印那四个键的**自指别名**陷阱。
 //
 // 那四个键（`jav_watermark_*`）的别名**与 settings key 逐字相同**（它们本来就是

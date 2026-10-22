@@ -313,6 +313,19 @@ func (s *Service) prepareCurrentDirectoryWork(ctx context.Context, accountID int
 	}
 
 	selected, skippedConflict := selectConflictWinners(candidates, scanCfg.ConflictPolicy)
+	// 与扫描那一路同一个收口：同一集只留一份（见 episode_dedup.go）。
+	// 手动「生成当前目录」同样是用户按下去就要看到干净结果的地方。
+	// 番号任务不走这一步，理由见 finalizeScan 里的说明。
+	if task.MediaKind != domain.StrmMediaKindJav {
+		localExists := func(item mediaCandidate) bool {
+			relPath := LocalRelPath(outputFolder, item.relDirs, item.fileName, scanCfg.ISOFilenameEnabled)
+			_, err := os.Stat(filepath.Join(s.strmDir, relPath))
+			return err == nil
+		}
+		var extraSkipped int64
+		selected, extraSkipped = selectEpisodeWinners(selected, scanCfg.EpisodeUpgrade, scanCfg.ConflictPolicy, localExists)
+		skippedConflict += extraSkipped
+	}
 	metadataItems = alignMetadataItems(outputFolder, selected, metadataItems, scanCfg.ISOFilenameEnabled)
 
 	return &currentDirWork{

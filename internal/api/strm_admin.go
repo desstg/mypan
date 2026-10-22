@@ -588,6 +588,7 @@ func mapStrmSettingAliases(in map[string]string) {
 		"iso_filename_enabled":    settings.KeyStrmISOFilenameEnabled,
 		"min_file_size_mb":        settings.KeyStrmMinFileSizeMB,
 		"conflict_policy":         settings.KeyStrmConflictPolicy,
+		"episode_upgrade":         settings.KeyStrmEpisodeUpgrade,
 		"task_concurrency":        settings.KeyStrmTaskConcurrency,
 		"metadata_extensions":     settings.KeyStrmMetadataExtensions,
 		"metadata_max_size_mb":    settings.KeyStrmMetadataMaxSizeMB,
