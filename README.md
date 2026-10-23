@@ -249,6 +249,19 @@ services:
 > **媒体库目录**：compose 里那行 `/path/to/media:/app/media` 是给海报墙的「数据源 → 本地目录」用的 ——
 > 左边换成你宿主机上的媒体库路径，然后在界面里登记**容器内路径** `/app/media`。不用就删掉这行。
 
+#### 不想用 Docker？Windows 免安装版
+
+每个 Release 的 Assets 里都有一个 `mypan-<版本>-windows-amd64.exe`（Windows 10/11 x64）：
+
+```bat
+mypan-v2.9.5-windows-amd64.exe --listen 0.0.0.0:5211 --data-dir "D:\mypan\data"
+```
+
+数据（数据库、日志、STRM 输出）默认落在 exe 同级的 `data` 与 `strm` 目录，建议用
+`--data-dir` 指到别处，升级时只替换 exe。**云盘 FUSE 挂载是 Linux 专属**，Windows 版
+没有那一块 —— 只用本机的硬盘 / 网络盘做海报墙、目录整理、离线下载没问题，挂 115 / 夸克
+这类网盘请用 Docker 版。
+
 ### 四、盘搜（搜索转存 / 影视订阅的「搜网盘」都靠它）
 
 盘搜是「拿片名去全网搜资源」的那条腿，后台**「搜索转存」页**与「影视订阅」的
