@@ -280,8 +280,9 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 	type topEntry struct {
 		name string
 		rows []javWallRow
-		// hasOwnStrm 表示这一层**直接**躺着 `.strm`（不递归）。
-		hasOwnStrm bool
+		// ownCount 是这一层**直接**躺着几个载体（不递归，按主干去重）。
+		// 判「分类还是作品」用它，见下面那一段。
+		ownCount int
 	}
 	tops := make([]topEntry, len(top))
 	// ⚠️ 一级目录之间**没有先后关系**（各自独立收自己的卡片），所以这里并发读。
@@ -296,7 +297,6 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 	var (
 		wg       sync.WaitGroup
 		anyMu    sync.Mutex
-		anyOwn   bool
 		scanSem  = make(chan struct{}, javWallScanWorkers)
 		firstErr error
 	)
@@ -319,21 +319,16 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 				return
 			}
 			catDir := filepath.Join(root, entry.Name())
-			// ⚠️ 这一次调用**同时**给出「收进来的卡片」与「这一层是不是直接躺着 .strm」。
+			// ⚠️ 这一次调用**同时**给出「收进来的卡片」与「这一层直接躺着几个载体」。
 			//
 			// 以前这里先 `hasStrmInDir(catDir)` 看一眼、紧接着又 `collectJavRows(catDir)`
 			// 再读一次 —— 同一个目录被 ReadDir 两遍。网盘 / SMB 上每一次 ReadDir
 			// 都是一次网络往返，两遍就是白花一倍时间。判据只能从**已经读出来的那一次**里取。
 			rows, own := collectJavRows(ctx, ref, catDir, entry.Name(), entry.Name(), 1, nil)
-			if own {
-				anyMu.Lock()
-				anyOwn = true
-				anyMu.Unlock()
-			}
-			// 一级目录下可能还有一层（分类目录 → 影片目录），也可能直接躺着 .strm。
+			// 一级目录下可能还有一层（分类目录 → 影片目录），也可能直接躺着载体。
 			// 隐藏**只按一级目录名判**：同一个名字出现在更深处（作品目录恰好与某个一级目录同名）
 			// 不该被连坐，所以这里不把 hiddenSet 传下去。
-			tops[idx] = topEntry{name: entry.Name(), rows: rows, hasOwnStrm: own}
+			tops[idx] = topEntry{name: entry.Name(), rows: rows, ownCount: own}
 		}(i, entry)
 	}
 	wg.Wait()
@@ -348,7 +343,6 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 		}
 	}
 	tops = kept
-	anyOwnStrm := anyOwn
 
 	// ⚠️ **「分类」还是「作品」要判一下**（2026-10-14，挂本地目录时踩到）。
 	//
@@ -357,14 +351,39 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 	// 250 个作品目录直接躺在根下。照原样摊就是 250 个 tab 把网格顶到屏幕外
 	// （实测 grid top = 1384px，一屏连一张海报都看不到）。
 	//
-	// 判据是「这一层**直接**有没有 `.strm`」（`hasOwnStrm`，**不递归**）：
-	//   - 有 → 这一层就是**作品目录**（两层结构）→ **不建 tab**，卡直接摊在「全部」里；
-	//   - 一个都没有 → 保留原行为（它是分类，卡在下一层）→ 建 tab。
+	// 判据是「这一层**直接**有没有载体」（`ownCount`，**不递归**），而且必须
+	// **逐个一级目录判、只看有没有分类**：
+	//
+	//   - 一个分类都没有（每个一级目录自己就躺着片子）→ 两层库 → **不建 tab**，
+	//     卡直接摊在「全部」里；
+	//   - 只要有**一个**一级目录是分类（自己不躺片子、片子全在下一层）→ 建 tab，
+	//     每个有卡的一级目录一颗。
+	//
+	// ⚠️ 原来是**全局 OR**：任何一个一级目录直接躺着载体，就把整面墙判成「平铺」、
+	// 一颗 tab 都不建。2026-10-23 用户报「本地目录下有几个分类目录不显示」就是这个 ——
+	// 他的库是**混合**的：`Japan/`、`国产/`、`VR/` 是正经分类，而 `wuma/` 这一层
+	// 直接摆了 23 个 mp4。那一个目录把另外七个分类全吞了。
+	//
+	// 「一个目录下塞二十几个 mp4」不是规范形态（用户的原话：正常都是一个目录下
+	// 一个视频，这种目录他自己手工整理），但**不能让它把别人的 tab 吞掉** ——
+	// 分类与否必须逐目录判。
+	//
+	// 还有一道比例闸：**直接躺在一级目录下的片子必须是少数**。没有它，「250 个作品
+	// 目录都在根下、其中恰好一个还带着子目录」这种库会被判成有分类，25x 个 tab 又回来了
+	// （那就是上面那个 bug 的原样）。判据取「少数」而不是「有没有」，因为真正的
+	// 两层库一个都不会有，混合库里的平铺目录通常也只有一两个。
 	//
 	// ⚠️ 判据**必须是不递归**的：`collectJavRows` 会把整棵子树收进来，两边都非空，
-	// 拿它的结果判会让这条分支永远走不到（第一版就是这么写错的）。
-	flatLayout := anyOwnStrm
-	if !flatLayout {
+	// 拿它的结果判会让「平铺」永远成立。
+	categoryDirs, ownTotal, totalRows := 0, 0, 0
+	for _, t := range tops {
+		ownTotal += t.ownCount
+		totalRows += len(t.rows)
+		if len(t.rows) > 0 && t.ownCount == 0 {
+			categoryDirs++
+		}
+	}
+	if categoryDirs > 0 && ownTotal*2 < totalRows {
 		for _, t := range tops {
 			if len(t.rows) > 0 {
 				snap.cats = append(snap.cats, JavWallCategory{Name: t.name, Hidden: isHidden(t.name)})
@@ -409,33 +428,36 @@ func buildJavWallSnapshot(ctx context.Context, ref posterRef, root string, hidde
 
 // collectJavRows 收一个目录里的卡片；子目录递归下去（层数有上限）。
 //
-// 第二个返回值 `own` 报告**这一层直接**躺着 `.strm` 吗（不递归）——它就是
-// buildJavWallSnapshot 判「分类目录还是作品目录」用的那条判据，从**同一次 ReadDir**
-// 里顺带算出来。别为了它再单独读一遍目录：这一层可能是 SMB / 网盘上的路径，
-// 多一次 ReadDir 就是多一次网络往返（见 buildJavWallSnapshot 那段注释）。
-func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat string, depth int, hidden map[string]struct{}) ([]javWallRow, bool) {
+// 第二个返回值 `own` 是**这一层直接**躺着几个作品载体（不递归、按主干去重）——
+// 它就是 buildJavWallSnapshot 判「分类目录还是作品目录」用的那条判据，从**同一次
+// ReadDir** 里顺带算出来。别为了它再单独读一遍目录：这一层可能是 SMB / 网盘上的
+// 路径，多一次 ReadDir 就是多一次网络往返（见 buildJavWallSnapshot 那段注释）。
+func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat string, depth int, hidden map[string]struct{}) ([]javWallRow, int) {
 	if depth > javWallMaxDepth {
-		return nil, false
+		return nil, 0
 	}
 	// 扫盘是**并发**的（见 buildJavWallSnapshot），每一路都要自己看取消信号 ——
 	// 少了这一句，用户关掉页面之后后台还会把整棵树扫完。
 	if ctx.Err() != nil {
-		return nil, false
+		return nil, 0
 	}
 	entries, err := os.ReadDir(absDir)
 	if err != nil {
-		return nil, false
+		return nil, 0
 	}
 
 	// 先把这一层的文件按名字归位（一次 ReadDir 拿到全部）。
 	files, subdirs := splitJavDirEntries(entries)
 
-	own := false
-	for name := range files {
-		if strm.IsMediaFileName(name) {
-			own = true
-			break
+	// 数的是**不同主干**（走 PickMediaNames），不是文件个数：同一部片的 `.strm` 与
+	// `.mp4` 并存时是两个文件、一个作品，按文件个数会数成 2。
+	own := 0
+	{
+		names := make([]string, 0, len(files))
+		for name := range files {
+			names = append(names, name)
 		}
+		own = len(strm.PickMediaNames(names))
 	}
 
 	rows := javWallRowsForDir(ref, absDir, relDir, cat, files)
@@ -443,6 +465,12 @@ func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat stri
 	// 再递归子目录（影片目录通常在分类目录的下一层）。
 	for _, sub := range subdirs {
 		if _, skip := hidden[sub.Name()]; skip {
+			continue
+		}
+		// 预告片 / 花絮 / 样例 / 剧照这类**作品的附属目录**里也有视频，
+		// 但那些不是独立作品（实测 X:/favorite 里 676 个 `trailers/trailer.mp4`
+		// 被当成 676 部片，全都配不到海报 —— 用户看到的就是「有些能显示、有些不能」）。
+		if isJavAuxDirName(sub.Name()) {
 			continue
 		}
 		childRel := sub.Name()
@@ -453,6 +481,25 @@ func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat stri
 		rows = append(rows, childRows...)
 	}
 	return rows, own
+}
+
+// isJavAuxDirName 报告一个子目录名是不是「作品的附属目录」（预告片 / 花絮 / 剧照…），
+// 扫墙时整个跳过。
+//
+// 名单取 Emby / Kodi / 常见下载工具的约定。**只按目录名判、只在递归时用**：
+// 一级目录（分类档）不看这个 —— 用户真有个叫 `extras` 的分类也该显示。
+//
+// ⚠️ 只跳递归、不跳「这一层的卡片」：`extrafanart/` 里全是图不算载体，本来就收不到卡；
+// 真正有视频的是 `trailers/`（Kodi 约定）与 `sample/`（片源自带的尝鲜片段）。
+func isJavAuxDirName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "trailers", "trailer", "extras", "featurettes", "featurette",
+		"sample", "samples", "behind the scenes", "behindthescenes",
+		"extrafanart", "extrathumbs":
+		return true
+	default:
+		return false
+	}
 }
 
 // javWallRowsForDir 把一个目录里**直接躺着**的作品载体变成卡片。
@@ -488,19 +535,22 @@ func javWallRowsForDir(ref posterRef, absDir, relDir, cat string, files map[stri
 			Flat:     flat,
 		}
 
-		// 四个产物。`pickJavImage` 负责「独占 / 平铺 × 四种扩展名 × 裸名兜底」的
-		// 全部组合 —— 详见它的注释（2026-10-13 扩过：以前只认本布局的 .jpg）。
-		if name, ok := pickJavImage(files, names.Poster, "poster"); ok {
+		// 四个产物。`pickJavImage` 负责「独占 / 平铺 × 四种扩展名 × 裸名兜底」
+		// 的全部组合 —— 详见它的注释（2026-10-13 扩过：以前只认本布局的 .jpg）。
+		//
+		// ⚠️ `<主干>.jpg` 那一档**只给 poster**（见 pickJavImage）：它是 Emby 的「主图」，
+		// 拿它当 thumb / fanart 会把同一张竖图塞进 3:2 的缩略图框。
+		if name, ok := pickJavImage(files, names.Poster, stem, "poster"); ok {
 			item.HasPoster = true
 			item.PosterRev = javWallRev(files[name])
 			item.PosterURL = javWallImageURL(ref, relDir, name, item.PosterRev, "poster")
 		}
-		if name, ok := pickJavImage(files, names.Thumb, "thumb"); ok {
+		if name, ok := pickJavImage(files, names.Thumb, "", "thumb"); ok {
 			item.HasThumb = true
 			item.ThumbRev = javWallRev(files[name])
 			item.ThumbURL = javWallImageURL(ref, relDir, name, item.ThumbRev, "thumb")
 		}
-		if name, ok := pickJavImage(files, names.Fanart, "fanart"); ok {
+		if name, ok := pickJavImage(files, names.Fanart, "", "fanart"); ok {
 			item.HasFanart = true
 			_ = name
 		}
@@ -578,19 +628,36 @@ func javImageSuffixes(base string) []string {
 
 // pickJavImage 找一张同类图，覆盖「独占 / 平铺」两种布局与四种扩展名。
 //
-// `base` 是裸名主干（`poster` / `thumb` / `fanart`），查找顺序体现优先级：
+// `base` 是裸名主干（`poster` / `thumb` / `fanart`），`stem` 是这一部片的主干。
+// 查找顺序体现优先级：
 //
 //  1. 本布局自己的名字（`own`：独占是 `poster.jpg`、平铺是 `<主干>-poster.jpg`）；
-//  2. 裸名的任何一种扩展名 —— 平铺目录里别的工具（或 Emby 自己）常只放一份
+//  2. **`<主干>.jpg`** —— Emby / Kodi 的「与视频同名」写法。外来库里这是最常见
+//     的形态：`ABF-002/ABF-002.mp4` 旁边配一张 `ABF-002.jpg`，除此之外什么都没有。
+//     缺了这一步，整柜别的工具刮出来的库都会是空壳（它既不是 `poster.jpg`
+//     也不是 `<主干>-poster.jpg`，下面两步都够不着）；
+//  3. 裸名的任何一种扩展名 —— 平铺目录里别的工具（或 Emby 自己）常只放一份
 //     裸名的图，而我们按平铺规则找的是 `<主干>-poster.jpg`，一份都找不到，
 //     卡片就成了空壳；
-//  3. 以 `-<base>.<ext>` 结尾的任意一个 —— 多分片目录靠这条显示 cd1 的图。
+//  4. 以 `-<base>.<ext>` 结尾的任意一个 —— 多分片目录靠这条显示 cd1 的图。
 //
-// ⚠️ 第 3 步只按 `-poster.jpg` 这个**后缀**匹配，不带主干：`91CM-109-cd2`
+// ⚠️ 第 4 步只按 `-poster.jpg` 这个**后缀**匹配，不带主干：`91CM-109-cd2`
 // 要找的是 `91CM-109-cd1-poster.jpg`，带上自己的主干就永远匹配不到。
-func pickJavImage(files map[string]os.DirEntry, own, base string) (string, bool) {
+//
+// ⚠️ 第 2 步必须排在裸名（第 3 步）之前：一个目录里既有 `poster.jpg` 又有
+// `<主干>.jpg` 时，后者是**这一部**的图，前者只是目录级兜底。
+//
+// ⚠️ 第 2 步由调用方决定要不要开（`stem` 传空串即关）：`<主干>.jpg` 在 Emby 里是
+// 「**主图**」，不是缩略图也不是背景图。三步都开的话同一张图会被同时贴成海报 /
+// 缩略图 / 背景 —— 缩略图视图是 3:2 的横框，塞一张竖图进去。
+func pickJavImage(files map[string]os.DirEntry, own, stem, base string) (string, bool) {
 	if name, ok := pickJavArtifact(files, own); ok {
 		return name, true
+	}
+	if stem != "" {
+		if name, ok := pickJavArtifact(files, "", javImageSuffixes(stem)...); ok {
+			return name, true
+		}
 	}
 	if name, ok := pickJavArtifact(files, "", javImageSuffixes(base)...); ok {
 		return name, true

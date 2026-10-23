@@ -255,6 +255,38 @@ func TestJavWallDetailPureVideoLibrary(t *testing.T) {
 	}
 }
 
+// TestJavWallDetailFindsStemNamedImage 详情抽屉也要认「与视频同名」的图
+// （`<主干>.jpg`）—— 那是外来库（Emby / Kodi 刮的）最常见的形态。
+//
+// 卡片那边早就认了（见 pickJavImage 第 2 步），详情页不认的话就是
+// 「网格上有图、点开抽屉是空的」。实测用户的 `X:/favorite/wuma` 整目录都是这种形态。
+func TestJavWallDetailFindsStemNamedImage(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "有码", "WUMA-001")
+	mustMkdir(t, dir)
+	mustWrite(t, filepath.Join(dir, "WUMA-001.mp4"), "video")
+	// 只有裸主干名那张图：既没有 poster.jpg 也没有 thumb.jpg。
+	mustWrite(t, filepath.Join(dir, "WUMA-001.jpg"), "bare image")
+
+	// 卡片先得认出来，否则这条用例测的就不是「详情与卡片同源」了。
+	snap := javWallSnapshotForTest(t, root, nil)
+	if len(snap.rows) != 1 || !snap.rows[0].item.HasPoster {
+		t.Fatalf("卡片没认到 `<主干>.jpg`：%+v", snap.rows)
+	}
+
+	svc, id := videoLibraryFixture(t, root)
+	detail, err := svc.JavWallDetail(context.Background(), WallSourceRef{LocalDirID: id}, "有码/WUMA-001", "WUMA-001")
+	if err != nil {
+		t.Fatalf("JavWallDetail: %v", err)
+	}
+	if detail.PosterURL == "" {
+		t.Fatal("卡片有图，详情页却空着 —— 抽屉会把同一部片显示成没有海报")
+	}
+	if !strings.Contains(detail.PosterURL, "WUMA-001.jpg") {
+		t.Fatalf("详情页取的不是这一部自己的图：%q", detail.PosterURL)
+	}
+}
+
 // TestJavWallSidecarBadgeCountsWorksNotFiles 「侧车」角标那一档「整层唯一」要按
 // **作品数**判，不是按文件个数。
 //

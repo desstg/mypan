@@ -473,3 +473,151 @@ func TestJavWallThreeLevelLibraryKeepsCategoryTabs(t *testing.T) {
 		t.Fatalf("三层库该保留分类 tab，得到 %v", snap.cats)
 	}
 }
+
+// TestJavWallMixedLibraryKeepsCategoryTabs 混合库（有几个分类 + 有一个目录直接躺片子）
+// 必须**保留**分类 tab。
+//
+// # 用户 2026-10-23 报的场景
+//
+// 「在本地目录按键选的目录下，有几个分类目录，不显示」。实测那棵树是：
+//
+//	favorite/
+//	  Japan/  682 个作品目录      ← 分类
+//	  国产/   3 个子目录          ← 分类
+//	  VR/     31 个作品目录       ← 分类
+//	  wuma/   23 个 mp4 直接躺着  ← 不是分类，是平铺
+//
+// 原来是**全局 OR**：只要有一个一级目录直接躺着载体，整面墙就判成「平铺」、
+// 一颗 tab 都不建。于是 `wuma/` 那 23 个 mp4 把另外七个分类全吞了。
+//
+// 现在的判据是「**有没有**分类目录（自己不躺片子、片子全在下一层）+ 直接躺在一级
+// 目录下的片子是少数」。这条用例钉住两个方向：分类要出现，而 `wuma` 那一档
+// 也该作为一颗 tab 存在（它自己就是一批片子）。
+//
+// ⚠️ 「一个目录塞二十几个视频」本身**不是**要支持的形态 —— 用户原话：正常都是
+// 一个目录下一个视频文件，那种目录他自己手工整理。这里只要求它别把别人的
+// tab 吞掉。
+func TestJavWallMixedLibraryKeepsCategoryTabs(t *testing.T) {
+	root := t.TempDir()
+	// 分类层：`日本` 下两个作品目录
+	for _, w := range []string{"ABF-002-UC", "SIVR-102"} {
+		dir := filepath.Join(root, "日本", w)
+		mustMkdir(t, dir)
+		mustWrite(t, filepath.Join(dir, w+".mp4"), "video")
+		mustWrite(t, filepath.Join(dir, "poster.jpg"), "p")
+	}
+	// 平铺层：`wuma` 这一层直接躺着片子
+	mustMkdir(t, filepath.Join(root, "wuma"))
+	mustWrite(t, filepath.Join(root, "wuma", "clip-a.mp4"), "video")
+	mustWrite(t, filepath.Join(root, "wuma", "clip-a.jpg"), "p")
+
+	snap := javWallSnapshotForTest(t, root, nil)
+	if len(snap.rows) != 3 {
+		t.Fatalf("卡片数 = %d，期望 3", len(snap.rows))
+	}
+	names := map[string]int{}
+	for _, c := range snap.cats {
+		names[c.Name] = c.Count
+	}
+	if names["日本"] != 2 {
+		t.Fatalf("分类「日本」该有 2 部，得到 %v", snap.cats)
+	}
+	if names["wuma"] != 1 {
+		t.Fatalf("平铺目录「wuma」也该有一颗 tab（1 部），得到 %v", snap.cats)
+	}
+}
+
+// TestJavWallFlatDirEachCardGetsOwnStemImage 一个目录里躺着多部片时，每张卡要用
+// **自己**的 `<主干>.jpg`，不能一起落到同一张 `-poster.jpg` 上。
+//
+// ⚠️ 一个目录塞二十几个视频**不是**要支持的形态（用户原话：正常都是一个目录下
+// 一个视频文件，那种目录他自己手工整理）。这条只是钉住「兜底那一步不会把
+// 同一个文件发给所有卡」—— 顺带覆盖到的，不是目标场景。
+func TestJavWallFlatDirEachCardGetsOwnStemImage(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "wuma")
+	mustMkdir(t, dir)
+	for _, stem := range []string{"clip-a", "clip-b", "clip-c"} {
+		mustWrite(t, filepath.Join(dir, stem+".mp4"), "video")
+		mustWrite(t, filepath.Join(dir, stem+".jpg"), "own image of "+stem)
+	}
+	// 目录里还有一份裸的 `-poster.jpg`：它是兜底，不该被三张卡一起吃掉。
+	mustWrite(t, filepath.Join(dir, "clip-a-poster.jpg"), "generic")
+
+	snap := javWallSnapshotForTest(t, root, nil)
+	if len(snap.rows) != 3 {
+		t.Fatalf("卡片数 = %d，期望 3", len(snap.rows))
+	}
+	urlOf := map[string]string{}
+	for _, row := range snap.rows {
+		urlOf[row.item.Stem] = row.item.PosterURL
+	}
+	for _, stem := range []string{"clip-a", "clip-b", "clip-c"} {
+		if urlOf[stem] == "" {
+			t.Fatalf("%s 没有海报：%v", stem, urlOf)
+		}
+		// `clip-a` 有自己那份 `clip-a-poster.jpg`（第 1 步就命中），另外两张只能靠
+		// `<主干>.jpg`。判据是「URL 里带自己的主干」——两张卡落到同一个 URL 上就挂了。
+		if !strings.Contains(urlOf[stem], stem) {
+			t.Fatalf("%s 取的不是自己的图（%q）—— 多张卡共用一张海报就是这么来的", stem, urlOf[stem])
+		}
+	}
+}
+
+// TestJavWallSkipsAuxDirs 作品的附属目录（预告片 / 花絮 / 样例）里也有视频，
+// 但那些不是独立作品，扫墙时整个跳过。
+//
+// 实测 X:/favorite 里 676 个 `trailers/trailer.mp4` 被当成 676 部片摊在墙上，
+// 全都配不到海报 —— 用户看到的就是「有些海报能显示，有些不能」。
+func TestJavWallSkipsAuxDirs(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "日本", "ABF-002-UC")
+	mustMkdir(t, work)
+	mustWrite(t, filepath.Join(work, "ABF-002-UC.mp4"), "video")
+	mustWrite(t, filepath.Join(work, "poster.jpg"), "p")
+	for _, aux := range []string{"trailers", "extras", "sample"} {
+		dir := filepath.Join(work, aux)
+		mustMkdir(t, dir)
+		mustWrite(t, filepath.Join(dir, "trailer.mp4"), "video")
+	}
+
+	snap := javWallSnapshotForTest(t, root, nil)
+	if len(snap.rows) != 1 {
+		got := make([]string, 0, len(snap.rows))
+		for _, r := range snap.rows {
+			got = append(got, r.item.RelDir+"/"+r.item.Stem)
+		}
+		t.Fatalf("附属目录里的视频不该成为卡片，得到 %d 张：%v", len(snap.rows), got)
+	}
+	if snap.rows[0].item.Stem != "ABF-002-UC" {
+		t.Fatalf("剩下那张应当是正片，得到 %q", snap.rows[0].item.Stem)
+	}
+}
+
+// TestJavWallFlatLibraryWithStraySubdirStillFlat 一条**反方向**的保护：
+// 250 个作品目录都直接躺在根下，其中恰好有一个带子目录 —— 不能因此冒出 250 个 tab。
+//
+// 这是「比例闸」的存在理由：光判「有没有分类目录」不够。那个带子目录的一级目录
+// ownCount 是 0（它自己不躺片子），于是 `categoryDirs = 1`；没有比例闸的话
+// 整面墙又被判成有分类，250 个 tab 原样回来（就是 2026-10-14 那个 bug）。
+func TestJavWallFlatLibraryWithStraySubdirStillFlat(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 5; i++ {
+		name := "WORK-" + string(rune('A'+i))
+		dir := filepath.Join(root, name)
+		mustMkdir(t, dir)
+		mustWrite(t, filepath.Join(dir, name+".mp4"), "video")
+	}
+	// 第六个：自己不躺片子，片子在一层子目录里。
+	mustMkdir(t, filepath.Join(root, "SPLIT-001"))
+	mustMkdir(t, filepath.Join(root, "SPLIT-001", "part"))
+	mustWrite(t, filepath.Join(root, "SPLIT-001", "part", "SPLIT-001.mp4"), "video")
+
+	snap := javWallSnapshotForTest(t, root, nil)
+	if len(snap.rows) != 6 {
+		t.Fatalf("卡片数 = %d，期望 6", len(snap.rows))
+	}
+	if len(snap.cats) != 0 {
+		t.Fatalf("两层库（含一个带子目录的作品）不该有分类 tab，得到 %v", snap.cats)
+	}
+}

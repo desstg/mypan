@@ -264,7 +264,7 @@ func (s *Service) JavWallDetail(ctx context.Context, srcRef WallSourceRef, relDi
 	}
 
 	// 图：海报走既有的 /poster，剧照走 extrafanart/（本地目录）。
-	if poster := workPosterFileForDir(ref.AbsDir, names); poster != "" {
+	if poster := workPosterFileForDir(ref.AbsDir, ref.Stem, names); poster != "" {
 		detail.PosterURL = posterURLFromRel(ref.Src.PosterRef(), relUnder(ref.Root, poster))
 		detail.PosterRatio = imageRatio(poster)
 	}
@@ -581,12 +581,28 @@ func imageRatio(path string) string {
 // 早先这里按 Poster 优先，于是详情页显示的是那张裁过的竖版，`poster_ratio` 也跟着
 // 算成 2:3 —— 用户看到的是「番号详情也是竖图」（他要的是横版）。
 // 卡片那边反过来（Poster 优先）是对的：海报墙是竖版网格。
-func workPosterFileForDir(absDir string, names emby.Names) string {
+func workPosterFileForDir(absDir, stem string, names emby.Names) string {
 	for _, name := range []string{names.Thumb, names.Poster} {
 		if name = strings.TrimSpace(name); name == "" {
 			continue
 		}
 		p := filepath.Join(absDir, name)
+		if fileExists(p) {
+			return p
+		}
+	}
+	// 外来库里最常见的形态是「与视频同名」（`<主干>.jpg` / `<主干>.png`）——
+	// 卡片那边已经认它（见 pickJavImage 第 2 步），详情页不认的话就是
+	// 「卡片有图、点开没有了」。
+	//
+	// ⚠️ 只找**这一个主干**：同目录里别的片的图不能被认成这一部的
+	// （那正是 `wuma/` 那种平铺目录里会出的事）。
+	stem = strings.TrimSpace(stem)
+	if stem == "" {
+		return ""
+	}
+	for _, ext := range imageExtensions {
+		p := filepath.Join(absDir, stem+"."+ext)
 		if fileExists(p) {
 			return p
 		}
