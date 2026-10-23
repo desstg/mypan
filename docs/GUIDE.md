@@ -447,7 +447,12 @@ services:
     volumes:
       - ./data/pansou-cache:/app/cache
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8888/api/health"]
+      # ⚠️ 配了 http_proxy（给 TG 频道用）时**不能**写成裸的 wget。
+      # alpine 自带的 busybox wget **只读 http_proxy、完全不认 no_proxy**，
+      # 于是这句自检会被送进代理，代理去连它自己的 localhost:8888 → 502，
+      # 容器被标成 unhealthy。日志里就是
+      # `wget: server returned error: HTTP/1.1 502 Bad Gateway`。
+      test: ["CMD-SHELL", "http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= wget -q --spider http://127.0.0.1:8888/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3

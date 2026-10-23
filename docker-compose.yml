@@ -76,7 +76,19 @@ services:
     volumes:
       - ./data/pansou-cache:/app/cache
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8888/api/health"]
+      # ⚠️ 这句不能写成裸的 `wget --spider http://localhost:8888/...`。
+      #
+      # wget 会读容器里的 `http_proxy`（见上面那条注释：要给 t.me 配代理），
+      # 而 **alpine 自带的 busybox wget 完全不认 `no_proxy`** —— 写了也没用
+      # （源码里它只 `getenv("http_proxy")`，没有 no_proxy 分支）。
+      # 于是这条自检被送进代理，代理去连**它自己**的 localhost:8888，
+      # 连不上就回 502。日志里看到的就是
+      # `wget: server returned error: HTTP/1.1 502 Bad Gateway`，
+      # 容器被标成 unhealthy。
+      #
+      # 所以在命令里把这几个变量清空再打（对 busybox wget 与 GNU wget 都有效）；
+      # 地址写 127.0.0.1 而不是 localhost，免得先试到了 ::1。
+      test: ["CMD-SHELL", "http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= wget -q --spider http://127.0.0.1:8888/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
