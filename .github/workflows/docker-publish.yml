@@ -1,8 +1,9 @@
-# 构建并推送 Docker 镜像到 Docker Hub。
+# 构建并推送 Docker 镜像到 Docker Hub，并把 Windows 免安装 exe 传到 Release。
 #
 # 触发方式**刻意只有两种**，都不碰 push 事件 —— 平时提交代码不会触发构建：
 #   1. 发 tag：`git tag v2.0.1 && git push origin v2.0.1`
 #   2. 网页手动：Actions → 本 workflow → Run workflow，填版本号
+#      （手动触发只补镜像，**不发 exe** —— 见 windows job 的说明）
 #
 # ⚠️ **默认只编 amd64**。这不是偷懒，是踩过一次：
 #
@@ -120,3 +121,55 @@ jobs:
             echo ""
             echo "群晖上拉取：\`docker compose pull && docker compose up -d\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Windows 免安装 exe，传到对应的 Release 里。
+  #
+  # 与镜像**分开一个 job、且不写 needs**：它不需要 buildx / QEMU / Docker Hub
+  # 凭据，也不该被镜像那一步的失败连坐（镜像挂了照样能发 exe）。
+  #
+  # ⚠️ 只在 tag 触发时跑：手动触发那一路是补镜像，版本号是手填的，
+  # 而 `gh release upload` 需要一个**已存在**的 Release（手填的版本号常常没有）。
+  windows:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Windows amd64
+        run: |
+          V="${GITHUB_REF_NAME}"
+          # ⚠️ 不加 `-tags fuse`：FUSE 挂载是 Linux 专属，Windows 上编不过。
+          # 这与作本地 `go build ./cmd/litepan` 同一条路径（Makefile 的 build-nofuse）。
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+            -trimpath -ldflags "-s -w -X litepan/internal/buildinfo.Version=${V}" \
+            -o "mypan-${V}-windows-amd64.exe" ./cmd/litepan
+          ls -lh "mypan-${V}-windows-amd64.exe"
+          sha256sum "mypan-${V}-windows-amd64.exe" | tee "mypan-${V}-windows-amd64.sha256"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${GITHUB_REF_NAME}"
+          # ⚠️ 要等一下：Release 可能比这个 job 晚一步建出来（tag 一推 workflow
+          # 就起跑，而 `gh release create` 是随后手动跑的）。没它 `gh release
+          # upload` 直接报错，exe 就白编了。等 3 分钟足够覆盖那个窗口。
+          for i in $(seq 1 12); do
+            if gh release view "$V" >/dev/null 2>&1; then break; fi
+            echo "等待 Release ${V} 出现…（${i}/12）"
+            sleep 15
+          done
+          gh release upload "$V" \
+            "mypan-${V}-windows-amd64.exe" \
+            "mypan-${V}-windows-amd64.sha256" \
+            --clobber
