@@ -816,8 +816,18 @@ onBeforeUnmount(() => {
   .jav-wall-actors {
     left: 0;
   }
+  /* 搜索框在手机上一行放不下（返回键 + 标题 + 「显示男演员」勾 + 搜索框加起来
+     必超 100vw），原来靠 `width: min(180px, 45vw)` 硬缩，还是溢出屏幕。
+     用户 2026-10-23 要「搜索栏下一行显示」：让头部允许换行，搜索框自己占满
+     一整行（`flex: 1 1 100%` 顶不出 100%，后面就跟不下别的东西了）。 */
+  .jav-wall-actors__head {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
   .jav-wall-actors__search {
-    width: min(180px, 45vw);
+    flex: 1 1 100%;
+    width: auto;
+    margin-left: 0;
   }
 }
 </style>

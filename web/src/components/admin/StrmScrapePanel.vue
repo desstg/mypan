@@ -1298,6 +1298,14 @@ defineExpose({
         >
           {{ scopeLabel }}
         </AppButton>
+      </div>
+      <!-- 这两颗图标（本地目录 / 演员）在**手机上**要跟右边那排操作按钮摞在同一行
+           （用户 2026-10-23 的要求）——所以它们得是页头的直接子元素，不能塞在
+           `.scrape-panel__head-left` 里面：左边那组在手机上是整行独占（100%），
+           塞在里头就只能跟着整行一起超出屏幕，没地方换行。
+           桌面上靠 `head-left` 的 `flex: 0 1 auto` + 操作区的 `margin-left: auto`
+           让它们仍然紧挨着左边那组按钮、操作区顶到最右，观感与改之前一样。 -->
+      <div class="scrape-panel__head-icons">
         <!-- 「本地目录」入口：把不在任何任务之下的媒体库目录挂到墙上。
              原来是颗带文字的按钮，按用户要求换成图标（与右侧那排图标按钮同一套观感，
              气泡承担原来的 title 文案）。 -->
@@ -1924,37 +1932,14 @@ defineExpose({
   border-bottom: 1px solid var(--border-soft);
   background: var(--panel-head-bg);
 }
-@media (max-width: 560px) {
-  /* 手机小屏：头部允许换行，避免标题/任务选择器与右侧操作按钮挤压重叠 */
-  .scrape-panel__head {
-    flex-wrap: wrap;
-    gap: 8px 12px;
-  }
-
-  .scrape-panel__head-left {
-    flex: 1 1 100%;
-    min-width: 0;
-  }
-
-  .scrape-panel__head-actions {
-    margin-left: auto;
-  }
-
-  .scrape-panel__task-select {
-    min-width: 0;
-  }
-
-  .scrape-search-expand--open .scrape-search-expand__input {
-    width: min(200px, 42vw);
-    max-width: min(200px, 42vw);
-  }
-}
 .scrape-panel__head-left {
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
-  flex: 1 1 auto;
+  /* 不再吃满剩余空间：本地目录 / 演员那两颗图标现在是它的**兄弟**（见模板里的注释），
+     让图标紧跟在它后头、剩余空白落在图标之后，桌面观感与改之前一致。 */
+  flex: 0 1 auto;
 }
 .scrape-panel__head h2 {
   margin: 0;
@@ -1962,6 +1947,14 @@ defineExpose({
   font-weight: 700;
   color: var(--text);
   white-space: nowrap;
+}
+.scrape-panel__head-icons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  /* 手机媒体查询里也用它（那边是顶到最左）—— 桌面上它就是把操作区推到最右的那一段空白。 */
+  margin-right: auto;
 }
 .scrape-panel__task-select {
   width: min(200px, 42vw);
@@ -2009,6 +2002,48 @@ defineExpose({
 .scrape-icon-btn svg {
   width: 16px;
   height: 16px;
+}
+
+/* 手机小屏：头部排成两行。
+   第一行 = 标题 + 任务选择器 + 范围按钮；第二行 = 左边两颗图标（本地目录 / 演员）、
+   右边那排操作按钮（用户 2026-10-23：「和设置键同一排的最左边」）。
+   ⚠️ 这段必须放在上面那些基础规则**之后**：`.scrape-panel__head-left` 的 `flex`
+   基础值是 `0 1 auto`，同优先级下后写的赢 —— 放在前面就会被它盖掉，
+   第一行不占满 100%，图标于是挤上去、只剩操作按钮被挤到下一行。 */
+@media (max-width: 560px) {
+  .scrape-panel__head {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .scrape-panel__head-left {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  /* 顶到最左靠的是 `.scrape-panel__head-icons` 自己的 `margin-right: auto`（见上面），
+     这里只需把操作区钉到最右。 */
+  .scrape-panel__head-actions {
+    margin-left: auto;
+  }
+
+  .scrape-panel__task-select {
+    min-width: 0;
+  }
+
+  .scrape-search-expand--open .scrape-search-expand__input {
+    width: min(200px, 42vw);
+    max-width: min(200px, 42vw);
+  }
+}
+@media (max-width: 380px) {
+  /* 320px 那种窄屏（iPhone SE 一代一类的宽度）上，第二行刚好差几像素：
+     两颗图标 78 + 那排按钮 170 塞不进 256 的可用宽度，就自己又换到第三行去，
+     视觉上成了「图标孤零零一行」。间距与内边距各收窄 4px 正好够。 */
+  .scrape-panel__head {
+    gap: 6px;
+    padding: 12px;
+  }
 }
 
 /* 图标按钮 hover 气泡：替代浏览器原生 title 提示。
