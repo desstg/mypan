@@ -87,7 +87,7 @@
 
 ## 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.9.5`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v2.9.6`
 
 ### 一、先确认共享挂载已开启（用到 FUSE 挂载才需要）
 
@@ -238,7 +238,7 @@ services:
 每个 Release 的 Assets 里都有一个 `mypan-<版本>-windows-amd64.exe`（Windows 10/11 x64）：
 
 ```bat
-mypan-v2.9.5-windows-amd64.exe --listen 0.0.0.0:5211 --data-dir "D:\mypan\data"
+mypan-v2.9.6-windows-amd64.exe --listen 0.0.0.0:5211 --data-dir "D:\mypan\data"
 ```
 
 数据（数据库、日志、STRM 输出）默认落在 exe 同级的 `data` 与 `strm` 目录，建议用
@@ -289,7 +289,7 @@ docker compose up -d          # mypan + pansou 一起起
 | 标签 | 说明 |
 |---|---|
 | `latest` | 最新发布版 |
-| `v2.9.5` | 固定版本 |
+| `v2.9.6` | 固定版本 |
 | `v2.9.4` | 上一版固定版本 |
 
 **默认只构建 `linux/amd64`。** 绝大多数 NAS（群晖、威联通、自建 x86）都是这个架构。
