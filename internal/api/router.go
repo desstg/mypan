@@ -433,8 +433,13 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/backfill", h.backfillStrmScrape)
 					r.Post("/mark-normal", h.markStrmScrapeNormal)
 					r.Get("/poster", h.getStrmScrapePoster)
+					// 「本地目录」源里的真实视频（mp4 / mkv …）—— 支持 Range，
+					// 是纯视频库里「点一下就能播」的唯一出口（见 getStrmScrapeMedia）。
+					r.Get("/media", h.getStrmScrapeMedia)
 					// 详情抽屉：一张卡的元数据（标题/简介/演员/剧照/可播文件）。
 					r.Get("/items/detail", h.getStrmScrapeItemDetail)
+					// 抽屉里的「集数进度」轮询（只算逐集状态，不读元数据）。
+					r.Get("/items/episodes", h.getStrmScrapeWallEpisodes)
 					// 删除一部作品（电影一部 / 剧集整部）：本地作品目录 + 网盘对应目录。
 					// 与番号墙那两条同一个套路：先 preview 看会删掉什么，确认后再 delete。
 					// ⚠️ 这两条**会真的删本地文件与网盘目录**，前端必须先弹确认。

@@ -106,6 +106,8 @@ export interface MediaOrganizeSettings {
   align_media_tags: boolean;
   max_works_per_run: number;
   overwrite_existing: boolean;
+  quarantine_duplicates: boolean;
+  quarantine_dir_name: string;
 }
 
 export type MediaOrganizeTaskInput = {

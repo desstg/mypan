@@ -107,6 +107,8 @@ const {
   align_media_tags: false,
   max_works_per_run: 50,
   overwrite_existing: false,
+  quarantine_duplicates: true,
+  quarantine_dir_name: "冗余",
 });
 const tagOrder = reactive<string[]>([...ALL_TAG_KEYS]);
 
@@ -119,6 +121,7 @@ const TAB_FIELDS: Record<string, Array<keyof MediaOrganizeSettings>> = {
     "tmdb_api_key", "tmdb_language", "tmdb_api_host", "tmdb_image_host",
     "api_request_interval_ms", "tmdb_request_interval_ms",
     "file_extensions", "metadata_extensions", "max_works_per_run", "overwrite_existing",
+    "quarantine_duplicates", "quarantine_dir_name",
     "align_media_tags", "media_tag_order",
   ],
 };
@@ -594,6 +597,39 @@ defineExpose(
           </template>
           <template #control>
             <AppSelect v-model="conflictPolicy" :options="conflictPolicyOptions" />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('quarantine_duplicates')">
+          <template #info>
+            <div class="settings-row__label">
+              <span>同集重复时移入冗余目录</span>
+              <SettingsHelpTooltip title="同集重复处理说明">
+                <p>目标目录里已经有同一集时（<b>看集号，不看文件名</b> —— 同一集的不同画质、不同格式也算重复），
+                  这一份不再进入目标目录，而是移到冗余目录里，方便你之后一次性删除。</p>
+                <p>同一批里有好几份同一集时，只保留清晰度最高的那一份进库。</p>
+                <p>开启「覆盖」时按清晰度洗版：新来的更清晰就删掉目标里那一集换成它；否则目标里那一集留着，新来的进冗余。</p>
+                <p>关闭后，重复的那一份既不进库也不移动，按跳过处理，留在源目录里。</p>
+              </SettingsHelpTooltip>
+            </div>
+          </template>
+          <template #control>
+            <SettingsBoolSegment v-model="settings.quarantine_duplicates" label="移入冗余目录" />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('quarantine_dir_name')">
+          <template #info>
+            <div class="settings-row__label">
+              <span>冗余目录名</span>
+              <SettingsHelpTooltip title="冗余目录说明">
+                <p>重复集被移到的目录名，建在整理目标根目录下（不是每部剧下面各建一个）。</p>
+                <p>被移进去的文件保留原名，同名时自动加「(2)」序号。</p>
+              </SettingsHelpTooltip>
+            </div>
+          </template>
+          <template #control>
+            <AppInput v-model="settings.quarantine_dir_name" placeholder="冗余" />
           </template>
         </SettingsRow>
       </SettingsCard>

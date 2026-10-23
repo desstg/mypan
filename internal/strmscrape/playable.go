@@ -60,14 +60,22 @@ type SubtitleFile struct {
 
 // PlayableFile 是某个作品目录下的一个可播放文件。
 type PlayableFile struct {
-	// Name 是磁盘上的 `.strm` 文件名（含后缀），用来当列表的 key 与显示名。
+	// Name 是磁盘上的文件名（`.strm` 或真实视频，含后缀），用来当列表的 key 与显示名。
 	Name string `json:"name"`
-	// Path 是 `.strm` 正文里那一行，**原样**返回。
+	// Path 是播放地址。
 	//
-	// 刻意**不**重新拼：那一行已经是唯一的真相源 —— 签名开关、base URL、
-	// 播放令牌的变化都由它自己体现。重拼要在这里再实现一遍 strm.BuildPlayPath，
-	// 那会多出一个会漂的真相源。
+	//   - `.strm`：正文里那一行，**原样**返回。刻意**不**重新拼：那一行已经是唯一的
+	//     真相源 —— 签名开关、base URL、播放令牌的变化都由它自己体现。重拼要在这里
+	//     再实现一遍 strm.BuildPlayPath，那会多出一个会漂的真相源。
+	//   - 真实视频（纯视频库）：本应用的取片出口 `/api/admin/strm-scrape/media?...`，
+	//     支持 Range，播放器能拖进度条（见 media_file.go）。
 	Path string `json:"path"`
+	// Local 报告这个地址是不是**本地文件出口**（而不是 `.strm` 正文里的外站地址）。
+	//
+	// 前端拿它区分「服务端有这条文件」与「正文里写着一条可能不通的地址」 —— 前者
+	// 出错会是一个 HTTP 错误码，后者只能靠播放器自己报。目前**只是信息**：
+	// 播放走同一个 `<video>`。
+	Local bool `json:"local,omitempty"`
 	// Subtitles 是同目录里配得上这个视频的字幕，按文件名排序。
 	Subtitles []SubtitleFile `json:"subtitles,omitempty"`
 }
@@ -108,6 +116,22 @@ func (s *Service) readPlayableFilesEx(
 	subs := listSubtitleFiles(ref, absDir, relDir)
 	out := make([]PlayableFile, 0, len(names))
 	for _, name := range names {
+		// 真实视频文件（纯视频库）：没有正文可读，播放地址是**本应用的取片出口**
+		// （见 media_file.go）。`strict` 那一档一字不动 —— 它管的是 `.strm` 正文的
+		// 格式，与这里无关。
+		if isLocalVideoPlayable(name) {
+			if _, err := os.Stat(filepath.Join(absDir, name)); err != nil {
+				s.log.Warn("strm wall local video missing", "name", name, "err", err)
+				continue
+			}
+			out = append(out, PlayableFile{
+				Name:      name,
+				Path:      localMediaURL(ref, joinRel(relDir, name)),
+				Local:     true,
+				Subtitles: subs,
+			})
+			continue
+		}
 		raw, err := os.ReadFile(filepath.Join(absDir, name))
 		if err != nil {
 			s.log.Warn("strm wall read playable file failed", "name", name, "err", err)

@@ -126,6 +126,13 @@ func scanEnhancedTask(
 		if !ok {
 			continue // 远端路径不在任务根范围内，忽略
 		}
+		// 目录级排除：全量清单没有"逐层递归"这个动作，所以要在每条文件上
+		// 回溯它所在的每一层目录，逐层比对 —— 与逐目录递归的那条路同义。
+		// 以前这里压根没看 excludeDirs（参数传进来就没人用），排除词在
+		// 115 全量模式下**完全不生效**。
+		if dirPathExcluded(relDirs, excludeDirs, deps.Settings.QuarantineDirName) {
+			continue
+		}
 		recordMetadataDirectory(state.metadataDirs, e.ParentID, relDirs)
 		classified := classifyScanFile(e.FileID, e.Name, outputFolder, e.Size, relDirs, exts, metaExts, minMediaBytes, metaMaxBytes, len(metaExts) > 0)
 		if classified.hasMedia {

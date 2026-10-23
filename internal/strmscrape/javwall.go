@@ -432,7 +432,7 @@ func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat stri
 
 	own := false
 	for name := range files {
-		if strings.EqualFold(filepath.Ext(name), ".strm") {
+		if strm.IsMediaFileName(name) {
 			own = true
 			break
 		}
@@ -455,27 +455,29 @@ func collectJavRows(ctx context.Context, ref posterRef, absDir, relDir, cat stri
 	return rows, own
 }
 
-// javWallRowsForDir 把一个目录里**直接躺着**的 `.strm` 变成卡片。
+// javWallRowsForDir 把一个目录里**直接躺着**的作品载体变成卡片。
+//
+// 载体有两种（见 strm.IsMediaFileName）：本应用生成的 `.strm`，以及用户别的工具产出的
+// 真实视频（mp4 / mkv …）。同一个主干两种都有时只出一张卡、优先认 `.strm`
+// （判据在 strm.PickMediaNames，那里有为什么）。
 func javWallRowsForDir(ref posterRef, absDir, relDir, cat string, files map[string]os.DirEntry) []javWallRow {
-	strmNames := make([]string, 0, 4)
+	all := make([]string, 0, 4)
 	for name := range files {
-		if strings.EqualFold(filepath.Ext(name), ".strm") {
-			strmNames = append(strmNames, name)
-		}
+		all = append(all, name)
 	}
-	if len(strmNames) == 0 {
+	mediaNames := strm.PickMediaNames(all)
+	if len(mediaNames) == 0 {
 		return nil
 	}
-	sort.Strings(strmNames)
-	// flat 的判据与生成器**逐字相同**（该目录 .strm 数 > 1），这样卡上显示的文件名
-	// 与生成器认的文件名永远同源。
-	flat := len(strmNames) > 1
+	// flat 的判据与生成器**逐字相同**（该目录的媒体文件数 > 1），这样卡上显示的
+	// 文件名与生成器认的文件名永远同源。
+	flat := len(mediaNames) > 1
 
-	rows := make([]javWallRow, 0, len(strmNames))
-	for _, strmName := range strmNames {
-		stem := strm.MediaStem(strmName)
+	rows := make([]javWallRow, 0, len(mediaNames))
+	for _, mediaName := range mediaNames {
+		stem := strm.MediaStem(mediaName)
 		names := emby.TargetNames(stem, flat)
-		row := javWallRow{absDir: absDir, strmName: strmName}
+		row := javWallRow{absDir: absDir, strmName: mediaName}
 		item := JavWallItem{
 			ID:       pathToItemID(joinRel(relDir, stem)),
 			RelDir:   relDir,
@@ -623,16 +625,21 @@ func javWallHasSidecar(files map[string]os.DirEntry, stem string) bool {
 			return true
 		}
 	}
-	// 名字匹不上时的最后一档：该目录**只有一个 .strm 且只有一个 .json** ——
+	// 名字匹不上时的最后一档：该目录**只有一个作品载体且只有一个 .json** ——
 	// 那没有第二个可能，它就是这一部的侧车（生成器的配对判据里也有这一条）。
 	// 实测 `Tushy.26.09.20` 配的正是 `Tushy.2026.09.20.json`（年份写法不同）。
-	strmCount := 0
+	//
+	// ⚠️ 载体数按 `strm.IsMediaFileName` 数（`.strm` **或**真实视频），不是只数 `.strm`：
+	// 纯视频库里一个 `.strm` 都没有，只数 `.strm` 会得到 0，于是这部片的角标永远不亮。
+	//
+	// 数的是**不同主干**（走 PickMediaNames），不是文件个数：同一部片的 `.strm` 与
+	// `.mp4` 并存时是两个文件、一个作品，按文件个数会数成 2，这条「整层唯一」就
+	// 失效了（而它恰恰是配不上名字时的最后一档）。
+	mediaNames := make([]string, 0, len(files))
 	for name := range files {
-		if strings.EqualFold(filepath.Ext(name), ".strm") {
-			strmCount++
-		}
+		mediaNames = append(mediaNames, name)
 	}
-	return strmCount == 1 && len(jsonNames) == 1
+	return len(strm.PickMediaNames(mediaNames)) == 1 && len(jsonNames) == 1
 }
 
 // FindJavWallItem 在一个任务的快照里按 (rel_dir, stem) 找一张卡。

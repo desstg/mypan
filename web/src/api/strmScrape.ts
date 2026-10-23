@@ -243,16 +243,33 @@ export function rescrapeStrmScrapeItem(input: WallSourceRef & { item_id: string 
 }
 
 /**
- * 一个可播放文件：`.strm` 的文件名 + 它正文里那一行播放地址。
+ * 一个可播放文件：作品载体文件名 + 它的播放地址。
  *
- * 墙的卡片 payload 里拿不到账号与 file_id，所以播放地址只能由服务端读 `.strm` 得到
+ * 墙的卡片 payload 里拿不到账号与 file_id，所以播放地址只能由服务端算出来
  * （见后端 internal/strmscrape/playable.go）。详情抽屉一次拿到该作品的全部集。
+ *
+ * 载体有两种：本应用生成的 `.strm`（正文就是播放地址），以及纯视频库
+ * （「本地目录」源）里的真实 mp4 / mkv（播放地址是本应用的取片出口）。
  */
 export interface PlayableFile {
-  /** 磁盘上的 `.strm` 文件名（含后缀），列表的 key 与显示名都用它。 */
+  /**
+   * 磁盘上的**作品载体文件名**（含后缀），列表的 key 与显示名都用它。
+   * 两种形态：`<主干>.strm`，或纯视频库里的 `<主干>.mp4` / `.mkv` …。
+   */
   name: string;
-  /** `.strm` 正文里那一行，**原样**（后端不重新拼，那是唯一的真相源）。 */
+  /**
+   * 播放地址。两种都直接喂给同一个 `<video>`：
+   *
+   * - `.strm`：正文里那一行，**原样**（后端不重新拼，那是唯一的真相源）；
+   * - 真实视频：本应用的取片出口 `/api/admin/strm-scrape/media?...`
+   *   （支持 Range，播放器能拖进度条）。
+   */
   path: string;
+  /**
+   * 这个地址是不是**本地文件出口**（而不是 `.strm` 正文里的外站地址）。
+   * 目前只是信息：前者出错是一个 HTTP 错误码，后者只能靠播放器自己报。
+   */
+  local?: boolean;
   /** 同目录的字幕。字幕在本地磁盘上，不需要网盘 file_id。 */
   subtitles?: PlayableSubtitle[];
 }
@@ -320,6 +337,21 @@ export interface WallDetail {
   trailer_url?: string;
   /** 这个作品能播的文件（多集就是多条），与卡片播放同一套。 */
   playable?: PlayableFile[];
+  /**
+   * 作品目录相对库根的路径（扁平单文件作品为空）。
+   *
+   * 给逐集进度那条轮询接口定位目录用 —— **别在前端从别处拼**：这个拼法
+   * （相对化 + 反斜杠归一）只有服务端那一份。
+   */
+  rel_dir?: string;
+  /**
+   * 剧集的逐集进度（已入库 / 缺 / 还没播），前端铺成彩色格子。
+   *
+   * 电影、或一集都没扫出来的作品不给这个字段。它是**打开抽屉那一刻现算的**，
+   * 之后由 `fetchStrmScrapeWallEpisodes` 轮询刷新 —— 订阅刚推下来一集，
+   * 抽屉里的格子要自己变绿。
+   */
+  seasons?: WallSeasonProgress[];
   javdb_url?: string;
   notice?: string;
   /** 源媒体信息（文件名 / 路径 / 大小 / 类型），参照 Emby 的详情页。 */
@@ -369,6 +401,40 @@ export function fetchStrmScrapeItemDetail(ref: number | WallSourceRef, itemId: s
   return http.get<WallDetail>("/admin/strm-scrape/items/detail", {
     ...sourceParams(ref),
     item_id: itemId,
+  });
+}
+
+/**
+ * 一集的状态。
+ *
+ * `owned` = 磁盘上已经有这一集的 `.strm`；`air_date` 空串表示 TMDB 没给
+ * （那时前端按「已播」处理 —— 「漏了一集」比「可能还没播」更值得提醒）。
+ */
+export interface WallEpisodeState {
+  episode: number;
+  owned: boolean;
+  air_date?: string;
+}
+
+/** 一季的逐集进度。 */
+export interface WallSeasonProgress {
+  season_number: number;
+  episode_count: number;
+  owned_count: number;
+  episodes: WallEpisodeState[];
+}
+
+/**
+ * 只取「逐集进度」—— 详情抽屉的轮询用。
+ *
+ * 与 `fetchStrmScrapeItemDetail` 分开是**性能**原因：那条要扫整库找作品、还要打一次
+ * 网盘问源文件大小，一份详情值得，每十几秒一次不值得。这条只读这一部作品自己的
+ * 目录，TMDB 排期走服务端内存缓存（6h）。
+ */
+export function fetchStrmScrapeWallEpisodes(ref: number | WallSourceRef, relDir: string) {
+  return http.get<WallSeasonProgress[]>("/admin/strm-scrape/items/episodes", {
+    ...sourceParams(ref),
+    rel_dir: relDir,
   });
 }
 

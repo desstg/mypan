@@ -19,13 +19,13 @@ import (
 //
 //	① 先解析出这一部到底占着哪些本地文件（`ownedLocalPaths`）——
 //	   判据与生成端同源，不是「目录里的一切」；
-//	② 本地删完，**只有当这个目录空了**（不含任何其它 .strm、也不含任何本程序
+//	② 本地删完，**只有当这个目录空了**（不含任何其它作品载体、也不含任何本程序
 //	   不认识的残留）才把目录本身删掉。多分片那种一个目录放好几部的，
 //	   删掉其中一部之后目录必须留着；
 //	③ 网盘那一步分**独占 / 平铺**两种，见 javwall_delete_cloud.go 的长注释 ——
 //	   独占删整个目录，平铺只删这一部的那几个文件。
 //
-// ⚠️ 与用户确认过：番号墙上的「一部」= 一个 `.strm` 主干（多分片就是多部）。
+// ⚠️ 与用户确认过：番号墙上的「一部」= 一个载体主干（`.strm` 或真实视频，多分片就是多部）。
 // 「多分片就只删它自己相关的文件，目录不删」——原话。
 // ⚠️ 云盘删除**落在回收站**（115/123 等驱动的 DeleteFiles 默认走 trash）——
 // 这一步不额外做「永久删除」，用户要清空回收站自己去清。
@@ -38,7 +38,7 @@ type JavWallDeletePreview struct {
 	LocalDir string `json:"local_dir"`
 	// RemoveLocalDir 为真表示删完文件之后目录会一起删掉（目录里没有别的东西）。
 	RemoveLocalDir bool `json:"remove_local_dir"`
-	// Flat 为真表示平铺布局（该目录还有别的 .strm）。文案上要说清「只删这一部」。
+	// Flat 为真表示平铺布局（该目录还有别的作品载体）。文案上要说清「只删这一部」。
 	Flat bool `json:"flat"`
 
 	// CloudPath 是网盘上这一步要动的路径；CloudSkipped 非空时它是空串。
@@ -200,7 +200,8 @@ func ownedLocalPaths(ref javItemRef) []string {
 		seen[key] = struct{}{}
 		out = append(out, abs)
 	}
-	// ① .strm 自己。
+	// ① 载体自己（`.strm`，或纯视频库里的那一个 `.mp4` / `.mkv`）。
+	//    删掉真实视频是**本意**：「删除一部」就是把它从盘上拿掉。
 	add(filepath.Join(ref.AbsDir, ref.StrmName))
 
 	// ② nfo 与三张图。`ref.Names` 是按当前布局算的，但**另一种布局的文件也要收**：
@@ -273,7 +274,7 @@ func ownedLocalPaths(ref javItemRef) []string {
 // dirEmptiedByDelete 报告「删掉 owned 这批文件之后，这个目录会不会变空」。
 //
 // 判据是**现读一遍目录**：除了 owned 里的那些，只要还剩任何一个条目（文件或子目录），
-// 目录就不能删。这样多分片目录（还有别的 .strm）、以及用户自己塞了别的东西的目录
+// 目录就不能删。这样多分片目录（还有别的 `.strm` / 视频文件）、以及用户自己塞了别的东西的目录
 // 都会被自动放过。
 //
 // `extrafanart/` 特殊：它的**文件**在 owned 里、但它**目录本身**不在。所以这里先看

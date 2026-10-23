@@ -92,6 +92,19 @@ type WallDetail struct {
 	// Playable 是这个作品能播的文件（多集就是多集），与卡片播放用的是同一套。
 	Playable []PlayableFile `json:"playable,omitempty"`
 
+	// Seasons 是**剧集**的逐集进度（已入库 / 缺 / 还没播），前端按它铺彩色格子。
+	//
+	// 电影、或一集都没扫出来的作品为 nil（整块不渲染）。
+	// 这一份是**打开抽屉那一刻现算的**（本地集按磁盘现读 + TMDB 排期带缓存），
+	// 不是索引里的陈旧快照 —— 订阅刚推下来一集，下次开抽屉就该变绿。
+	Seasons []WallSeasonProgress `json:"seasons,omitempty"`
+
+	// RelDir 是作品目录相对库根的路径（扁平单文件作品为空）。
+	//
+	// 给前端**轮询逐集进度**用：那条接口按 rel_dir 定位目录（见 WallEpisodes）。
+	// 不在前端拼，是因为拼法只有服务端这一份（`relUnder` + 反斜杠归一）。
+	RelDir string `json:"rel_dir,omitempty"`
+
 	// JavdbURL 是上游详情页地址（可能为空）。
 	JavdbURL string `json:"javdb_url,omitempty"`
 	// Notice 是给用户看的一句话（拿不到侧车 / 没有 nfo 之类的降级说明）。
@@ -111,12 +124,13 @@ type WallDetail struct {
 // 找这个文件 —— 两边路径根本不一样。所以路径经设置里的「宿主机路径映射」换算，
 // 拿不到映射时原样给容器内路径（至少是真实的，不会把人指向一个不存在的地方）。
 type WallSource struct {
-	// FileName 是磁盘上的 `.strm` 文件名。
+	// FileName 是磁盘上的载体文件名：`.strm`，或纯视频库里的那个 `.mp4` / `.mkv`。
 	FileName string `json:"file_name"`
 	// Path 是本地绝对路径（已按设置换算成宿主机视角）。
 	Path string `json:"path"`
-	// Size 是**网盘上那个源文件**的大小，不是 `.strm` 自己的大小
-	// （那个只有一百多字节，对用户没有意义）。取不到时为 0。
+	// Size 是**源视频文件**的大小。`.strm` 那一档取侧车的 `dest.files`
+	// （`.strm` 自己只有一百多字节，对用户没有意义）；纯视频库直接 stat 那个视频。
+	// 都取不到时为 0。
 	Size int64 `json:"size"`
 	// SizeText 是给人看的大小文本（`8.08 GB`）。
 	SizeText string `json:"size_text"`
@@ -386,7 +400,31 @@ func (s *Service) TMDBWallDetail(ctx context.Context, srcRef WallSourceRef, item
 	if detail.Playable == nil {
 		detail.Playable = []PlayableFile{}
 	}
+	// 集数进度：只在剧集上做（电影没有「第几集」这回事，算了也白费一次 TMDB 请求）。
+	// 媒体类型用 resolveWorkMediaType 而不是 inferMediaType：前者认得
+	// tvshow.nfo 与用户手动标的类型，后者只看目录结构。
+	if resolveWorkMediaType(g) == MediaTypeTV {
+		detail.Seasons = s.wallProgressForWork(ctx, g)
+	}
+	if g.flatFile == "" {
+		detail.RelDir = filepath.ToSlash(relUnder(root, g.absDir))
+	}
 	return detail, nil
+}
+
+// wallProgressForWork 算一部作品的逐集进度（详情抽屉与轮询接口共用同一套算法）。
+//
+// ⚠️ 判据必须与列表那边**同源**：`ownedEpisodeMap` 与 `countTVEpisodeProgress`
+// 对「哪些 `.strm` 算一集」用同一批规则（特别篇、季目录与文件名冲突的都排除）。
+func (s *Service) wallProgressForWork(ctx context.Context, g workGroup) []WallSeasonProgress {
+	if g.flatFile != "" {
+		return nil
+	}
+	entries, err := scanStrmFiles(g.absDir)
+	if err != nil {
+		return nil
+	}
+	return s.wallEpisodeProgress(ctx, workTMDBIDOf(g, MediaTypeTV), ownedEpisodeMap(entries))
 }
 
 // workWallSource 组装 TMDB 作品的「源媒体信息」。
@@ -613,13 +651,28 @@ func firstNonEmpty(values ...string) string {
 
 // wallSource 组装「源媒体信息」。
 //
-// 大小与类型来自**侧车的 dest.files**（投递时记下的网盘源文件清单），
-// 不是 `.strm` 自己的大小 —— 那个一百多字节，对用户没有意义。
+// 大小与类型来自两处，取决于载体是哪一种：
+//
+//   - `.strm`：侧车的 `dest.files`（投递时记下的网盘源文件清单）—— `.strm` 自己
+//     一百多字节，对用户没有意义；
+//   - 真实视频（纯视频库）：直接 stat 那个文件 —— 它就是正片本身，**没有侧车
+//     记录也行**（实测 VRKM-229 刮完仍 size 0，因为它的侧车是刚写的、没有 dest）。
+//
 // 取不到就留空，前端那两行不渲染。
 func (s *Service) wallSource(ref javItemRef, hasSidecar bool, doc *emby.SidecarDoc) *WallSource {
 	src := &WallSource{
 		FileName: ref.StrmName,
 		Path:     s.displayPath(filepath.Join(ref.AbsDir, ref.StrmName)),
+	}
+	// 纯视频库：载体自己就是正片，直接问磁盘。走 SMB 时一次 stat 的代价与点开
+	// 抽屉的整体开销相比可以忽略（同一个目录刚被 ReadDir 过，缓存多半还热）。
+	if abs := filepath.Join(ref.AbsDir, ref.StrmName); strm.IsVideoFileName(ref.StrmName) {
+		if info, err := os.Stat(abs); err == nil && info.Mode().IsRegular() {
+			src.Size = info.Size()
+			src.SizeText = humanSize(info.Size())
+			src.Ext = strings.TrimPrefix(strings.ToLower(filepath.Ext(ref.StrmName)), ".")
+			return src
+		}
 	}
 	// 源文件：取 dest.files 里**体积最大的那个**。目录里混着海报、说明文件、
 	// 广告 mht，最大的那个一定是正片（实测 SZL-034：正片 774MB，其余最大 394KB）。

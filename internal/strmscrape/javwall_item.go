@@ -41,13 +41,16 @@ type javTitleEntry struct {
 
 // javItemRef 是把 (rel_dir, stem) 收敛成的一组绝对路径。
 type javItemRef struct {
-	Src      *wallSrc
-	Root     string
-	AbsDir   string
-	RelDir   string // 规范化后的相对目录（"/" 分隔，可为空）
-	Stem     string // **磁盘上的**原样主干
-	StrmName string // 磁盘上的 .strm 文件名
-	Flat     bool   // 现算，绝不采信客户端
+	Src    *wallSrc
+	Root   string
+	AbsDir string
+	RelDir string // 规范化后的相对目录（"/" 分隔，可为空）
+	Stem   string // **磁盘上的**原样主干
+	// StrmName 是磁盘上的**作品载体文件名** —— 名字是历史遗留：以前只有 `.strm`，
+	// 现在纯视频库（本地目录源）里它就是 `NIMA-086.mp4` 这种真实视频文件。
+	// 凡是「这个作品是哪个文件」的地方都用它，别自己拼 `stem+".strm"`。
+	StrmName string
+	Flat     bool // 现算，绝不采信客户端
 	Names    emby.Names
 }
 
@@ -56,8 +59,9 @@ type javItemRef struct {
 //  1. relDir / stem 不接受绝对路径、分隔符、`..`（stem 允许首尾空格 —— 生成器的
 //     SafeStem 刻意保留它）；
 //  2. `isInside(root, absDir)` —— 与 ResolvePosterFile 同一条判据；
-//  3. **锚点**：`<absDir>/<主干>.strm` 必须真的存在。没有这一条，stem 就是任意文件名；
-//     有了它，能寻址的文件永不出现在「番号生成器会写的那一套」之外。
+//  3. **锚点**：`<absDir>/<主干>.strm`（或纯视频库里的 `<主干>.mp4` 等）必须真的存在。
+//     没有这一条，stem 就是任意文件名；有了它，能寻址的文件永不出现在「番号生成器
+//     会写的那一套」之外。
 //
 // ⚠️ 返回的 Stem 是**磁盘上的那一份**（忽略大小写比对后取磁盘名）：Windows 上
 // `ssis-001` 能配到 `SSIS-001.strm`，照请求写就会多出一个 `ssis-001.nfo`；
@@ -94,28 +98,31 @@ func (s *Service) resolveJavItem(ctx context.Context, srcRef WallSourceRef, relD
 	}
 
 	// 锚点 + 取磁盘上的真实主干。
-	strmName := ""
-	flat := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".strm") {
-			continue
-		}
-		flat++
-		if strings.EqualFold(strm.MediaStem(e.Name()), stem) {
-			strmName = e.Name()
+	//
+	// 载体有两种：本应用生成的 `.strm`，以及纯视频库里的真实视频文件（mp4 / mkv …）。
+	// 同一个主干两份都有时优先 `.strm`（与卡片收集那边同一条判据，见
+	// strm.PickMediaNames）。`Flat` 也按**载体总数**算 —— 以前数的是 `.strm` 个数，
+	// 纯视频库里恒为 0，于是平铺目录会被当成独占，四个产物名全对不上。
+	mediaNames := strm.PickMediaNamesOfEntries(entries)
+	mediaName := ""
+	for _, name := range mediaNames {
+		if strings.EqualFold(strm.MediaStem(name), stem) {
+			if mediaName == "" || strm.IsStrmFileName(name) {
+				mediaName = name
+			}
 		}
 	}
-	if strmName == "" {
-		return ref, domain.Errorf(domain.CodeNotFound, "这一层没有名为 %s 的 .strm", stem)
+	if mediaName == "" {
+		return ref, domain.Errorf(domain.CodeNotFound, "这一层没有名为 %s 的视频文件", stem)
 	}
 	ref = javItemRef{
 		Src:      src,
 		Root:     root,
 		AbsDir:   absDir,
 		RelDir:   rel,
-		Stem:     strm.MediaStem(strmName),
-		StrmName: strmName,
-		Flat:     flat > 1,
+		Stem:     strm.MediaStem(mediaName),
+		StrmName: mediaName,
+		Flat:     len(mediaNames) > 1,
 	}
 	ref.Names = emby.TargetNames(ref.Stem, ref.Flat)
 	return ref, nil

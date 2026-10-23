@@ -62,11 +62,11 @@ const (
 	// 与飞牛的 KeyFnosStrmPathMaps 是**两回事**：那个是给飞牛反代做路径换算用的，
 	// 这个是纯展示。之所以不共用一份：两者的用途、出错后果都不一样，
 	// 共用会让「改这个影响了那个」变得很难解释。
-	KeyStrmHostPathMaps          = "strm_host_path_maps"
-	KeyStrmDefaultExtensions     = "strm_default_extensions"
-	KeyStrmISOFilenameEnabled    = "strm_iso_filename_enabled"
-	KeyStrmMinFileSizeMB         = "strm_min_file_size_mb"
-	KeyStrmConflictPolicy        = "strm_conflict_policy"
+	KeyStrmHostPathMaps       = "strm_host_path_maps"
+	KeyStrmDefaultExtensions  = "strm_default_extensions"
+	KeyStrmISOFilenameEnabled = "strm_iso_filename_enabled"
+	KeyStrmMinFileSizeMB      = "strm_min_file_size_mb"
+	KeyStrmConflictPolicy     = "strm_conflict_policy"
 	// KeyStrmEpisodeUpgrade 是「洗版」：同一集有多份画质不同的文件时，
 	// 关（默认）= 本地已有那份优先、只在首次扫描时挑最好的；
 	// 开 = 永远挑最好的，更好的出现就替换。见 internal/strm/episode_dedup.go。
@@ -127,6 +127,8 @@ const (
 	KeyMOAlignMediaTags        = "mo_align_media_tags"
 	KeyMOMaxWorksPerRun        = "mo_max_works_per_run"
 	KeyMOOverwriteExisting     = "mo_overwrite_existing"
+	KeyMOQuarantineDuplicates  = "mo_quarantine_duplicates"
+	KeyMOQuarantineDirName     = "mo_quarantine_dir_name"
 	KeyAIOrganizeEnabled       = "ai_organize_enabled"
 	KeyAIOrganizeInstances     = "ai_organize_instances"
 	KeyAIOrganizeBaseURL       = "ai_organize_base_url"
@@ -566,6 +568,8 @@ func defaultSpecs() []Spec {
 		boolSpec(KeyMOAlignMediaTags, "media_organize", "强迫症模式", "同后缀文件保持媒体信息标签一致。", "false"),
 		intSpec(KeyMOMaxWorksPerRun, "media_organize", "每次最多整理作品数", "单次执行最多处理的作品数，0 表示不限制。", "50", "", 0, 10000),
 		boolSpec(KeyMOOverwriteExisting, "media_organize", "同名冲突时覆盖", "目标位置已有同名文件时覆盖，默认跳过。", "false"),
+		boolSpec(KeyMOQuarantineDuplicates, "media_organize", "同集重复时移入冗余目录", "目标目录里已经有同一集（无论文件名、画质是否相同）时，把它移进冗余目录而不是跳过，方便手动删除。开启「同名冲突时覆盖」时改为直接替换。", "true"),
+		stringSpec(KeyMOQuarantineDirName, "media_organize", "冗余目录名", "存放重复集的目录名，建在整理目标根目录下。", "冗余"),
 		{
 			// 番号规则是结构化数据（三个规则表），走独立的 /jav-rules 端点读写，
 			// 和 mo_classification_config 一样只在注册表里占个位。

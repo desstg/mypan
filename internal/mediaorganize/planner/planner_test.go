@@ -1237,12 +1237,14 @@ func TestMovePlanMovesAlreadyOrganizedTVFilesToEmptyTarget(t *testing.T) {
 	}
 }
 
-func TestMovePlanSkipsAlreadyOrganizedTVFileWhenTargetExists(t *testing.T) {
+// 目标里已经有同一集（同名同格式）：这一份不进库，移进冗余目录。
+//
+// 以前这里是「跳过」—— 用户明确要求改成移进「冗余」目录，好在库外一把删掉。
+func TestMovePlanQuarantinesDuplicateEpisodeWhenTargetExists(t *testing.T) {
 	filename := "钢铁森林 (2026) S01E01 [2160p H.265 DDP 5.1].mkv"
 	fs := &mockFS{dirs: map[string][]domain.FileItem{
 		"root": {
 			{ID: "show", Name: "钢铁森林 (2026) {tmdb-281392}", IsDir: true},
-			{ID: "target", Name: "整理目标", IsDir: true},
 		},
 		"show":           {{ID: "season1", Name: "Season 01", IsDir: true}},
 		"season1":        {{ID: "ep01", Name: filename}},
@@ -1291,15 +1293,81 @@ func TestMovePlanSkipsAlreadyOrganizedTVFileWhenTargetExists(t *testing.T) {
 	if fileAction == nil {
 		t.Fatalf("expected file move action, actions=%+v", plan.Actions)
 	}
-	if fileAction.Status != "skipped" {
-		t.Fatalf("expected target conflict skip, status=%q action=%+v", fileAction.Status, *fileAction)
+	if fileAction.Status == "skipped" {
+		t.Fatalf("重复集应该移进冗余目录而不是跳过: %+v", *fileAction)
 	}
-	if !strings.Contains(fileAction.Error, "目标已存在同名") {
-		t.Fatalf("unexpected skip error: %q", fileAction.Error)
+	if q, _ := fileAction.Metadata["quarantined_duplicate"].(bool); !q {
+		t.Fatalf("重复集应带 quarantined_duplicate 标记: %+v", *fileAction)
+	}
+	// 目标必须是「冗余」目录的动作引用，而且那个目录建在整理目标根下。
+	quarantineID := strings.TrimPrefix(fileAction.TargetParentID, "ref:")
+	var quarantineDir *moplan.PlanAction
+	for i := range plan.Actions {
+		if plan.Actions[i].ID == quarantineID {
+			quarantineDir = &plan.Actions[i]
+			break
+		}
+	}
+	if quarantineDir == nil {
+		t.Fatalf("冗余目录动作没建出来: %+v", plan.Actions)
+	}
+	if quarantineDir.Kind != moplan.ActionKindEnsureDir || quarantineDir.TargetName != "冗余" || quarantineDir.TargetParentID != "target" {
+		t.Fatalf("冗余目录应是建在 target 下的 ensure_dir: %+v", *quarantineDir)
 	}
 }
 
-func TestMovePlanMarksOverwriteTargetWhenTargetExists(t *testing.T) {
+// 目标里已经有同一集，但文件名 / 画质不同 —— 这才是用户报的那个 bug：
+// 「影片格式不同，但集数一样，这样也不行」。
+func TestMovePlanQuarantinesSameEpisodeWithDifferentFilename(t *testing.T) {
+	sourceName := "钢铁森林 (2026) S01E01 [1080p H.264 AAC].mkv"
+	targetName := "钢铁森林 (2026) S01E01 [2160p H.265 DDP 5.1].mkv"
+	fs := &mockFS{dirs: map[string][]domain.FileItem{
+		"root":           {{ID: "show", Name: "钢铁森林 (2026) {tmdb-281392}", IsDir: true}},
+		"show":           {{ID: "season1", Name: "Season 01", IsDir: true}},
+		"season1":        {{ID: "ep01", Name: sourceName}},
+		"target":         {{ID: "target_show", Name: "钢铁森林 (2026) {tmdb-281392}", IsDir: true}},
+		"target_show":    {{ID: "target_season1", Name: "Season 01", IsDir: true}},
+		"target_season1": {{ID: "existing_ep01", Name: targetName}},
+	}}
+	p := planner.New(
+		context.Background(), fs, 1,
+		planner.TaskConfig{
+			TargetDirectoryID: "root", TargetRootID: "target",
+			ActionType: "move", MediaType: "auto", RenameMarker: "off", UseTMDB: true, Recursive: true,
+		},
+		planner.Settings{"mo_tmdb_api_key": "test-key"},
+		"task-test",
+		&mockTMDB{lookupFn: func(id string) map[string]any {
+			if id == "281392" {
+				return map[string]any{"id": 281392, "name": "钢铁森林", "original_name": "钢铁森林", "first_air_date": "2026-01-01"}
+			}
+			return nil
+		}},
+		func(string) {}, nil, func() error { return nil },
+	)
+	plan, err := p.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fileAction *moplan.PlanAction
+	for i := range plan.Actions {
+		if plan.Actions[i].SourceID == "ep01" {
+			fileAction = &plan.Actions[i]
+			break
+		}
+	}
+	if fileAction == nil {
+		t.Fatalf("expected file move action, actions=%+v", plan.Actions)
+	}
+	if q, _ := fileAction.Metadata["quarantined_duplicate"].(bool); !q {
+		t.Fatalf("同一集不同文件名也必须判重复: %+v", *fileAction)
+	}
+}
+
+// 整理目标库本身也在被整理（改剧名 / 挪季目录）时，库里那一集同样是一条
+// relocate 动作。它不能因为「目标里已有这一集」被判成重复、搬进冗余 ——
+// 那等于把库里唯一的一份搬走。
+func TestMovePlanKeepsLibraryCopyWhenTargetLibraryIsBeingReorganized(t *testing.T) {
 	filename := "钢铁森林 (2026) S01E01 [2160p H.265 DDP 5.1].mkv"
 	fs := &mockFS{dirs: map[string][]domain.FileItem{
 		"root": {
@@ -1311,6 +1379,63 @@ func TestMovePlanMarksOverwriteTargetWhenTargetExists(t *testing.T) {
 		"target":         {{ID: "target_show", Name: "钢铁森林 (2026) {tmdb-281392}", IsDir: true}},
 		"target_show":    {{ID: "target_season1", Name: "Season 01", IsDir: true}},
 		"target_season1": {{ID: "existing_ep01", Name: filename}},
+	}}
+	p := planner.New(
+		context.Background(), fs, 1,
+		planner.TaskConfig{
+			TargetDirectoryID: "root", TargetRootID: "target",
+			ActionType: "move", MediaType: "auto", RenameMarker: "off", UseTMDB: true, Recursive: true,
+		},
+		planner.Settings{"mo_tmdb_api_key": "test-key"},
+		"task-test",
+		&mockTMDB{lookupFn: func(id string) map[string]any {
+			if id == "281392" {
+				return map[string]any{"id": 281392, "name": "钢铁森林", "original_name": "钢铁森林", "first_air_date": "2026-01-01"}
+			}
+			return nil
+		}},
+		func(string) {}, nil, func() error { return nil },
+	)
+	plan, err := p.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var libraryAction, incomingAction *moplan.PlanAction
+	for i := range plan.Actions {
+		switch plan.Actions[i].SourceID {
+		case "existing_ep01":
+			libraryAction = &plan.Actions[i]
+		case "ep01":
+			incomingAction = &plan.Actions[i]
+		}
+	}
+	if libraryAction == nil || incomingAction == nil {
+		t.Fatalf("两份动作都应存在: %+v", plan.Actions)
+	}
+	if q, _ := libraryAction.Metadata["quarantined_duplicate"].(bool); q {
+		t.Fatalf("库里那一集不该被判成重复搬进冗余: %+v", *libraryAction)
+	}
+	if q, _ := incomingAction.Metadata["quarantined_duplicate"].(bool); !q {
+		t.Fatalf("同一集的新来那一份应进冗余: %+v", *incomingAction)
+	}
+}
+
+// 开了覆盖（= 洗版）：新进来的画质更高，就该把库里那一集删掉换成它。
+//
+// 注意「更高」这个前提。同一集两份画质相同时，库里那份按 betterEpisodeAction
+// 优先留下，进来的那份进冗余 —— 替换掉一份一模一样的副本没有意义。
+func TestMovePlanMarksOverwriteTargetWhenTargetExists(t *testing.T) {
+	incoming := "钢铁森林 (2026) S01E01 [2160p H.265 DDP 5.1].mkv"
+	library := "钢铁森林 (2026) S01E01 [1080p H.264 AAC].mkv"
+	fs := &mockFS{dirs: map[string][]domain.FileItem{
+		"root": {
+			{ID: "show", Name: "钢铁森林 (2026) {tmdb-281392}", IsDir: true},
+		},
+		"show":           {{ID: "season1", Name: "Season 01", IsDir: true}},
+		"season1":        {{ID: "ep01", Name: incoming}},
+		"target":         {{ID: "target_show", Name: "钢铁森林 (2026) {tmdb-281392}", IsDir: true}},
+		"target_show":    {{ID: "target_season1", Name: "Season 01", IsDir: true}},
+		"target_season1": {{ID: "existing_ep01", Name: library}},
 	}}
 	p := planner.New(
 		context.Background(),

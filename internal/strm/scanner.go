@@ -28,9 +28,9 @@ var episodeNamePattern = regexp.MustCompile(`(?i)(` +
 const defaultExtensions = "mp4;mkv;avi;mov;wmv;flv;ts;m2ts;mpg;mpeg;webm;mp3;flac;aac;wav;m4a;iso"
 
 type ScanSettings struct {
-	DefaultExtensions     string
-	MinFileSizeMB         int
-	ConflictPolicy        string
+	DefaultExtensions string
+	MinFileSizeMB     int
+	ConflictPolicy    string
 	// EpisodeUpgrade 是「洗版」开关：同一集有多份画质不同的文件时，
 	// 关 = 先到先得（本地已有那份优先，只是首次扫描时挑最好的）；
 	// 开 = 永远挑最好的，更好的出现就替换（旧的 .strm 由清理步骤删掉）。
@@ -42,6 +42,12 @@ type ScanSettings struct {
 	MetadataSyncMode      string
 	ISOFilenameEnabled    bool
 	Tool115TreeEnabled    bool
+	// QuarantineDirName 是「目录整理」用来堆放同集重复文件的目录名（默认「冗余」）。
+	//
+	// STRM 扫到它必须整个跳过：里面是**故意留着让人手动删**的重复集，
+	// 给它们生成 .strm 等于把重复集又搬回 Emby。整理的目标根目录通常就在
+	// STRM 扫描根里面（…/tmdb影片/电视剧），所以不能指望用户逐个任务填排除词。
+	QuarantineDirName string
 	// JavMetaItems 是「番号元数据」六个开关（媒体类型 = 番号影片时生效）。
 	JavMetaItems settings.JavMetaItems
 	// 水印：开关 + 两个偏好 + 用户图标目录。开关决定**自动**那条路贴不贴
@@ -715,7 +721,7 @@ func walkBaseBranchEntry(
 		name := item.Name
 		if item.IsDir {
 			remoteChildNames[SafeName(name)] = struct{}{}
-			if matchesKeywordRules(name, excludeDirs) {
+			if matchesKeywordRules(name, excludeDirs) || isQuarantineDir(name, deps.Settings.QuarantineDirName) {
 				continue
 			}
 			childID := item.ID
@@ -845,7 +851,7 @@ func walkScope(
 			name := item.Name
 			if item.IsDir {
 				childNames[SafeName(name)] = struct{}{}
-				if matchesKeywordRules(name, excludeDirs) {
+				if matchesKeywordRules(name, excludeDirs) || isQuarantineDir(name, deps.Settings.QuarantineDirName) {
 					continue
 				}
 				if scope.recursive {

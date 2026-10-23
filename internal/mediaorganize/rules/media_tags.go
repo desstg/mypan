@@ -353,6 +353,14 @@ func bracketInners(stem string) []string {
 	return out
 }
 
+// ScreenSizeRank 把清晰度标签换成档位（5 = 8K，4 = 2160p，3 = 1080p …，0 = 未知）。
+//
+// 导出它是因为「同一集有好几个版本时留哪一份」的判据在 planner 侧，
+// 而档位表只在这里有一份 —— 两边各写一份迟早会走岔（与 STRM 同集去重同一套顺序）。
+func ScreenSizeRank(token string) int {
+	return screenSizeRank(token)
+}
+
 func screenSizeRank(token string) int {
 	switch strings.ToLower(strings.TrimSpace(token)) {
 	case "4320p", "8k":

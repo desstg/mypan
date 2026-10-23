@@ -1,10 +1,12 @@
-import { ref } from "vue";
+import { onScopeDispose, ref } from "vue";
 import { toast } from "@/composables/useToast";
 import {
   fetchStrmScrapeItemDetail,
+  fetchStrmScrapeWallEpisodes,
   type PlayableFile,
   type StrmScrapeItem,
   type WallDetail,
+  type WallSeasonProgress,
   type WallSourceRef,
 } from "@/api/strmScrape";
 import { fetchJavWallItemDetail } from "@/api/strmJavWall";
@@ -31,6 +33,81 @@ export function useWallDetail() {
   const detail = ref<WallDetail | null>(null);
   const error = ref("");
 
+  /**
+   * 剧集的**逐集进度**（详情抽屉的彩色格子）。
+   *
+   * 初值来自详情接口（`detail.seasons`），之后由下面那个定时器刷新 —— 订阅刚推下来
+   * 一集、或者用户手动删了一集，抽屉开着的时候格子要自己变色。
+   */
+  const seasons = ref<WallSeasonProgress[]>([]);
+  /**
+   * 轮询间隔。
+   *
+   * 15 秒：订阅那边推完一集，用户一般正开在这个抽屉上。再快没意义（服务端每次要读
+   * 一遍目录），再慢就赶不上「刚推下来的那一集」。
+   */
+  const POLL_MS = 15_000;
+  /** 轮询用的源 + 作品目录。详情接口一并给了（`rel_dir` 由服务端算，前端不拼）。 */
+  let pollSource: number | WallSourceRef | null = null;
+  let pollRelDir = "";
+  let pollTimer: number | null = null;
+
+  function stopEpisodePolling() {
+    if (pollTimer !== null) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    pollSource = null;
+    pollRelDir = "";
+  }
+
+  /** 拉一次逐集进度。**失败静默** —— 格子停在旧状态即可，不必弹错。 */
+  async function refreshEpisodes() {
+    if (!pollSource || !pollRelDir) return;
+    // 页面在后台时不拉：用户看不见，白扫一遍盘。
+    if (typeof document !== "undefined" && document.hidden) return;
+    try {
+      seasons.value = await fetchStrmScrapeWallEpisodes(pollSource, pollRelDir);
+    } catch {
+      /* 保持旧状态 */
+    }
+  }
+
+  /**
+   * 起轮询。**判据只看详情里有没有 `seasons`** —— 服务端只在剧集上给这个字段
+   * （电影连算都不算），所以这里不需要再判一次媒体类型。
+   */
+  function startEpisodePolling(source: number | WallSourceRef) {
+    stopEpisodePolling();
+    const got = detail.value;
+    if (!got?.rel_dir || !got.seasons?.length) return;
+    pollSource = source;
+    pollRelDir = got.rel_dir;
+    pollTimer = window.setInterval(refreshEpisodes, POLL_MS);
+  }
+
+  /**
+   * 暂停 / 继续。
+   *
+   * 从抽屉里点播放时抽屉会被收起来（见 suspendedByPlayer），格子看不见了 ——
+   * 但**不能整份清掉**：关掉播放窗抽屉会弹回来，那时要接着刷（源与目录都还在）。
+   */
+  function pauseEpisodePolling() {
+    if (pollTimer !== null) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function resumeEpisodePolling() {
+    if (pollTimer !== null || !pollSource || !pollRelDir) return;
+    pollTimer = window.setInterval(refreshEpisodes, POLL_MS);
+  }
+
+  // 组件卸载时把定时器停掉：`setInterval` 不随组件销毁自动清，留着就是每 15 秒
+  // 对着一个已经不存在的抽屉发请求（切走页面再回来会攒出好几个）。
+  onScopeDispose(stopEpisodePolling);
+
   // —— 播放窗（从抽屉里发起）——
   const playerOpen = ref(false);
   /** 正在播的那一集。**只接一个** —— 选集在抽屉里做完了，见 WallPlayer 的说明。 */
@@ -51,6 +128,8 @@ export function useWallDetail() {
     open.value = false;
     detail.value = null;
     error.value = "";
+    seasons.value = [];
+    stopEpisodePolling();
     // 用户主动关抽屉时清掉这个标记：否则下次关播放窗会凭空把抽屉弹回来。
     suspendedByPlayer.value = false;
   }
@@ -64,6 +143,8 @@ export function useWallDetail() {
     if (suspendedByPlayer.value) {
       suspendedByPlayer.value = false;
       open.value = true;
+      // 抽屉弹回来了，格子重新开始刷（源与目录在暂停时保留着）。
+      resumeEpisodePolling();
     }
   }
 
@@ -94,7 +175,10 @@ export function useWallDetail() {
    */
   async function openTMDB(source: number | WallSourceRef, item: StrmScrapeItem) {
     if (typeof source === "number" ? !source : !source.local_dir_id && !source.strm_task_id) return;
+    seasons.value = [];
     await present(item.title, () => fetchStrmScrapeItemDetail(source, item.id));
+    seasons.value = detail.value?.seasons ?? [];
+    startEpisodePolling(source);
   }
 
   /** 番号影片墙。`source` 是任务 id 或本地目录源（见 api 的 WallSourceRef）。 */
@@ -131,6 +215,8 @@ export function useWallDetail() {
     if (open.value) {
       suspendedByPlayer.value = true;
       open.value = false;
+      // 抽屉收起来了，格子看不见 —— 停止轮询，别在用户看片时一直扫盘。
+      pauseEpisodePolling();
     }
   }
 
@@ -139,6 +225,7 @@ export function useWallDetail() {
     loading,
     detail,
     error,
+    seasons,
     close,
     openTMDB,
     openJav,

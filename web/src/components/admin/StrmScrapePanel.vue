@@ -1892,6 +1892,7 @@ defineExpose({
       :open="wall.open.value"
       :loading="wall.loading.value"
       :detail="wall.detail.value"
+      :seasons="wall.seasons.value"
       :error="wall.error.value"
       @close="wall.close"
       @play="wall.play"

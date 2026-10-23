@@ -6,7 +6,11 @@ import { sourceParams, type WallDetail, type WallSourceRef } from "@/api/strmScr
 // 番号影片的海报墙（辅助工具 → 海报墙，选中「媒体类型 = 番号影片」的任务时用）。
 //
 // 与 TMDB 那套（strmScrape.ts）共用同一个页面，但数据源完全不同：这边是**扫本地
-// 媒体库目录**（`.strm` 主干 + 四个产物的有无），不碰 TMDB、也不落库。
+// 媒体库目录**（作品载体主干 + 四个产物的有无），不碰 TMDB、也不落库。
+//
+// **载体有两种**：本应用生成的 `.strm`，以及「本地目录」源里用户别的工具产出的
+// 真实视频（`.mp4` / `.mkv` …）。判据在后端 `strm.IsMediaFileName`，前端不必区分 ——
+// 卡片、详情、播放、删除都不关心那到底是哪一种（例外只有播放地址：见 PlayableFile.path）。
 
 /** 一级目录（用户口语里的「类型」）。name 为空串表示根目录下散落的那些。 */
 export interface JavWallCategory {
@@ -14,7 +18,7 @@ export interface JavWallCategory {
   count: number;
 }
 
-/** 墙上一张卡 = 一个 `.strm` 主干的那一套本地文件。 */
+/** 墙上一张卡 = 一个载体主干（`.strm` 或真实视频）的那一套本地文件。 */
 export interface JavWallItem {
   id: string;
   rel_dir: string;
@@ -23,7 +27,7 @@ export interface JavWallItem {
   stem: string;
   title: string;
   number: string;
-  /** 平铺布局（该目录有多个 `.strm`），决定四个产物的文件名。 */
+  /** 平铺布局（该目录有多个作品载体），决定四个产物的文件名。 */
   flat: boolean;
   has_thumb: boolean;
   has_poster: boolean;
@@ -432,7 +436,7 @@ export interface JavWallDeletePreview {
   local_dir: string;
   /** 删完文件之后本地目录会不会一起删掉（目录里没有别的东西了）。 */
   remove_local_dir: boolean;
-  /** 平铺布局（该目录还有别的 `.strm`）——文案要说清「只删这一部」。 */
+  /** 平铺布局（该目录还有别的作品载体）——文案要说清「只删这一部」。 */
   flat: boolean;
   /** 网盘上这一步要动的路径；cloud_skipped 非空时它是空串。 */
   cloud_path?: string;

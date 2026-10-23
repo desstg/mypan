@@ -347,17 +347,40 @@ func (e *Executor) execOverwriteDeletions(actions []*moplan.PlanAction) error {
 	}
 	for _, action := range actions {
 		targetID := metaStr(action.Metadata, "_overwrite_target_id")
-		if targetID == "" {
-			continue
+		// 同一集在目标里可能有好几份历史版本（同名冲突只认名字，这里是按集号
+		// 收口，见 planner/quarantine.go），执行时一并删掉，别留下影子。
+		targetIDs := make([]string, 0, 2)
+		if targetID != "" {
+			targetIDs = append(targetIDs, targetID)
 		}
-		if _, ok := plannedSources[targetID]; ok {
+		if list, ok := action.Metadata["_overwrite_target_ids"].([]string); ok {
+			targetIDs = append(targetIDs, list...)
+		}
+		// 计划若经过 JSON 往返（存库 / 前端预览再回传），切片会变成 []any。
+		if list, ok := action.Metadata["_overwrite_target_ids"].([]any); ok {
+			for _, v := range list {
+				if s := strings.TrimSpace(fmt.Sprint(v)); s != "" && s != "<nil>" {
+					targetIDs = append(targetIDs, s)
+				}
+			}
+		}
+		if len(targetIDs) == 0 {
 			continue
 		}
 		parentID := metaStr(action.Metadata, "_resolved_target_parent_id")
 		if parentID == "" {
 			continue
 		}
-		byDir[parentID] = append(byDir[parentID], targetID)
+		for _, targetID := range targetIDs {
+			if targetID == "" {
+				continue
+			}
+			// 本次计划里要搬走 / 本身就是要留下的那一份，不能删。
+			if _, ok := plannedSources[targetID]; ok {
+				continue
+			}
+			byDir[parentID] = append(byDir[parentID], targetID)
+		}
 	}
 	for parentID, ids := range byDir {
 		if err := e.checkStop(); err != nil {

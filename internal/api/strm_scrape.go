@@ -338,6 +338,7 @@ func (h *Handler) getStrmScrapePoster(w http.ResponseWriter, r *http.Request) {
 // 这个端点现在还兼着发字幕（.srt/.vtt/.sup），所以字幕那三种也要给对类型 ——
 // 一律写 image/* 的话，前端 `response.arrayBuffer()` 那条路虽然不看类型，
 // 但 `fetch` 的 MIME 嗅探与浏览器 DevTools 都会显示成图片，排查时误导人。
+// imageContentTypeFor 按扩展名给内容类型。
 func imageContentTypeFor(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".png":
@@ -355,6 +356,51 @@ func imageContentTypeFor(path string) string {
 	}
 }
 
+// getStrmScrapeMedia 把「本地目录」源里的**真实视频文件**发给播放器。
+//
+// # 为什么另起一条而不是让 /poster 也放行视频
+//
+// `/poster` 会把整个文件读进内存（它对图是对的：几十 KB），再走 thumbcache 缩放。
+// 视频动辄几 GB，那条路会直接 OOM；而且播放器需要 **Range**（拖进度条、边下边播），
+// 那是 `http.ServeContent` 才有的事。
+//
+// 安全：白名单只在 `ResolveMediaFile` 里（视频扩展名 + `isInside`），这条 handler
+// 不做第二套判据 —— 两处各写一份的话，哪天放宽一处就成了任意文件读取。
+func (h *Handler) getStrmScrapeMedia(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	srcRef := strmscrape.WallSourceRef{
+		StrmTaskID: qInt64(r, "strm_task_id"),
+		LocalDirID: strings.TrimSpace(r.URL.Query().Get("local_dir_id")),
+	}
+	rel := strings.TrimSpace(r.URL.Query().Get("rel"))
+	path, err := h.strmScrape.ResolveMediaFile(r.Context(), srcRef, rel)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	// `defer` 而不是复制完手动关：这条 handler 的生命周期就是整个响应，
+	// 而 ServeContent 会把连接挂到响应结束（浏览器慢一点就是几秒到几十秒）。
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", strmscrape.VideoContentType(path))
+	// `private` 是关键：这是后台鉴权之后才给的内容，不能让中间的反代共享缓存。
+	// 不设 `max-age` 的长期值 —— 片名不变但内容可能被替换（重新整理过），
+	// 一小时与海报那面保持一致，缓存击穿靠前端给 URL 带 mtime 版本号。
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
+}
+
 // getStrmScrapeItemDetail 读一张卡的详情（TMDB 影片墙的抽屉）。
 func (h *Handler) getStrmScrapeItemDetail(w http.ResponseWriter, r *http.Request) {
 	if !ensureServiceReady(w, h.strmScrape != nil) {
@@ -369,6 +415,30 @@ func (h *Handler) getStrmScrapeItemDetail(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	writeOK(w, out)
+}
+
+// getStrmScrapeWallEpisodes 只回一部剧的「逐集进度」（已入库 / 缺 / 还没播）。
+//
+// 详情抽屉打开时拿一次，之后每隔十几秒再拿一次 —— 订阅刚推下来一集，
+// 抽屉里的格子要自己变绿。所以这条接口**刻意轻**：只读这一部作品的目录
+// （不扫整库、不打网盘、不读剧照），TMDB 排期走内存缓存。
+func (h *Handler) getStrmScrapeWallEpisodes(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	srcRef := strmscrape.WallSourceRef{
+		StrmTaskID: qInt64(r, "strm_task_id"),
+		LocalDirID: strings.TrimSpace(r.URL.Query().Get("local_dir_id")),
+	}
+	out, err := h.strmScrape.WallEpisodes(r.Context(), srcRef, r.URL.Query().Get("rel_dir"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if out == nil {
+		out = []strmscrape.WallSeasonProgress{}
 	}
 	writeOK(w, out)
 }

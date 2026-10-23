@@ -308,6 +308,11 @@ func (p *Planner) tryWholeDirMoveOptimization() {
 		if sdid == "" || sdid == p.parentID {
 			continue
 		}
+		// 本目录里有文件被判成重复集（要移进冗余目录）：整体搬目录会绕过
+		// detectDuplicateEpisodes 的判断，把重复集一起搬进目标。
+		if p.sourceDirHasQuarantinedRelocate(sdid) {
+			continue
+		}
 		hasRelocates := false
 		for _, fa := range p.actions {
 			if fa.Kind == moplan.ActionKindRelocate && fa.SourceParentID == sdid {
@@ -353,6 +358,12 @@ func (p *Planner) tryWholeDirMoveOptimization() {
 			sdid = id
 		}
 		if sdid == "" || sdid == p.parentID {
+			continue
+		}
+		// 同上：有重复集被挑出去移进冗余目录时，不能整体搬这个源目录。
+		// 注意这里移走的动作已经改指冗余目录，不再出现在 allFromSource 里 ——
+		// 「全目录都搬过去」看着成立，其实落下了那一份。
+		if p.sourceDirHasQuarantinedRelocate(sdid) {
 			continue
 		}
 		alreadyUsed := false

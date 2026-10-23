@@ -313,6 +313,7 @@ func TestApplyMetadataFollowersOnRenameMerge(t *testing.T) {
 
 type plannerMockTMDB struct {
 	searchFn func(query string, year *int) []map[string]any
+	lookupFn func(id string) map[string]any
 }
 
 func (m *plannerMockTMDB) ValidateConnection(context.Context) bool { return true }
@@ -330,7 +331,13 @@ func (m *plannerMockTMDB) Search(_ context.Context, query string, year *int, _ s
 	return out, nil
 }
 
-func (m *plannerMockTMDB) Lookup(context.Context, string, string) (json.RawMessage, error) {
+func (m *plannerMockTMDB) Lookup(_ context.Context, tmdbID string, _ string) (json.RawMessage, error) {
+	if m.lookupFn != nil {
+		if item := m.lookupFn(tmdbID); item != nil {
+			b, _ := json.Marshal(item)
+			return b, nil
+		}
+	}
 	return nil, nil
 }
 

@@ -64,6 +64,12 @@ type Planner struct {
 	classification    classification.Enhancer
 	deferred          []deferredGroup
 	applyingAI        bool
+
+	// 「重复集移入冗余目录」——见 quarantine.go。
+	quarantineDuplicates  bool
+	quarantineDirName     string
+	quarantineNames       map[string]struct{}
+	quarantineNamesLoaded bool
 }
 
 func (p *Planner) SetRecognitionEnhancer(enhancer recognition.Enhancer) {
@@ -176,6 +182,14 @@ func (p *Planner) loadSettings() {
 	if p.seasonFolderTpl == "" {
 		p.seasonFolderTpl = "Season {season:02d}"
 	}
+	// 「目标里已有同一集就把这一份移进冗余目录」。默认开 —— 用户报的正是
+	// 「目录里同一集堆了好几份」，那不该需要先找到某个开关才生效。
+	p.quarantineDuplicates = rules.SettingBool(p.settings["mo_quarantine_duplicates"], true)
+	p.quarantineDirName = strSetting(p.settings, "mo_quarantine_dir_name", defaultQuarantineDirName)
+	p.quarantineDirName = rules.SanitizeFilename(p.quarantineDirName)
+	if p.quarantineDirName == "" {
+		p.quarantineDuplicates = false
+	}
 }
 
 func extensionSetting(settings Settings, key, taskValue, fallback string) string {
@@ -216,6 +230,8 @@ func (p *Planner) Build() (*moplan.Plan, error) {
 	if err := p.runRecognitionEnhancement(); err != nil {
 		return nil, err
 	}
+	// ⚠️ 必须在 tryWholeDirMoveOptimization 之前 —— 见 quarantine.go 文件头。
+	p.detectDuplicateEpisodes()
 	p.tryWholeDirMoveOptimization()
 	p.detectSameWorkDirConflicts()
 	p.detectTargetNameConflicts()
@@ -407,6 +423,12 @@ func (p *Planner) scanAndPlan(rootID string) error {
 			return nil
 		}
 		if item.IsDir {
+			// 冗余目录里堆的是之前收进来的重复集，本身不该被整理「捞」回来。
+			// 这个判断在递归的每个分支里都有；根这一层也要有，否则整理目标根
+			// 就是扫描根时（常见），冗余目录会作为顶层子目录被直接走进去。
+			if p.isQuarantineDirName(item.Name) {
+				continue
+			}
 			if err := p.walkForBatches(item.ID, []rules.Ancestor{{ID: item.ID, Name: item.Name}}); err != nil {
 				return err
 			}
@@ -454,7 +476,7 @@ func (p *Planner) walkForBatches(dirID string, ancestors []rules.Ancestor) error
 			if p.quotaReached {
 				return nil
 			}
-			if child.IsDir {
+			if child.IsDir && !p.isQuarantineDirName(child.Name) {
 				next := append(cloneAncestors(ancestors), rules.Ancestor{ID: child.ID, Name: child.Name})
 				if err := p.walkForBatches(child.ID, next); err != nil {
 					return err
@@ -470,7 +492,7 @@ func (p *Planner) walkForBatches(dirID string, ancestors []rules.Ancestor) error
 		}
 	}
 	for _, child := range items {
-		if !child.IsDir {
+		if !child.IsDir || p.isQuarantineDirName(child.Name) {
 			continue
 		}
 		next := append(cloneAncestors(ancestors), rules.Ancestor{ID: child.ID, Name: child.Name})
@@ -495,6 +517,11 @@ func (p *Planner) collectDescendants(dirID string, ancestors []rules.Ancestor, o
 			return err
 		}
 		if item.IsDir {
+			// 冗余目录里的东西是上次收进来的重复集，不能再当成待整理素材 ——
+			// 否则下一次整理会把它们从冗余里「捞」回来，和库里那份再撞一次。
+			if p.isQuarantineDirName(item.Name) {
+				continue
+			}
 			next := append(cloneAncestors(ancestors), rules.Ancestor{ID: item.ID, Name: item.Name})
 			if err := p.collectDescendants(item.ID, next, out); err != nil {
 				return err

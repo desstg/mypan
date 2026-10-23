@@ -64,7 +64,7 @@ type Service struct {
 	scanProgress    map[int64]liveScanProgress
 	// replaceBaseURL 是「一键替换基址」的后台任务状态（全局一个，不按任务）。
 	replaceBaseURL           *replaceBaseURLState
-	fileOperations map[any]struct{}
+	fileOperations           map[any]struct{}
 	organizeBusy             RunningAccountLister
 	retentionBusy            RunningAccountLister
 	automationManagedChecker func(context.Context, int64) (bool, error)
@@ -121,7 +121,7 @@ func NewService(opts ServiceOptions) *Service {
 		taskCancels:     make(map[int64]context.CancelFunc),
 		dirtyAccounts:   make(map[int64]bool),
 		pendingRun:      make(map[int64]string),
-		fileOperations: make(map[any]struct{}),
+		fileOperations:  make(map[any]struct{}),
 	}
 }
 
@@ -985,6 +985,7 @@ func (s *Service) scanSettings() ScanSettings {
 		MetadataParentEnabled: s.settings.Bool(settings.KeyStrmMetadataParentEnabled),
 		MetadataSyncMode:      normalizeMetadataSyncMode(s.settings.String(settings.KeyStrmMetadataSyncMode)),
 		Tool115TreeEnabled:    s.settings.Bool(settings.KeyStrmTool115TreeEnabled),
+		QuarantineDirName:     s.settings.String(settings.KeyMOQuarantineDirName),
 		JavMetaItems:          settings.ParseJavMetaItems(s.settings.StringAllowEmpty(settings.KeyStrmJavMetaItems)),
 		JavWatermarkEnabled:   s.settings.Bool(settings.KeyJavWatermarkEnabled),
 		JavWatermarkScale:     s.watermarkPercent(settings.KeyJavWatermarkScale, defaultWatermarkScale),

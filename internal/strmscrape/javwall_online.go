@@ -406,12 +406,19 @@ func (s *Service) javOnlineRunning(scopeKey string) bool {
 	return s.javOnline != nil && s.javOnline.SourceKey == scopeKey && s.javOnline.Running
 }
 
-// javScrapeRelPaths 把扫到的目标换算成「相对任务根」的 .strm 路径
+// javScrapeRelPaths 把扫到的目标换算成「相对任务根」的**载体文件**路径
 // （generateJavArtifacts 要的就是这个形状）。
+//
+// 用 `t.fileName` 而不是 `t.stem+".strm"`：纯视频库里载体是 `<主干>.mp4`，
+// 拼出来的 `.strm` 路径在磁盘上不存在，补图会静默一部都不写。
 func javScrapeRelPaths(root string, targets []javScrapeTarget) []string {
 	out := make([]string, 0, len(targets))
 	for _, t := range targets {
-		abs := filepath.Join(t.absDir, t.stem+".strm")
+		name := t.fileName
+		if name == "" {
+			name = t.stem + ".strm" // 老调用方没填：保持原行为
+		}
+		abs := filepath.Join(t.absDir, name)
 		out = append(out, filepath.ToSlash(relUnder(root, abs)))
 	}
 	return out
@@ -480,9 +487,17 @@ func (s *Service) javScrapeRouteInputs(targets []javScrapeTarget, tokens []strin
 type javScrapeTarget struct {
 	absDir string
 	stem   string // 磁盘上的原样主干（**含质量后缀**）
-	flat   bool
-	names  emby.Names
-	number string // 归一化后的番号（空 = 取不出来，跳过）
+	// fileName 是磁盘上的**作品载体文件名**：本应用生成的是 `<主干>.strm`，
+	// 纯视频库里是 `<主干>.mp4` / `.mkv` …。
+	//
+	// 补图那一步（`FillJavArtifactsInRoot`）要按它找目录、按它的主干命名产物，
+	// **不能自己拼 `stem+".strm"`** —— 纯视频库里那个路径根本不存在，补图会静默
+	// 一部都不写（`generateJavArtifacts` 是按名字分组后去读目录的）。
+	// 空串 = 老调用方没填，按 `.strm` 兜底（见 javScrapeRelPaths）。
+	fileName string
+	flat     bool
+	names    emby.Names
+	number   string // 归一化后的番号（空 = 取不出来，跳过）
 	// category 是一级目录名（海报墙的 tab 键，也是 javrules 的 TargetName 口径）。
 	//
 	// 它是**路由的线索之一**（不是依据）：用户在规则编辑器里随时能把
@@ -667,8 +682,10 @@ func (s *Service) javScrapeTargetsForCategory(ctx context.Context, src *wallSrc,
 			continue
 		}
 		t := javScrapeTarget{
-			absDir:   row.absDir,
-			stem:     row.item.Stem,
+			absDir: row.absDir,
+			stem:   row.item.Stem,
+			// row.strmName 是载体文件名（`.strm` 或真实视频），补图那一步要用它。
+			fileName: row.strmName,
 			flat:     row.item.Flat,
 			number:   row.item.Number,
 			category: row.item.Category,
@@ -808,28 +825,31 @@ func javScrapeTargetsForItems(root string, items []JavWallScrapeItem, tokens, br
 	return out
 }
 
-// javScrapeTargetsInDir 把一个目录里直接躺着的 `.strm` 变成待补目标。
+// javScrapeTargetsInDir 把一个目录里直接躺着的**作品载体**变成待补目标。
+//
+// 载体有两种（`strm.IsMediaFileName`）：本应用生成的 `.strm`，以及纯视频库里的
+// 真实视频文件（mp4 / mkv …）。同一主干两种都有时只算一个、优先 `.strm`
+// （判据在 `strm.PickMediaNames`）。
 func javScrapeTargetsInDir(absDir string, files map[string]os.DirEntry, category string, tokens, brands []string) []javScrapeTarget {
-	strmNames := make([]string, 0, 4)
+	all := make([]string, 0, 4)
 	for name := range files {
-		if strings.EqualFold(filepath.Ext(name), ".strm") {
-			strmNames = append(strmNames, name)
-		}
+		all = append(all, name)
 	}
-	if len(strmNames) == 0 {
+	mediaNames := strm.PickMediaNames(all)
+	if len(mediaNames) == 0 {
 		return nil
 	}
-	sort.Strings(strmNames)
-	// flat 的判据与生成器**逐字相同**（该目录 .strm 数 > 1），这样算出来的
+	// flat 的判据与生成器**逐字相同**（该目录的载体数 > 1），这样算出来的
 	// nfo/json 文件名与生成器认的永远同源。
-	flat := len(strmNames) > 1
-	out := make([]javScrapeTarget, 0, len(strmNames))
-	for _, strmName := range strmNames {
-		stem := strm.MediaStem(strmName)
+	flat := len(mediaNames) > 1
+	out := make([]javScrapeTarget, 0, len(mediaNames))
+	for _, mediaName := range mediaNames {
+		stem := strm.MediaStem(mediaName)
 		names := emby.TargetNames(stem, flat)
 		out = append(out, javScrapeTarget{
 			absDir:   absDir,
 			stem:     stem,
+			fileName: mediaName,
 			flat:     flat,
 			names:    names,
 			number:   javScrapeNumber(absDir, files, names, stem, tokens, brands),

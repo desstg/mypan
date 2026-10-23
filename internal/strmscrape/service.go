@@ -107,6 +107,11 @@ type Service struct {
 	javActorProfileMu sync.Mutex
 	javActorProfile   map[string]javActorProfileEntry
 
+	// wallSchedule 是详情抽屉「集数进度」要的 TMDB 排期（键 = TMDB id）。
+	// 只存内存、6h 过期 —— 见 wall_episodes.go。
+	wallScheduleMu sync.Mutex
+	wallSchedule   map[string]wallScheduleEntry
+
 	// thumbs 是按需缩放的图片磁盘缓存（见 internal/thumbcache）。
 	// 海报墙上那些图只有一百多像素宽，原图直接发是五六倍的浪费。
 	thumbs *thumbcache.Cache

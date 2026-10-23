@@ -205,11 +205,11 @@ func generateJavDir(
 	}
 
 	sidecars := parseLocalSidecars(absDir, relDir, entries, req.Failures, log)
-	pairs := pairSidecar(strmNames, sidecars, countStrm(entries) == 1)
-	// 平铺判据：该目录**除本次待处理的之外**还有别的 .strm。
+	pairs := pairSidecar(strmNames, sidecars, countMedia(entries) == 1)
+	// 平铺判据：该目录**除本次待处理的之外**还有别的作品载体。
 	// 用本地目录而不是「本轮 selected 的条数」：本地可能留着上一轮遗留的过期 .strm，
 	// 那正是最需要按平铺规则避让的时候。
-	flat := countStrm(entries) > 1
+	flat := countMedia(entries) > 1
 
 	for _, strmName := range strmNames {
 		sc, ok := pairs[strmName]
@@ -899,15 +899,15 @@ func mediaStemKey(name string) string {
 	return strings.ToLower(strings.TrimSpace(MediaStem(filepath.Base(name))))
 }
 
-// countStrm 数目录里有几个 `.strm`（平铺判据）。
-func countStrm(entries []os.DirEntry) int {
-	n := 0
-	for _, e := range entries {
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".strm") {
-			n++
-		}
-	}
-	return n
+// countMedia 数目录里有几个**作品载体**（`.strm` 或真实视频文件）——平铺判据。
+//
+// ⚠️ 以前这里只数 `.strm`。纯视频库（海报墙挂上来的本地目录，用户拿别的工具整理的
+// mp4 / mkv 库）一个 `.strm` 都没有，于是恒为 0：那个目录会被判成「独占」，
+// 四个产物名（`poster.jpg` vs `<主干>-poster.jpg`）全按错的规则写/找。
+//
+// 同一主干的 `.strm`+`.mp4` 只算一个（见 PickMediaNames）：那是同一部片。
+func countMedia(entries []os.DirEntry) int {
+	return len(PickMediaNamesOfEntries(entries))
 }
 
 // relPath 拼一条给人看的相对路径（日志与失败清单里统一用 `/`）。
@@ -954,21 +954,23 @@ func taskMetaExtensions(task *domain.StrmTask, globalExts map[string]struct{}) m
 //
 // # 两类判据
 //
-//   - **精确文件名**：nfo 与图片三件套。名单 = 每个本地 `.strm` 主干算出的四个名字
+//   - **精确文件名**：nfo 与图片三件套。名单 = 每个本地**作品载体**主干算出的四个名字
 //   - **无条件并入裸名** `poster.jpg` / `thumb.jpg` / `fanart.jpg`。并入裸名是为了
 //     「平铺/独占翻转」：目录里多一个 `.strm` 会让命名规则从独占翻到平铺，上一轮按
 //     独占写的裸名会因此掉出名单、被 cloud_primary 删掉。并入之后翻转无痛。
 //   - **主干前缀 + 字幕扩展名**：字幕名里的语言段（`zh-CN` / `eng` / 空）无法枚举，
 //     精确匹配做不到。见 javArtifactGuard 的注释。
 //
-// 目录里没有 `.strm` 时返回零值（没有片子，孤儿文件本来就该被清理）。
+// 「作品载体」是 `.strm` **或真实视频文件**（见 IsMediaFileName）：纯视频库里
+// 一个 `.strm` 都没有，只按 `.strm` 收的话这里返回零值，于是本程序写进那种目录的
+// nfo / 图 / 字幕**一个都不受守卫保护** —— 每轮 cloud_primary 都会把它们删掉。
+//
+// 目录里一个载体都没有时返回零值（没有片子，孤儿文件本来就该被清理）。
 func javArtifactNames(entries []os.DirEntry) javArtifactGuard {
-	stems := make([]string, 0, 4)
-	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".strm") {
-			continue
-		}
-		stems = append(stems, mediaStemKey(e.Name()))
+	mediaNames := PickMediaNamesOfEntries(entries)
+	stems := make([]string, 0, len(mediaNames))
+	for _, name := range mediaNames {
+		stems = append(stems, mediaStemKey(name))
 	}
 	if len(stems) == 0 {
 		return javArtifactGuard{}
@@ -1124,7 +1126,7 @@ func FindLocalSidecar(absDir, strmName string) (string, *emby.SidecarDoc, bool) 
 		return "", nil, false
 	}
 	sidecars := parseLocalSidecars(absDir, "", entries, nil, slog.New(slog.DiscardHandler))
-	pairs := pairSidecar([]string{strmName}, sidecars, countStrm(entries) == 1)
+	pairs := pairSidecar([]string{strmName}, sidecars, countMedia(entries) == 1)
 	sc, ok := pairs[strmName]
 	if !ok {
 		return "", nil, false
@@ -1382,7 +1384,15 @@ func SyncLocalSidecarSummary(root, relDir, stem, summary string) (bool, error) {
 	// 侧车名**不是**「主干 + .json」（统一是 `NIMA-086-U.json` 这种带质量标记的形态），
 	// 所以用生成器那套配对判据找它，而不是拼名字 —— 两处判据分家就会出现
 	// 「生成时认得、补简介时找不到」。
-	path, _, ok := FindLocalSidecar(absDir, stem+".strm")
+	//
+	// 喂给配对判据的**必须是磁盘上真实存在的载体文件名**：纯视频库里作品载体是
+	// `NIMA-086-U.mp4` 而不是 `.strm`，硬拼 `stem+".strm"` 会让配对判据拿一个不存在的
+	// 名字去比，结果是静默返回「本地没有 json」。所以先在这一层按主干找载体。
+	mediaName := mediaNameForStem(absDir, stem)
+	if mediaName == "" {
+		return false, nil // 这一层没有这个主干的载体：与「没有侧车」同样是「还没有」
+	}
+	path, _, ok := FindLocalSidecar(absDir, mediaName)
 	if !ok {
 		return false, nil // 本地没有那份 json：不是错误，等它同步下来再说
 	}
