@@ -65,6 +65,14 @@ const props = defineProps<{
    * 只用 `elevated` 时两个抽屉同档，谁在上面看 DOM 顺序 —— 电影详情写在后面就把它盖住。
    */
   raised?: boolean;
+  /**
+   * 暂时收起（**不卸载内容**），给「从参演影片里开播放窗」那一路用。
+   *
+   * 播放窗 `.file-preview` 的 z-index 是 10000，本抽屉是 elevated（10040）——
+   * 直接播会被它整个盖住。关掉 `open` 也能收起来，但那样会**清空**已取的影片与
+   * 资料、重开时整页重拉一遍并跳回顶部；所以这里单独给一个只影响显示的开关。
+   */
+  suspended?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -355,7 +363,7 @@ function searchAlias(name: string) {
   <AdminSettingsDrawer
     elevated
     :raised="raised"
-    :open="open"
+    :open="open && !suspended"
     :title="header?.name || '演员'"
     hide-foot
     @close="emit('close')"

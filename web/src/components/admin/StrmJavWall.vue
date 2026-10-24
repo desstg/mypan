@@ -20,7 +20,7 @@ import type { DropdownMenuItem } from "@/types/menu";
 import StrmJavMetaDrawer from "@/components/admin/StrmJavMetaDrawer.vue";
 import StrmJavWallDeleteModal from "@/components/admin/StrmJavWallDeleteModal.vue";
 import JavWallActorDetailDrawer from "@/components/admin/JavWallActorDetailDrawer.vue";
-import type { JavWallActorCard } from "@/api/strmJavWall";
+import type { JavWallActorCard, JavWallActorMovie } from "@/api/strmJavWall";
 import type { WallActor } from "@/api/strmScrape";
 import { confirm } from "@/composables/useConfirm";
 import { findScrollBox, useFillViewport } from "@/composables/useFillViewport";
@@ -1325,18 +1325,98 @@ function openActorFromMovie(actor: WallActor) {
     movies_count: 0,
   };
   actorDetailOpen.value = true;
+  // 是**从影片详情点进来**的：影片详情留在底下，演员详情按 `raised` 压在上面
+  // （这是这一面的原始版式）。上一次「被影片详情收起」的标记必须清掉，
+  // 否则重开一个已取过数据的演员详情时会是一片空白 —— 看起来像点了没反应。
+  actorSuspendedByMovie.value = false;
 }
+
+/**
+ * 播放期间演员详情是不是被我们收起来了（关掉播放窗要放回来）。
+ *
+ * 同一条路在**这一面**也走得通：影片详情 → 点演员 → 演员详情 → 点其中的一部片
+ * → 影片详情 → 播放。播放时 `useWallDetail.play()` 只收起**影片详情**自己那层
+ * （见那边的 suspendedByPlayer），演员详情仍是 elevated（10040），照样压在全屏
+ * 播放窗（10000）上面 —— 看起来就是「播放页被详情页挡住了」。
+ *
+ * ⚠️ 别去抬播放窗的 z-index：`.file-preview` 的 10000 是全局外壳刻意的档位
+ * （低于 --z-dropdown，好让下拉菜单浮在预览之上），抬它会波及所有预览场景。
+ *
+ * 只切「收不收起」、**不动 `actorDetailOpen`**：关掉 `open` 会把已取的片单与资料
+ * 整份清掉（见抽屉里 `suspended` 那条），关掉播放窗后用户会看到一整页重新加载。
+ */
+const actorSuspendedByPlayer = ref(false);
+
+/**
+ * 演员详情被**从它里面点开的那部影片详情**收起（关掉影片详情再放回来）。
+ *
+ * 和上面那个一个道理，只是压住它的是**影片详情**而不是播放窗：本组件里影片详情的
+ * 抽屉写在演员详情**之前**、档位也低一档（elevated 10040 < raised 10041），
+ * 所以从演员详情点一部参演影片时，影片详情会被整个盖住 —— 用户看到的就是
+ * 「点了参演影片，什么都不发生」（用户 2026-10-24 报的这个）。
+ *
+ * 做法仍是「收起被压住的那一层」，而不是去抬影片详情的档位：影片详情在
+ * `JavActorWall` 里还要反过来压住演员详情，两边都抬就变成谁后写谁赢。
+ */
+const actorSuspendedByMovie = ref(false);
+
+/** 从演员详情点一部参演影片：收起演员详情（保留已取的数据），开影片详情。 */
+function openMovieFromActor(source: WallSourceRef, movie: JavWallActorMovie) {
+  if (actorDetailOpen.value) actorSuspendedByMovie.value = true;
+  wall.openJav(source, movie);
+}
+
+/**
+ * 关掉影片详情：顺手把「被它收起的演员详情」放回来。
+ *
+ * ⚠️ 不能写成 `watch(() => wall.open)`：播放时 `useWallDetail.play()` 也会把
+ * `open` 置 false（那是它收起自己那层的机制），那一刻若把标记清了，演员详情会
+ * 弹到**播放窗上面** —— 又变回用户报的那个「播放页被详情页挡住」。所以只在
+ * **用户真的关掉影片详情**这条路上清，也就是这里（返回键 / 点遮罩）和 Esc。
+ */
+function closeMovie() {
+  wall.close();
+  actorSuspendedByMovie.value = false;
+}
+
+/**
+ * 演员详情这一刻该不该收起来。
+ *
+ * 两种收起的原因各自独立：播放窗开着（`actorSuspendedByPlayer`），或者从它里面
+ * 点开的那部影片详情正开着（`actorSuspendedByMovie`）。任一成立就不显示 ——
+ * 否则播放时「影片详情被收起」这一拍会顺手把演员详情弹到播放窗上面。
+ */
+const actorSuspended = computed(
+  () => actorSuspendedByPlayer.value || actorSuspendedByMovie.value,
+);
+
+watch(
+  () => wall.playerOpen.value,
+  (playing) => {
+    if (playing) {
+      if (!actorDetailOpen.value) return;
+      actorSuspendedByPlayer.value = true;
+      return;
+    }
+    actorSuspendedByPlayer.value = false;
+  },
+);
 
 // Esc：影片详情抽屉自己不挂键盘处理（`useWallDetail` 也不挂），而演员详情是
 // 从它里面开出来的一层。这一面没有别的浮层栈可挂，所以在这里收口：
-// 播放窗 → 演员详情 → 影片详情，一层一层关。
+// 播放窗 → 影片详情 → 演员详情 → 海报墙，一层一层关。
 //
-// 顺序与**叠放**一致：演员详情在模板里传了 `raised`（压过影片详情那一档），
-// 所以它在上，先关它 —— 关掉就回到影片详情，再按一次才回到海报墙。
+// 判据用**收起的标记**而不是「演员详情开没开」：从演员详情点一部参演影片之后，
+// 演员详情只是被收起来（`actorDetailOpen` 仍是 true），它若排在影片详情前面判，
+// 第一下 Esc 会关掉一个看不见的东西，用户以为按键没反应。
 function onActorLayerKey(e: KeyboardEvent) {
   if (e.key !== "Escape") return;
   if (wall.playerOpen.value) {
     wall.closePlayer();
+    return;
+  }
+  if (wall.open.value && actorSuspendedByMovie.value) {
+    closeMovie();
     return;
   }
   if (actorDetailOpen.value) {
@@ -1581,19 +1661,23 @@ defineExpose({
       :loading="wall.loading.value"
       :detail="wall.detail.value"
       :error="wall.error.value"
-      @close="wall.close"
+      @close="closeMovie"
       @play="wall.play"
       @open-actor="openActorFromMovie"
     />
     <!-- 演员详情：从上面那个影片详情里点演员进来（用户 2026-10-21 的要求）。
          `raised` 让它压过影片详情 —— 两个都是 elevated 同档，只靠 DOM 顺序不稳。
-         `:searchable="false"`：这一面底下没有演员墙，别名点了没法去搜。 -->
+         `:searchable="false"`：这一面底下没有演员墙，别名点了没法去搜。
+
+         `suspended`：从它里面点一部参演影片（或播放）时暂时收起它 —— 它比影片详情
+         高一档，不收起来就会把影片详情 / 播放窗整个盖住（用户 2026-10-24 报的）。 -->
     <JavWallActorDetailDrawer
       :open="actorDetailOpen"
+      :suspended="actorSuspended"
       :actor="actorDetailCard"
       raised
       @close="actorDetailOpen = false"
-      @open-movie="(source, movie) => wall.openJav(source, movie)"
+      @open-movie="openMovieFromActor"
     />
     <WallPlayer
       v-if="wall.playerOpen.value"

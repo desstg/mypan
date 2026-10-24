@@ -227,6 +227,34 @@ const hasMore = computed(() => items.value.length < total.value);
 /** 影片详情抽屉（点演员详情里的一部片 → 那一面墙自己的详情抽屉）。 */
 const wall = useWallDetail();
 
+/**
+ * 播放期间演员详情是不是被我们收起来了（关掉播放窗要放回来）。
+ *
+ * 这一页的路径是「演员墙 → 演员详情 → 点一部片 → 影片详情 → 播放」：播放时
+ * `useWallDetail.play()` 只收起**影片详情**自己那层（见那边的 suspendedByPlayer），
+ * 而演员详情同样是 elevated（10040），照样压在全屏播放窗（10000）上面 ——
+ * 用户看到的就是「播放页被详情页挡住了」（用户 2026-10-24 报的）。
+ *
+ * ⚠️ 别去抬播放窗的 z-index：`.file-preview` 的 10000 是全局外壳刻意的档位
+ * （低于 --z-dropdown，好让下拉菜单浮在预览之上），抬它会波及所有预览场景。
+ *
+ * 只切「收不收起」、**不动 `detailOpen`**：关掉 `open` 会把已取的影片与资料整份
+ * 清掉（见抽屉里 `suspended` 那条），关掉播放窗后用户会看到一整页重新加载。
+ */
+const actorSuspendedByPlayer = ref(false);
+
+watch(
+  () => wall.playerOpen.value,
+  (playing) => {
+    if (playing) {
+      if (!detailOpen.value) return;
+      actorSuspendedByPlayer.value = true;
+      return;
+    }
+    actorSuspendedByPlayer.value = false;
+  },
+);
+
 // —————————————————— 浮层的开关：Esc / 锁滚动 ——————————————————
 const myToken = Symbol("jav-wall-actors");
 let keyHandler: ((e: KeyboardEvent) => void) | null = null;
@@ -351,6 +379,8 @@ watch(
       avatarFillTried.clear();
       error.value = "";
       detailOpen.value = false;
+      // 上一轮「播放时收起演员详情」的标记不带到这一次（整页浮层是新的）。
+      actorSuspendedByPlayer.value = false;
       wall.close();
       openLayer();
       void reload();
@@ -663,6 +693,7 @@ onBeforeUnmount(() => {
 
       <JavWallActorDetailDrawer
         :open="detailOpen"
+        :suspended="actorSuspendedByPlayer"
         :actor="detailActor"
         :raised="!wall.open.value"
         searchable
