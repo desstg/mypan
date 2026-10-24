@@ -182,8 +182,11 @@ function typeLabelOf(sub: TGSubscription) {
 /** 剧集用「已收集 / 已播出」，电影没有集数概念就不占位置。 */
 function progressOf(sub: TGSubscription) {
   if (sub.media_type !== "tv") return "";
-  if (!sub.aired_episodes && !sub.collected_episodes) return "";
-  return `${sub.collected_episodes} / ${sub.aired_episodes || "?"} 集`;
+  const collected = sub.collected_episodes || 0;
+  if (!sub.aired_episodes && !collected) return "";
+  // 分母取 max：盘上有、季快照还没跟上的集号会让「38 / 32 集」这种数看着像坏了。
+  // 详情弹窗与海报墙也是同一条口径。
+  return `${collected} / ${Math.max(sub.aired_episodes || 0, collected)} 集`;
 }
 
 function statusToneOf(sub: TGSubscription) {

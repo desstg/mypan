@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"litepan/internal/domain"
+	"litepan/internal/driver"
 	"litepan/internal/eventbus"
 	"litepan/internal/offlinedownload"
 )
@@ -87,7 +88,8 @@ func (s *Service) onOfflineDownloadCompleted(ctx context.Context, event eventbus
 		FileID:     event.FileID,
 		TargetPath: event.TargetDisplayPath,
 	})
-	// 离线通道的事件只带**父目录**，所以要自己定位到「片名 (年份)」那一层再扫。
+	// 事件带的是**投递目标**：建目录成功时它就是「片名 (年份)」那个专属子目录本身，
+	// 退回父目录时才是真·父目录。两种都要能定位（见 locateDeliverFolder）。
 	s.reconcilePackEpisodes(ctx, sub, rec, event.AccountID, event.TargetParentID, "")
 }
 
@@ -142,7 +144,7 @@ func (s *Service) reconcilePackEpisodes(
 		if parentID == "" {
 			return
 		}
-		folderID = s.findChildFolder(ctx, accountID, parentID,
+		folderID = s.locateDeliverFolder(ctx, accountID, parentID,
 			buildFolderName(buildDeliverFileName(sub, rec)))
 		if folderID == "" {
 			// 定位不到专属子目录（建目录失败退过父目录、或用户搬走了）→ 不扫。
@@ -159,10 +161,35 @@ func (s *Service) reconcilePackEpisodes(
 			"sub", sub.ID, "record", rec.ID, "err", err)
 		return
 	}
-	if len(entries) == 0 {
+	added := s.recordDeliveredEpisodes(ctx, sub, accountID,
+		strings.TrimSpace(rec.TargetParentID), rec.ID, entries)
+	if added == 0 {
 		return
 	}
+	s.log.Info("tg subscribe pack episodes reconciled",
+		"sub", sub.ID, "record", rec.ID, "scanned", len(entries), "added", added)
+	// 进度变了 → 完成判定要重跑（收齐了就该收尾）。
+	s.maybeComplete(ctx, sub)
+}
 
+// recordDeliveredEpisodes 把清单里**认得出集号**、且订阅里还没有的那些集记进 episodes 表。
+//
+// 与 reconcilePackEpisodes 拆开是为了让「补历史」那条路（pack_backfill.go）共用同一套
+// 判据 —— 两处各写一份的话，将来改一处漏一处，表现是某条路永远少记几集。
+//
+// 不按季快照过滤：盘上有什么就记什么。这与既有语义一致（盘上多出来的集号本来就是
+// 「TMDB 还没更新」的常见形态），过滤反而会把已经入库的那几集藏起来。
+func (s *Service) recordDeliveredEpisodes(
+	ctx context.Context,
+	sub *domain.TGSubscription,
+	accountID int64,
+	targetPath string,
+	recordID int64,
+	entries []driver.FullListEntry,
+) int {
+	if s == nil || sub == nil || s.episodes == nil || len(entries) == 0 {
+		return 0
+	}
 	added := 0
 	for _, entry := range entries {
 		season, episode, ok := parseEpisodeFromFileName(entry.Name)
@@ -177,10 +204,10 @@ func (s *Service) reconcilePackEpisodes(
 			SubscriptionID: sub.ID,
 			Season:         season,
 			Episode:        episode,
-			RecordID:       rec.ID,
+			RecordID:       recordID,
 			AccountID:      accountID,
 			FileID:         entry.FileID,
-			TargetPath:     strings.TrimSpace(rec.TargetParentID),
+			TargetPath:     strings.TrimSpace(targetPath),
 		}); err != nil {
 			s.log.Warn("tg subscribe pack episode upsert failed",
 				"sub", sub.ID, "season", season, "episode", episode, "err", err)
@@ -188,13 +215,7 @@ func (s *Service) reconcilePackEpisodes(
 		}
 		added++
 	}
-	if added == 0 {
-		return
-	}
-	s.log.Info("tg subscribe pack episodes reconciled",
-		"sub", sub.ID, "record", rec.ID, "scanned", len(entries), "added", added)
-	// 进度变了 → 完成判定要重跑（收齐了就该收尾）。
-	s.maybeComplete(ctx, sub)
+	return added
 }
 
 // deliveredInfo 是一次成功投递落地后的信息，用于回写订阅进度。

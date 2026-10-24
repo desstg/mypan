@@ -220,7 +220,16 @@ func (s *Service) pushRecord(ctx context.Context, sub *domain.TGSubscription, re
 			TargetPath: displayPath,
 		})
 		// 分享转存那条路手上就有专属子目录 ID，直接用它扫（不用再按名字找一遍）。
-		s.reconcilePackEpisodes(ctx, sub, rec, accountID, "", result.DeliveredFolderID)
+		//
+		// ⚠️ 退回父目录时 `DeliveredFolderID` 是空的（见 targetFolder.LocatedID）。
+		// 早先原样传下去，于是 `folderID == ""` 走进「按名字找子目录」那条分支，
+		// 而这次恰恰没有专属子目录 —— 整季包的进度就这么静默丢了。这里把父目录
+		// 交出去，走同一条定位逻辑（名字全等的才认，认不到就不扫）。
+		if result.DeliveredFolderID != "" {
+			s.reconcilePackEpisodes(ctx, sub, rec, accountID, "", result.DeliveredFolderID)
+		} else {
+			s.reconcilePackEpisodes(ctx, sub, rec, accountID, parentID, "")
+		}
 	}
 	return nil
 }
@@ -595,6 +604,36 @@ func (s *Service) findChildFolder(ctx context.Context, accountID int64, parentID
 		}
 	}
 	return ""
+}
+
+// locateDeliverFolder 定位「这部片的专属子目录」，ID 可能就在手上、也可能要在上一层找。
+//
+// # 为什么两种都要试
+//
+// 投递事件带出来的是 `TargetParentID`，它的语义是**投递目标**（见 targetFolder.TargetID）：
+//   - 建目录成功 / 撞名复用 → 它就是「片名 (年份)」那个**专属子目录本身**；
+//   - 建目录失败退回父目录 → 它才是真正的父目录，专属目录得在它下面找。
+//
+// 早先这里只做后一半（`findChildFolder`），于是最常见的那种情况（成功建了专属目录）
+// 会去「片名 (年份)/」里再找一个「片名 (年份)/」—— 必然找不到，整季包永远不补记。
+// 真机表现：订阅详情页 0/32 集，而海报墙（读盘）是 32/32「完结」。
+//
+// ⚠️ 先问 Info 是**为了防误判**，不是为了省事：拿父目录当专属目录去扫，扫到的就是
+// 用户的库根（几十部片，文件名都带 SxxEyy），别的剧的集会被记到这条订阅上。所以
+// 只有 Info 明确回答「这个 ID 是个目录，且名字全等」时才认它。
+func (s *Service) locateDeliverFolder(ctx context.Context, accountID int64, targetID, name string) string {
+	if s == nil || s.folders == nil {
+		return ""
+	}
+	targetID = strings.TrimSpace(targetID)
+	want := strings.TrimSpace(name)
+	if targetID == "" || want == "" {
+		return ""
+	}
+	if s.folderMatchesName(ctx, accountID, targetID, want) {
+		return targetID
+	}
+	return s.findChildFolder(ctx, accountID, targetID, want)
 }
 
 // discardCreatedFolder 删掉一个「刚建出来、里面确定什么都没有」的专属子目录，

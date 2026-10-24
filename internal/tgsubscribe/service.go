@@ -281,6 +281,9 @@ func (s *Service) Start(ctx context.Context) {
 	// 季集/别名快照刷新。独立 goroutine：它打的是 TMDB，与 t.me 抓取、
 	// 外部搜索站都不是同一套限速语义，靠 inner 的 cancel 退出。
 	go s.seasonsRefreshLoop(inner)
+	// 历史整季包的进度补记。见 pack_backfill.go —— 它补的是「盘上有、账上没有」
+	// 那一类陈年缺口（离线通道定位子目录的老 bug 让它一次都没跑成过）。
+	go s.packBackfillLoop(inner)
 }
 
 // Stop 停掉两个 loop。调用方必须保证它在 eventbus.Close 之前执行 ——

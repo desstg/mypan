@@ -111,17 +111,39 @@ const targetText = computed(() => {
   return `${account?.name ?? `账号 ${form.target_account_id}`} · ${form.target_display_path || "/"}`;
 });
 
+// 已入库集数：优先用明细表的行数（`loadEpisodes` 拉的），拿不到才退回视图里的计数。
+//
+// 两条入口给的字段不一样：已订阅页那条订阅是**带计数**查出来的，而海报墙这条走
+// `GetSubscriptionByTMDB`（轻量查询，不带计数），`collected_episodes` 恒为 0。
+// 只认后者的话，从海报墙点进来的剧集明明有 32 集，顶上却写着「已收集 0 / 32 集」。
+const collectedCount = computed(() => {
+  const sub = subscription.value;
+  if (!sub) return 0;
+  return Math.max(sub.collected_episodes || 0, episodes.value.length);
+});
+
+// 分母取 `max(已播出, 已收集)`：盘上集号超过季快照时（快照滞后，常见形态）
+// 照原样写会变成「已收集 38 / 32 集」这种看着像坏了的数。海报墙那边也是取
+// max，两边口径一致。
+const progressTotal = computed(() => {
+  const sub = subscription.value;
+  if (!sub || sub.media_type !== "tv") return 0;
+  return Math.max(sub.aired_episodes || 0, collectedCount.value);
+});
+
 const progressText = computed(() => {
   const sub = subscription.value;
   if (!sub || sub.media_type !== "tv") return "";
-  if (!sub.aired_episodes && !sub.collected_episodes) return "";
-  return `已收集 ${sub.collected_episodes} / ${sub.aired_episodes || "?"} 集`;
+  if (!sub.aired_episodes && !collectedCount.value) return "";
+  return `已收集 ${collectedCount.value} / ${progressTotal.value} 集`;
 });
 
 const progressPercent = computed(() => {
   const sub = subscription.value;
-  if (!sub || !sub.aired_episodes) return 0;
-  return Math.min(100, Math.round((sub.collected_episodes / sub.aired_episodes) * 100));
+  if (!sub) return 0;
+  const total = progressTotal.value;
+  if (!total) return 0;
+  return Math.min(100, Math.round((collectedCount.value / total) * 100));
 });
 
 const statusTone = computed(() => {
@@ -155,6 +177,11 @@ const statusLabel = computed(() => {
  *
  * 「缺哪一集」是追更时最常问的问题，所以这里要把没收集到的也画出来 ——
  * 只显示已有集数的话，用户还得自己数。
+ *
+ * 格子数取 `max(季快照集数, 已收集的最大集号)`，与海报墙那条接口同口径
+ * （见后端 buildSeasonProgress 的同一条判断）。原因：`seasons_json` 是**快照**，
+ * 更新滞后于盘上；只按快照铺格子的话，已经入库的 E11/E18/E20 会**没有格子**，
+ * 用户看到「5 / 10 集」却找不到另外三集在哪 —— 与海报墙（读盘）也对不上。
  */
 const episodeGrid = computed(() => {
   const sub = subscription.value;
@@ -171,12 +198,20 @@ const episodeGrid = computed(() => {
         !season.air_date || new Date(season.air_date).getTime() <= now
           ? season.episode_count
           : 0;
-      const items = Array.from({ length: season.episode_count }, (_, i) => {
+      let count = season.episode_count;
+      for (const key of collected) {
+        const [s, e] = key.split(":").map(Number);
+        if (s === season.season_number && e > count) count = e;
+      }
+      // 与后端一致地设个上限：脏数据里集号写成 999 会把格子撑爆。
+      if (count > 500) count = 500;
+      const items = Array.from({ length: count }, (_, i) => {
         const episode = i + 1;
         return {
           episode,
           collected: collected.has(`${season.season_number}:${episode}`),
-          aired: episode <= aired,
+          // 快照之外、但在库里的那些集一定已经播了。
+          aired: episode <= aired || episode > season.episode_count,
         };
       });
       const owned = items.filter((it) => it.collected).length;

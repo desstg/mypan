@@ -5,8 +5,10 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -196,8 +198,7 @@ const seasonsRefreshBatch = 8
 // 顺带一起刷别名：它同样是快照，而别名参与匹配打分（TMDB 会陆续补各地区译名，
 // 新译名往往正是频道里在用的那个）。
 //
-// 只改「变多了」的方向：季集数只增不减（除非 TMDB 修正错误数据），
-// 而无条件覆盖会把一次 TMDB 抖动（返回空数组）变成「订阅的季集被清空」。
+// 只拒绝「解不出来的输入」，不再只认「变多了」：见 seasonsSnapshotChanged 的说明。
 func (s *Service) seasonsRefreshLoop(ctx context.Context) {
 	if !startupwait.Ready(ctx, s.startupGate) {
 		return
@@ -252,12 +253,12 @@ func (s *Service) seasonsRefreshLoop(ctx context.Context) {
 	}
 }
 
-// refreshSubscriptionSeasons 刷一条订阅的季集与别名，只往「变多」的方向改。
+// refreshSubscriptionSeasons 刷一条订阅的季集与别名。
 func (s *Service) refreshSubscriptionSeasons(ctx context.Context, sub *domain.TGSubscription) {
 	meta := s.FetchSubscriptionMeta(ctx, sub.TMDBID, sub.MediaType)
 	changed := false
 
-	if grew := seasonsGrew(sub.Seasons, meta.Seasons); grew {
+	if seasonsSnapshotChanged(sub.Seasons, meta.Seasons) {
 		sub.Seasons = meta.Seasons
 		sub.SeasonsSyncedAt = time.Now()
 		changed = true
@@ -279,26 +280,76 @@ func (s *Service) refreshSubscriptionSeasons(ctx context.Context, sub *domain.TG
 	s.log.Info("tg subscribe seasons refreshed", "sub", sub.ID, "title", sub.Title)
 }
 
-// seasonsGrew 报告新快照的「已播出集数」是不是比旧的多。
+// seasonsSnapshotChanged 报告新快照是否该替换旧的。
 //
-// 用已播出集数而不是数组长度比：季的增减不常见，而集数增长才是要追的东西。
-// 比不出来（任一侧解不出）时返回 false —— 宁可不刷，也不要拿一份解不出的
-// 数据去覆盖好的那份。
-func seasonsGrew(oldRaw, newRaw json.RawMessage) bool {
+// 这里原来是「只增不减」（seasonsGrew）：只有已播出集数**变多**才写库。
+// 它挡住了 TMDB 抖动（回空数组）把订阅季集清空，但把「TMDB 修正了集数」也一起
+// 挡在外面 —— 实测有订阅快照停在 8 集、盘上已经 9 集，详情页第 9 集连格子都没有。
+//
+// 现在的判据：**新快照解得出、且与旧的内容不同**就刷，但多一条防抖动的闸——
+// 新快照必须仍然包含旧的**每一个正式季号**。整季消失是「上游返回了残缺数据」的
+// 典型形态（老快照 1~3 季、新快照只剩第 1 季），这种照旧拒绝；同一批季号内集数
+// 增减、首播日修正都算真变化。
+//   - 解不出（空数组 / 格式坏了 / 一条已播出的都没有）照旧拒绝：那是抖动，不是新数据；
+//   - 内容比较走 seasonsSignature（季号 + 集数 + 首播日），顺序与季名都不参与 ——
+//     TMDB 的季名随语言设置变，把它算进差异会让每次刷新都白写一次库。
+func seasonsSnapshotChanged(oldRaw, newRaw json.RawMessage) bool {
 	if len(newRaw) == 0 {
 		return false
 	}
-	now := time.Now()
-	oldTotal, okOld := airedEpisodeTotal(oldRaw, now)
-	newTotal, okNew := airedEpisodeTotal(newRaw, now)
-	if !okNew {
+	if _, ok := airedEpisodeTotal(newRaw, time.Now()); !ok {
+		// 解不出，或所有季都还没播出 / 集数为 0 —— 两种都不该拿去覆盖旧快照。
 		return false
 	}
-	if !okOld {
-		// 老快照解不出来（空数组 / 格式变了）→ 拿新的顶上。
+	oldSeasons, okOld := decodeSeasons(oldRaw)
+	if !okOld || len(oldSeasons) == 0 {
+		// 老快照本来就解不出来（空数组 / 格式变了）→ 拿新的顶上。
 		return true
 	}
-	return newTotal > oldTotal
+	if !seasonNumbersCover(oldSeasons, newRaw) {
+		// 新快照少了整季 —— 这是残缺响应，不是修正。
+		return false
+	}
+	return seasonsSignature(oldRaw) != seasonsSignature(newRaw)
+}
+
+// seasonNumbersCover 报告新快照是否仍带着旧的每一个正式季号（第 0 季特别篇不算）。
+//
+// 只比季号、不比集数：整季消失只在「上游给了半截数据」时出现，
+// 而真实世界里 TMDB 删掉一整季极罕见 —— 宁可少刷一次，也不要把订阅的季集抹掉。
+func seasonNumbersCover(oldSeasons []SeasonInfo, newRaw json.RawMessage) bool {
+	newSeasons, ok := decodeSeasons(newRaw)
+	if !ok {
+		return false
+	}
+	have := make(map[int]struct{}, len(newSeasons))
+	for _, season := range newSeasons {
+		have[season.SeasonNumber] = struct{}{}
+	}
+	for _, season := range oldSeasons {
+		if season.SeasonNumber <= 0 {
+			continue
+		}
+		if _, ok := have[season.SeasonNumber]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// seasonsSignature 把季集快照压成一个可比较的串，忽略顺序与季名。
+func seasonsSignature(raw json.RawMessage) string {
+	seasons, ok := decodeSeasons(raw)
+	if !ok {
+		return ""
+	}
+	parts := make([]string, 0, len(seasons))
+	for _, season := range seasons {
+		parts = append(parts, fmt.Sprintf("%d/%d/%s",
+			season.SeasonNumber, season.EpisodeCount, strings.TrimSpace(season.AirDate)))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "|")
 }
 
 // sameAliases 比较两份别名清单是否等价（顺序无关）。
