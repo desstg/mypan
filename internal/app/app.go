@@ -30,6 +30,7 @@ import (
 	"litepan/internal/settings"
 	"litepan/internal/store"
 	"litepan/internal/strm"
+	"litepan/internal/strmscrape"
 	"litepan/internal/tgsubscribe"
 	"litepan/internal/upload"
 )
@@ -55,6 +56,7 @@ type App struct {
 	offlineDownloads *offlinedownload.Service
 	playback         *playback.Service
 	strm             *strm.Service
+	strmScrape       *strmscrape.Service
 	mediaOrganize    *mediaorganize.Service
 	automation       *automation.Service
 	tgSubscribe      *tgsubscribe.Service
@@ -140,6 +142,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		offlineDownloads: svc.offlineDownloads,
 		playback:         svc.playback,
 		strm:             svc.strm,
+		strmScrape:       svc.strmScrape,
 		mediaOrganize:    svc.mediaOrganize,
 		automation:       svc.automation,
 		tgSubscribe:      svc.tgSubscribe,
@@ -176,6 +179,12 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.jav != nil {
 		a.jav.Start(ctx)
+	}
+	// 番号演员墙的索引在后台预建一次：第一次打开要读整面墙的侧车 / nfo，
+	// 冷启动时一分钟上下 —— 没有这一下，用户第一次点演员就会盯着「正在整理」。
+	// 它自己带延迟与预算，这里的 ctx 只是让关服务时能立刻收手（见 StartJavActorIndexWarmup）。
+	if a.strmScrape != nil {
+		a.strmScrape.StartJavActorIndexWarmup(ctx)
 	}
 	if a.fuse != nil {
 		a.fuse.Start(ctx)

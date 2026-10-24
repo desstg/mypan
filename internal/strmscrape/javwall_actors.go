@@ -113,6 +113,11 @@ type JavWallActorListResult struct {
 	// 空列表时前端靠它们说清「是没有墙」还是「墙上有片但没演员」。
 	Sources int `json:"sources"`
 	Movies  int `json:"movies"`
+	// Building 为真表示索引还在后台建（第一次打开 / 墙刚变过）。
+	//
+	// ⚠️ 这时 `Items` 是空的，**不代表墙上没有演员** —— 前端必须显示「正在整理」
+	// 并轮询，否则用户会看到「一位演员都没有」然后去重刮一遍（本项目最老的那类坑）。
+	Building bool `json:"building,omitempty"`
 	// MaleCount 是**被男演员过滤挡掉**的那几位（只数关键词命中的那批）。
 	//
 	// 演员墙默认不列男优（用户 2026-10-21 的要求）；空列表时前端靠它区分
@@ -144,7 +149,7 @@ type javActorIndex struct {
 //
 // 有 id 用 id：侧车里的 id 是上游给的，比名字稳（同名不同人、改名都能分开）。
 // 没有 id 时用名字（小写）：nfo 里只有名字，而同一部片的侧车那份往往有 id ——
-// 聚合时会再按名字把两边**并到 id 那把键**上（见 buildJavActorIndex）。
+// 聚合时会再按名字把两边**并到 id 那把键**上（见 buildJavActorIndexFrom）。
 func javActorKey(id, name string) string {
 	if id = strings.TrimSpace(id); id != "" {
 		return id
@@ -309,18 +314,23 @@ func javActorMovieOf(src *wallSrc, row javWallRow) JavWallActorMovie {
 	return out
 }
 
-// buildJavActorIndex 把所有番号墙的演员聚合成一份索引。
+// buildJavActorIndexFrom 是聚合的本体：数据源已经列好时走这条。
 //
-// 读盘那一半挂在快照上（见文件顶部那段），这里只做内存里的合并 ——
-// 所以每次搜索 / 翻页都调它也不会有额外 IO。
-func (s *Service) buildJavActorIndex(ctx context.Context) *javActorIndex {
+// ⚠️ **不要在请求路径上调它**：它会把每一面墙的侧车 / nfo 全读一遍（SMB 上实测
+// 一分钟以上，见 javwall_actor_index.go）。请求侧走 `javActorIndexSnapshot`，
+// 它给的是后台建好的那份缓存；真正调这个的是 `warmJavActorIndexNow`。
+//
+// 第二个返回值是**这次用到的每个数据源的内容签名**（数据源键 → 签名）—— 索引的
+// 失效判据就是它：墙上的卡变了（加片 / 删片 / 改名 / 换目录）这份索引就不算数了。
+// 见 javwall_actor_index.go。
+func (s *Service) buildJavActorIndexFrom(ctx context.Context, sources []*wallSrc) (*javActorIndex, map[string]string) {
 	type sourceRows struct {
 		src    *wallSrc
 		rows   []javWallRow
 		actors [][]javActorRef
 	}
-	sources := s.javWallActorSources(ctx)
 	all := make([]sourceRows, 0, len(sources))
+	used := make(map[string]string, len(sources))
 	for _, src := range sources {
 		if ctx.Err() != nil {
 			break
@@ -330,7 +340,21 @@ func (s *Service) buildJavActorIndex(ctx context.Context) *javActorIndex {
 			if err != nil && s.log != nil {
 				s.log.Debug("jav actor wall: scan source failed", "source", src.ScopeKey(), "err", err)
 			}
+			// 这一面没扫上：记一个**永远对不上**的签名。
+			//
+			// 不记它的话，这份索引少了整整一面墙却仍然算「新鲜」，要等 10 分钟
+			// 保鲜期到了才重试 —— 那 10 分钟里用户看到的是「那位演员的片少了一半」，
+			// 而没有任何一处提示。记上之后，下一次请求就会再试一遍（退避 30s，
+			// 且已扫上的那几面走内存快照，重试很便宜）。
+			used[src.ScopeKey()] = javActorSourceMissingSig
 			continue
+		}
+		used[src.ScopeKey()] = javWallSnapshotSig(src.ScopeKey(), src.Root, snap)
+		// 数据源全都没回来、或者中途被取消：这一轮不算数（返回 nil，缓存保持旧的那份）。
+		// 不这么收口的话，网盘整段不通会建出一份「0 位演员」的索引，前端就会说
+		// 「墙上一部片都没有」—— 那是本项目反复踩的「静默变空」。
+		if ctx.Err() != nil {
+			return nil, used
 		}
 		// 标题 / 番号 / 两个日期住在 nfo 里，卡片要用 —— 与列表同一个「一份快照只填一次」。
 		snap.fillMetaOnce.Do(func() {
@@ -457,7 +481,7 @@ func (s *Service) buildJavActorIndex(ctx context.Context) *javActorIndex {
 		}
 		return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 	})
-	return idx
+	return idx, used
 }
 
 // sortJavActorMovies 演员的影片排序：**入库时间新→旧**，与海报墙的默认排序同一口径；
@@ -494,7 +518,17 @@ func sortJavActorMovies(movies []JavWallActorMovie) {
 //
 // 别改成「把别名也塞进索引」：那要为每位演员打一次外站，一屏 60 位就是两分钟。
 func (s *Service) ListJavWallActors(ctx context.Context, keyword string, page, pageSize int, includeMale bool, anchorKey string) JavWallActorListResult {
-	idx := s.buildJavActorIndex(ctx)
+	idx, building := s.javActorIndexSnapshot(ctx)
+	if idx == nil {
+		// 一份都还没有：后台已经在建了（第一次打开、或刚改过墙）。
+		// **立刻回这个空页**，让前端显示「正在整理」并轮询 —— 同步等就是 502 的来源。
+		return JavWallActorListResult{
+			Items:    []JavWallActorCard{},
+			Page:     1,
+			PageSize: javActorDefaultPageSize,
+			Building: true,
+		}
+	}
 	kw := strings.ToLower(strings.TrimSpace(keyword))
 	anchor := strings.TrimSpace(anchorKey)
 
@@ -556,6 +590,7 @@ func (s *Service) ListJavWallActors(ctx context.Context, keyword string, page, p
 		Sources:   idx.sources,
 		Movies:    idx.total,
 		MaleCount: maleCount,
+		Building:  building,
 	}
 }
 
@@ -620,7 +655,16 @@ func (s *Service) javActorLookup(ctx context.Context, key string) (JavWallActorC
 	if key == "" {
 		return JavWallActorCard{}, nil, domain.Errorf(domain.CodeValidation, "缺少演员标识")
 	}
-	idx := s.buildJavActorIndex(ctx)
+	idx, _ := s.javActorIndexSnapshot(ctx)
+	if idx == nil {
+		// 索引还在建：**耐心等一小会儿**（详情是用户点了一张卡之后才发的，那时
+		// 多半已经在建或建好了），但绝不无限等 —— 等不到就说「正在整理」，
+		// 不能报「没有这位演员」（那是一句假的空）。
+		idx = s.waitJavActorIndex(ctx, javActorDetailIndexWait)
+		if idx == nil {
+			return JavWallActorCard{}, nil, errJavActorIndexBuilding()
+		}
+	}
 	card, ok := idx.cards[key]
 	if !ok {
 		// 姓名的键是小写的，前端可能原样传回大小写不同的那份 —— 再按名字找一次。

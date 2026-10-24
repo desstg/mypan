@@ -191,15 +191,12 @@ func (s *Service) javWallRows(ctx context.Context, src *wallSrc, force bool) (*j
 	root := src.Root
 	hidden := javWallHiddenDirs(s.settings)
 	hiddenKey := javWallHiddenKey(hidden)
-	now := time.Now()
 	cacheKey := src.ScopeKey()
 
-	s.javWallMu.Lock()
-	cached := s.javWallCache[cacheKey]
-	s.javWallMu.Unlock()
-	if cached != nil && !force && cached.root == root && cached.hiddenKey == hiddenKey &&
-		now.Sub(cached.builtAt) < javWallSnapshotTTL && sameDirMtime(cached.rootMod, root) {
-		return cached, nil
+	if !force {
+		if cached := s.validJavWallSnapshot(src, hiddenKey); cached != nil {
+			return cached, nil
+		}
 	}
 
 	snap, err := buildJavWallSnapshot(ctx, src.PosterRef(), root, hidden)
@@ -211,6 +208,32 @@ func (s *Service) javWallRows(ctx context.Context, src *wallSrc, force bool) (*j
 	s.javWallCache[cacheKey] = snap
 	s.javWallMu.Unlock()
 	return snap, nil
+}
+
+// validJavWallSnapshot 返回缓存里那份**仍然算数**的快照（过期 / 换目录 / 改隐藏名单
+// 都算不算数）；没有再返回 nil。
+//
+// 抽成一份是为了让「判据只有一处」：这里那句 `sameDirMtime` 是唯一会 stat 根目录的
+// 地方，演员索引那条路（javwall_actor_index.go）只拿快照的内容签名比对，
+// 两边判的「墙有没有变」因此不会漂。
+func (s *Service) validJavWallSnapshot(src *wallSrc, hiddenKey string) *javWallSnapshot {
+	if src == nil {
+		return nil
+	}
+	root := src.Root
+	s.javWallMu.Lock()
+	cached := s.javWallCache[src.ScopeKey()]
+	s.javWallMu.Unlock()
+	if cached == nil || cached.root != root || cached.hiddenKey != hiddenKey {
+		return nil
+	}
+	if time.Since(cached.builtAt) >= javWallSnapshotTTL {
+		return nil
+	}
+	if !sameDirMtime(cached.rootMod, root) {
+		return nil
+	}
+	return cached
 }
 
 // javWallHiddenKey 把隐藏名单折成一个可比较的签名（排序 + 拼串）。

@@ -565,6 +565,16 @@ export interface JavWallActorListResult {
    * 没有这个数，那种情况会显示成「一条演员都没有」，看着像坏了。
    */
   male_count?: number;
+  /**
+   * 索引还在**后台**建（第一次打开、或者墙刚变过）。
+   *
+   * ⚠️ 这时 `items` 是空的，但**不代表墙上没有演员** —— 必须显示「正在整理」并
+   * 轮询，否则用户看到的是「一位演员都没有」，会以为数据丢了（本项目的老坑）。
+   *
+   * 后端这么设计是因为这份索引要读整面墙的侧车 / nfo：SMB 上实测两分钟出头，
+   * 同步做必然被群晖反代判超时（502）。
+   */
+  building?: boolean;
 }
 
 export interface JavWallActorDetailResult {

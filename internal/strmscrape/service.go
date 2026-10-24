@@ -95,6 +95,18 @@ type Service struct {
 	javTitleMu    sync.Mutex
 	javTitleCache map[string]javTitleEntry
 
+	// javActorIdx 是演员墙索引（所有番号墙聚合出来的那一份）。
+	//
+	// **只在后台建**：建它要把每一面墙的侧车 / nfo 全读一遍，SMB 上实测一分钟以上，
+	// 挂在请求路径上就是反代 502（2026-10-24 用户报的现象）。判据与预算见
+	// javwall_actor_index.go。
+	javActorIdxMu sync.Mutex
+	javActorIdx   *javActorIndexCache
+	// javActorIdxBuilding 非 nil 表示有一轮在跑（关闭 = 跑完）。
+	javActorIdxBuilding chan struct{}
+	// javActorIdxTriedAt 是上一次尝试重建的时间（失败退避用；成功时清空）。
+	javActorIdxTriedAt time.Time
+
 	// javActorTMDB 是演员详情里那段 TMDB 补充档案的缓存（键是查过的名字）。
 	// 只存内存、24h 过期 —— 见 javwall_actor_tmdb.go 顶部那段。
 	javActorTMDBMu sync.Mutex

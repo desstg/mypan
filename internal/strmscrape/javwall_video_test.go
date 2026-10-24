@@ -325,6 +325,11 @@ func TestJavActorWallIncludesPureVideoLibrary(t *testing.T) {
 "actors":[{"id":"ACT-9","name":"綾瀬もも","gender":0,"avatar":"https://x/a.jpg"}]}`)
 
 	svc, _ := videoLibraryFixture(t, root)
+	// 索引平时是后台建的（见 javwall_actor_index.go）；测试里同步建一份，
+	// 不然拿到的是一页 `building: true` 的空表。
+	if svc.warmJavActorIndexNow() == nil {
+		t.Fatal("演员索引没建起来")
+	}
 	list := svc.ListJavWallActors(context.Background(), "", 1, 60, false, "")
 	if list.Movies != 1 {
 		t.Fatalf("墙上的片数 = %d，期望 1（纯视频库也要算一部）", list.Movies)
