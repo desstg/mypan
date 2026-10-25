@@ -102,6 +102,77 @@ func TestParseFirstSeenWinsWhenNeitherExact(t *testing.T) {
 	}
 }
 
+// TestCanonicalRefusesContestedUnifiedName 统一名被两条条目共用时**不能**当身份用。
+//
+// 这是「按演员名聚合」那条路的判据：表里实测有 75 个统一名被两条**不同 href**
+// 的条目共用（`真木今日子` = qgpP 与 Y3MD、`白井ナナ` = K4gKv 与 d4zD0）——
+// 那是同名不同人。拿统一名当聚合键会把两个人的片并给一个人，比裂成两张卡更糟。
+//
+// 反过来，别名（`田丸麻紀子` 这种）**仍然**归到统一名上 —— 显示名照旧，
+// 只是不再拿它去判断「是不是同一个人」。
+func TestCanonicalRefusesContestedUnifiedName(t *testing.T) {
+	const raw = `<actor>
+  <a zh_cn="同名人" keyword=",同名人,别名甲,"/>
+  <a zh_cn="同名人" keyword=",同名人,别名乙,"/>
+  <a zh_cn="唯一名" keyword=",唯一名,别的写法,"/>
+</actor>`
+	tbl, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 唯一的那条：规范名就是统一名（两个写法归到同一处 ← 演员墙靠这个合并）。
+	if got := tbl.Canonical("别的写法"); got != "唯一名" {
+		t.Errorf("Canonical(别的写法) = %q，期望 唯一名", got)
+	}
+	if got := tbl.Canonical("唯一名"); got != "唯一名" {
+		t.Errorf("Canonical(唯一名) = %q，期望 唯一名", got)
+	}
+	// 共用的那条：**原样返回**，哪怕表里确实认它为「同名人」。
+	if got := tbl.Canonical("别名甲"); got != "别名甲" {
+		t.Errorf("同名不同人的条目不能拿来当身份，Canonical(别名甲) = %q", got)
+	}
+	if got := tbl.Canonical("同名人"); got != "同名人" {
+		t.Errorf("Canonical(同名人) = %q", got)
+	}
+	// 显示名那条路不受影响（用户要的是中文名）。
+	if got := tbl.Resolve("别名甲"); got != "同名人" {
+		t.Errorf("Resolve 不该被这个判据改掉，got %q", got)
+	}
+
+	// 表里没有 / 空串 / nil 表：原样（调用方据此退回原名）。
+	if got := tbl.Canonical("完全不存在的演员XYZ"); got != "完全不存在的演员XYZ" {
+		t.Errorf("表里没有的应当原样返回，got %q", got)
+	}
+	if got := tbl.Canonical("  "); got != "" {
+		t.Errorf("空白应当收敛成空串，got %q", got)
+	}
+	var nilTable *Table
+	if got := nilTable.Canonical("别的写法"); got != "别的写法" {
+		t.Errorf("nil 表应当原样返回，got %q", got)
+	}
+}
+
+// 内置表里那 75 个共用统一名的条目：挑两条真的一验 —— 防止表更新后这两条
+// 被并成一条，于是「同名不同人的闸」悄悄失效。
+func TestBuiltinTableHasContestedUnifiedNames(t *testing.T) {
+	tbl := Default()
+	if tbl == nil {
+		t.Fatal("内置表没加载")
+	}
+	contested := 0
+	for unified, n := range tbl.unifiedEntries {
+		if n > 1 {
+			contested++
+			if got := tbl.Canonical(unified); got != unified {
+				t.Errorf("%q 有 %d 条条目（同名不同人），Canonical 不该改它，got %q", unified, n, got)
+			}
+		}
+	}
+	if contested == 0 {
+		t.Fatal("内置表里一个共用统一名都没有？—— 那条闸的测试就白测了")
+	}
+}
+
 // TestParseOutputNameFallback zh_cn 空时用 zh_tw；两个都空则整条跳过。
 func TestParseOutputNameFallback(t *testing.T) {
 	const raw = `<actor>

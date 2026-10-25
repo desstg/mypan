@@ -11,6 +11,7 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/jav/emby"
+	"litepan/internal/jav/emby/actormap"
 	"litepan/internal/settings"
 	"litepan/internal/strm"
 )
@@ -148,13 +149,24 @@ type javActorIndex struct {
 // javActorKey 把「可能带 id、也可能只有名字」的演员收敛成一个键。
 //
 // 有 id 用 id：侧车里的 id 是上游给的，比名字稳（同名不同人、改名都能分开）。
-// 没有 id 时用名字（小写）：nfo 里只有名字，而同一部片的侧车那份往往有 id ——
-// 聚合时会再按名字把两边**并到 id 那把键**上（见 buildJavActorIndexFrom）。
+// 没有 id 时用**索引表的规范名**（小写），表里没有 / 表里同名不同人时用原名
+// （见 actormap.Table.Canonical）。nfo 里只有名字，而同一部片的侧车那份往往
+// 有 id —— 聚合时会再把这个键映射到 id 上（见 buildJavActorIndexFrom）。
+//
+// ⚠️ 用规范名而不是原名的理由（用户 2026-10-25 报「同一个演员显示两张海报」）：
+// 侧车写的名字是**上游那一次**的写法，同一位演员在不同片里可能是 `楓ふうあ`
+// 也可能是 `枫芙爱`（同一个人的日文名与中文名）。按原名分组，两条就会各成
+// 一张卡；而显示名最后又被 `applyActorUnifiedName` 改成同一个中文名 ——
+// 于是墙上出现两张**同名**的海报。按规范名聚合后它们才真正合成一位。
 func javActorKey(id, name string) string {
 	if id = strings.TrimSpace(id); id != "" {
 		return id
 	}
-	return "name:" + strings.ToLower(strings.TrimSpace(name))
+	name = strings.TrimSpace(name)
+	if tbl := actormap.Default(); tbl != nil {
+		name = tbl.Canonical(name)
+	}
+	return "name:" + strings.ToLower(name)
 }
 
 // javWallActorSources 列出**所有**番号海报墙的数据源：番号任务 + 番号本地目录。
@@ -383,19 +395,33 @@ func (s *Service) buildJavActorIndexFrom(ctx context.Context, sources []*wallSrc
 
 	// 第一趟：名字 → id。nfo 兜底的那批只有名字，要让它们并到侧车那批的 id 上，
 	// 否则同一位演员会裂成两张卡（一张有头像、一张没有）。
-	idByName := make(map[string]string, 256)
+	//
+	// 键用 `javActorKey("", name)`（= 索引表的规范名），不用原名：侧车写的是
+	// `楓ふうあ`、nfo 写的是 `枫芙爱` 时，两边原本对不上（用户 2026-10-25 报的
+	// 「演员 枫芙爱 有两张海报」）。同名却被不同 id 认领的情况（表里 75 个统一名
+	// 被两条条目共用，如 `真木今日子`）**整条丢掉** —— 猜错会把两个人的片并给
+	// 一个人，那比裂成两张卡更糟。
+	idsByName := make(map[string]string, 256)
+	contested := make(map[string]struct{}, 8)
 	for _, sr := range all {
 		for _, list := range sr.actors {
 			for _, a := range list {
 				if a.ID == "" {
 					continue
 				}
-				key := strings.ToLower(a.Name)
-				if _, ok := idByName[key]; !ok {
-					idByName[key] = a.ID
+				key := javActorKey("", a.Name)
+				if prev, ok := idsByName[key]; ok {
+					if prev != a.ID {
+						contested[key] = struct{}{}
+					}
+					continue
 				}
+				idsByName[key] = a.ID
 			}
 		}
+	}
+	for key := range contested {
+		delete(idsByName, key)
 	}
 
 	type agg struct {
@@ -403,7 +429,7 @@ func (s *Service) buildJavActorIndexFrom(ctx context.Context, sources []*wallSrc
 		movies []JavWallActorMovie
 		seen   map[string]struct{}
 	}
-	byKey := make(map[string]*agg, len(idByName)+64)
+	byKey := make(map[string]*agg, len(idsByName)+64)
 	total := 0
 	for _, sr := range all {
 		for i, row := range sr.rows {
@@ -415,7 +441,8 @@ func (s *Service) buildJavActorIndexFrom(ctx context.Context, sources []*wallSrc
 			for _, a := range sr.actors[i] {
 				key := javActorKey(a.ID, a.Name)
 				if a.ID == "" {
-					if id, ok := idByName[strings.ToLower(a.Name)]; ok {
+					// `key` 已经是规范名那一种写法（与第一趟同一个函数），直接查。
+					if id, ok := idsByName[key]; ok {
 						key = id
 					}
 				}
@@ -670,6 +697,9 @@ func (s *Service) javActorLookup(ctx context.Context, key string) (JavWallActorC
 		// 姓名的键是小写的，前端可能原样传回大小写不同的那份 —— 再按名字找一次。
 		// **别名也要认**：主名已经被索引表换成中文统一名了，而前端手上那份
 		// （例如侧车里的日文原名）可能只对得上别名。
+		//
+		// 这一支同时兜住**旧键**：前端缓存里那个 `name:楓ふうあ` 在合并后已经不
+		// 是一把键了，但它会命中主卡的别名 `楓ふうあ`，于是仍然打开同一位演员。
 		lower := strings.ToLower(strings.TrimPrefix(key, "name:"))
 		for k, v := range idx.cards {
 			if strings.ToLower(v.Name) == lower || javActorHasAlias(v, lower) {

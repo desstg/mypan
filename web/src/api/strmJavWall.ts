@@ -490,10 +490,10 @@ export function deleteJavWallItem(ref: number | WallSourceRef, relDir: string, s
 /** 演员墙上的一个卡片。 */
 export interface JavWallActorCard {
   /**
-   * 详情要原样带回来的标识：有上游 id 就是 id，否则 `name:<小写名字>`。
+   * 详情要原样带回来的标识：有上游 id 就是 id，否则 `name:<小写规范名>`。
    *
    * ⚠️ 与 `name` 不是一回事：`name` 会被索引表换成**中文统一名**，`key` 仍然是
-   * 聚合时用的那个键（id 或侧车里的原始名字）。
+   * 聚合时用的那个键（上游 id，或索引表的规范名）。
    */
   key: string;
   /** 上游演员 id，空串 = 只在 nfo 里见过这个名字。 */

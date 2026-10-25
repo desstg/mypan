@@ -62,7 +62,12 @@ type Table struct {
 	// 表里的 `href` 就带这个 id，而 JAVDB 的头像地址可以直接由它拼出来
 	// （见 javdbActorAvatarURL）。**不打开那个页面** —— 它要登录。
 	byJavdbID map[string]string
-	entries   int
+	// unifiedEntries 数「每个统一名在表里有几条**条目**」（不是几个别名）。
+	//
+	// 实测有 75 个统一名被两条条目共用（`真木今日子` 就有 qgpP 与 Y3MD 两条）——
+	// 那是**同名不同人**，统一名当不了「同一个人」的判据。见 Canonical。
+	unifiedEntries map[string]int
+	entries        int
 }
 
 // Aliases 返回某个统一名对应的别名（保序、不含统一名本身）。
@@ -104,6 +109,37 @@ func (t *Table) Len() int {
 		return 0
 	}
 	return t.entries
+}
+
+// Canonical 返回这个名字可以**当身份用**的那个写法：表里认得、且归到的统一名
+// 在表里只有一条条目时给统一名，否则原样返回（去掉首尾空白）。
+//
+// # 与 Resolve 的区别（这个区别是分页聚合的前提）
+//
+// `Resolve` 回答的是「**显示**成什么」，它宁可把「同名不同人」也并到一个漂亮名字上；
+// `Canonical` 回答的是「**这两个名字是不是同一个人**」，它必须承认自己不确定。
+// 表里实测有 75 个统一名被两条条目共用（`真木今日子` = qgpP 与 Y3MD，
+// `白井ナナ` = K4gKv 与 d4zD0），拿统一名当聚合键会把两位不同的人焊成一位 ——
+// 那比「一件演员两张卡」更糟：详情里会出现**别人**参演的片。
+//
+// 所以这里对共用统一名的条目**主动放弃**归并能力（返回原名），
+// 它们的卡仍然各自独立 —— 与改造前的行为完全一致。
+//
+// 别名表本身不用这个判据：那 75 个统一名各自的别名几乎没有交集，
+// 同一个别名落到哪一条由 Parse 的裁决规则定死了。
+func (t *Table) Canonical(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || t == nil || t.byAlias == nil {
+		return name
+	}
+	unified, ok := t.byAlias[name]
+	if !ok || unified == "" {
+		return name
+	}
+	if t.unifiedEntries[unified] > 1 {
+		return name
+	}
+	return unified
 }
 
 // Resolve 把一个演员名换成统一名。
@@ -148,9 +184,10 @@ func Parse(data []byte) (*Table, error) {
 		return nil, err
 	}
 	t := &Table{
-		byAlias:   make(map[string]string, len(root.Actors)*2),
-		byUnified: make(map[string][]string, len(root.Actors)),
-		byJavdbID: make(map[string]string, len(root.Actors)),
+		byAlias:        make(map[string]string, len(root.Actors)*2),
+		byUnified:      make(map[string][]string, len(root.Actors)),
+		byJavdbID:      make(map[string]string, len(root.Actors)),
+		unifiedEntries: make(map[string]int, len(root.Actors)),
 	}
 	// href 单独记一份：同一统一名可能有多条（极少见），先出现的赢 ——
 	// 与别名裁决的「先出现优先」同一口径，免得两份表各按各的规则。
@@ -172,6 +209,7 @@ func Parse(data []byte) (*Table, error) {
 			continue
 		}
 		t.entries++
+		t.unifiedEntries[unified]++
 		for _, alias := range splitKeywords(a.Keyword) {
 			if _, seen := t.byAlias[alias]; seen {
 				// 已有一条。只有当「新条目是原文相等」而「旧的那条不是」时才顶掉

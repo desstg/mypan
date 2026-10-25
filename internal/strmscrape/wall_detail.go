@@ -34,7 +34,7 @@ type WallActor struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	// Key 是这位演员在**演员墙聚合**里的标识（`javActorKey`：有上游 id 就是 id，
-	// 否则 `name:<小写名字>`）。
+	// 否则 `name:<索引表里的规范名>`）。
 	//
 	// 抽屉里点演员头像会去打开演员详情，那条请求要的就是这个键。由后端算而不是
 	// 前端拼：聚合时「nfo 里只有名字的那批会被并到侧车那份的 id 上」这条规则

@@ -333,3 +333,119 @@ func TestJavWallActorsSkipHiddenDirs(t *testing.T) {
 		t.Errorf("墙上的影片数也不该算隐藏档，got %d", list.Movies)
 	}
 }
+
+// 同一个演员在**不同片里换了写法**时不能裂成两张卡（用户 2026-10-25 报的
+// 「演员 枫芙爱 有两张海报」）。
+//
+// 现场是这样：一部片的侧车给了 `楓ふうあ` + 上游 id，而另一批片的 nfo 里只有
+// 中文名 `枫芙爱`（没有 id）。改造前聚合按**原名**分组 —— 两个写法各成一张卡，
+// 然后显示名又被索引表改成同一个中文名，于是墙上出现两张同名的海报。
+//
+// 现在按索引表的**规范名**分组（`actormap.Table.Canonical`），nfo 那批才能并到
+// 侧车那份的 id 上：一部片带 id、十部片只有名字 → 合成一位，部数是 11。
+func TestJavWallActorsMergeSpellingVariants(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// ① 侧车：日文原名 + 上游 id
+	write("有码/SNOS-222/sidecar.json", `{"schema":"litepan.jav.sidecar/1","number":"SNOS-222","title":"テスト",
+"actors":[{"id":"0RkDa","name":"楓ふうあ","gender":0,"avatar":"https://x/a.jpg"}]}`)
+	write("有码/SNOS-222/SNOS-222.strm", "url")
+	// ② nfo：只有中文名（索引表里与 `楓ふうあ` 是同一位）
+	write("有码/SONE-563/SONE-563.strm", "url")
+	write("有码/SONE-563/SONE-563.nfo",
+		`<movie><num>SONE-563</num><actor><name>枫芙爱</name></actor></movie>`)
+
+	settingSvc := newWallLocalDirsSettings(t, map[string]string{
+		settings.KeyStrmWallLocalDirs: settings.EncodeWallLocalDirs([]settings.WallLocalDir{
+			{ID: "aaaa1111", Name: "影库", Root: root, MediaKind: settings.WallLocalKindJav},
+		}),
+	})
+	s := newJavActorWallTestService(t, settingSvc)
+	list := s.ListJavWallActors(context.Background(), "", 1, 60, true, "")
+	if list.Total != 1 {
+		t.Fatalf("同一个人的两种写法应当并成一位，got %d：%+v", list.Total, list.Items)
+	}
+	card := list.Items[0]
+	if card.MoviesCount != 2 {
+		t.Errorf("两部片都要算上，got %d", card.MoviesCount)
+	}
+	if card.ID != "0RkDa" {
+		t.Errorf("要继承侧车那份的上游 id（nfo 那批没有 id），got %q", card.ID)
+	}
+	if card.Name != "枫芙爱" {
+		t.Errorf("显示名仍然是索引表的中文名，got %q", card.Name)
+	}
+
+	// 合并之后，前端手上那份**旧键**（合并前按日文原名算出来的）也要照旧打开
+	// 同一位演员 —— 否则用户点开详情会报「没有这位演员」。
+	if detail, err := s.JavWallActorDetail(context.Background(), "name:楓ふうあ"); err != nil {
+		t.Errorf("按旧键查不到：%v", err)
+	} else if detail.Total != 2 {
+		t.Errorf("旧键应当落到合并后的那张卡上（2 部），got %d", detail.Total)
+	}
+	// nfo 那批的写法（没有 id 的那一侧）同样能打开。
+	if detail, err := s.JavWallActorDetail(context.Background(), "name:枫芙爱"); err != nil {
+		t.Errorf("按中文名查不到：%v", err)
+	} else if detail.Actor.ID != "0RkDa" {
+		t.Errorf("按中文名应当落到有 id 的那张卡上，got %+v", detail.Actor)
+	}
+}
+
+// 索引表里**同名不同人**（共用统一名）的那一批不能被并起来。
+//
+// 表里有 75 个这样的统一名（`真木今日子` = qgpP 与 Y3MD）。按统一名聚合会把
+// 两个人的片并给一个人 —— 那比裂成两张卡更糟：详情里会出现别人的片。
+// 这条钉住「猜不准就不猜」：两个 id 各留一张卡，只有名字的那条也不并到任何一边。
+func TestJavWallActorsDoNotMergeContestedNames(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("有码/A-001/A-001.json", `{"schema":"litepan.jav.sidecar/1","number":"A-001",
+"actors":[{"id":"Y3MD","name":"真木今日子"}]}`)
+	write("有码/A-001/A-001.strm", "url")
+	write("有码/A-002/A-002.json", `{"schema":"litepan.jav.sidecar/1","number":"A-002",
+"actors":[{"id":"qgpP","name":"真木今日子"}]}`)
+	write("有码/A-002/A-002.strm", "url")
+	// 只有名字的那条：两个 id 都可能是他 → 谁都别认。
+	write("有码/A-003/A-003.strm", "url")
+	write("有码/A-003/A-003.nfo",
+		`<movie><num>A-003</num><actor><name>真木今日子</name></actor></movie>`)
+
+	settingSvc := newWallLocalDirsSettings(t, map[string]string{
+		settings.KeyStrmWallLocalDirs: settings.EncodeWallLocalDirs([]settings.WallLocalDir{
+			{ID: "aaaa1111", Name: "影库", Root: root, MediaKind: settings.WallLocalKindJav},
+		}),
+	})
+	s := newJavActorWallTestService(t, settingSvc)
+	list := s.ListJavWallActors(context.Background(), "", 1, 60, true, "")
+	if list.Total != 3 {
+		t.Fatalf("同名不同人不能并：应当 3 张卡（两个 id + 一个只有名字的），got %d：%+v", list.Total, list.Items)
+	}
+	byID := map[string]JavWallActorCard{}
+	for _, c := range list.Items {
+		byID[c.ID] = c
+	}
+	if byID["Y3MD"].MoviesCount != 1 || byID["qgpP"].MoviesCount != 1 {
+		t.Errorf("两个 id 各自的部数都该是 1：%+v", list.Items)
+	}
+	if byID[""].MoviesCount != 1 {
+		t.Errorf("只有名字的那条自成一卡：%+v", list.Items)
+	}
+}
