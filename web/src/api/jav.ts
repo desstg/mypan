@@ -5,6 +5,8 @@ import type {
   JavConfig,
   JavConfigInput,
   JavConnectionResult,
+  JavEntity,
+  JavEntityKind,
   JavListResult,
   JavMovieCard,
   JavMovieDetail,
@@ -102,7 +104,7 @@ export function searchJav(params: {
   sort?: string;
   dir?: string;
   page?: number;
-}) {
+}, signal?: AbortSignal) {
   return http.get<JavSearchResult>(
     `${BASE}/search${q({
       q: params.keyword,
@@ -113,6 +115,8 @@ export function searchJav(params: {
       dir: params.dir,
       page: params.page,
     })}`,
+    undefined,
+    signal,
   );
 }
 
@@ -207,6 +211,41 @@ export function fetchJavReviews(id: string, page = 1) {
 export function fetchJavActorMovies(actorId: string) {
   return http.get<{ items: JavMovieCard[] }>(
     `${BASE}/actors/${encodeURIComponent(actorId)}/movies`,
+  );
+}
+
+/**
+ * 按实体搜：演员 / 系列 / 片商 / 导演 / 清单。
+ *
+ * 返回的是**实体候选**，不是影片 —— 点一个进去才看它的作品
+ * （见 fetchJavEntityMovies）。与 searchJav 是两条路：
+ *
+ *   searchJav        上游 `type=movie`，返回影片，本地过滤/排序/分页；
+ *   searchJavEntities 上游 `type=<实体>`，返回人 / 系列 / 片单。
+ *
+ * 没有分页参数：上游对这个接口的 limit / page 都不生效（固定 20 条、
+ * 翻第 2 页还是第 1 页那 20 条，实测 2026-10-26）。界面上按
+ * 「一屏候选、点一个进去」设计。
+ */
+export function searchJavEntities(keyword: string, type: JavEntityKind | string) {
+  return http.get<{ items: JavEntity[] }>(
+    `${BASE}/search/entities${q({ q: keyword, type })}`,
+  );
+}
+
+/**
+ * 取某个实体的作品（一页 40 部）。
+ *
+ * 走的是**官网作品页的 HTML 抓取**（上游 API 没有「按实体 id 取影片」的能力，
+ * `/v1/actors/{id}/movies` 那类路径全是 404）。所以它比别的接口慢：一次实打实的
+ * 网页请求。与清单页是同一条路，kind 只决定 URL 那一段。
+ *
+ * `total` 只有清单给（页眉写着「共 N 部影片」），其余四档恒为 0 ——
+ * 那一档要一直翻到空页才知道到底了。
+ */
+export function fetchJavEntityMovies(kind: JavEntityKind | string, id: string, page: number) {
+  return http.get<{ items: JavMovieCard[]; total: number }>(
+    `${BASE}/entities/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/movies${q({ page })}`,
   );
 }
 

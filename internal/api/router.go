@@ -556,6 +556,13 @@ func NewRouter(d Deps) http.Handler {
 
 				// 搜索
 				r.Get("/search", h.javSearch)
+				// 按实体搜：演员 / 系列 / 片商 / 导演 / 清单。返回的是**实体候选**
+				// （点一个进去才看作品），与上面那个「搜影片」是两条路。
+				r.Get("/search/entities", h.javSearchEntities)
+				// 某个实体的作品页（抓官网 HTML）。kind 是界面取值：
+				// actor / series / maker / director / lists —— 清单在这里是**复数**，
+				// 服务层会翻成上游的单数 `list`。
+				r.Get("/entities/{kind}/{id}/movies", h.javEntityMovies)
 
 				// 本地影库列表（影库页）
 				r.Get("/movies", h.javLocalMovies)

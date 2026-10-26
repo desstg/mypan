@@ -211,6 +211,35 @@ export interface JavListResult {
   total_page: number;
 }
 
+/**
+ * 按实体搜出来的一个候选（演员 / 系列 / 片商 / 导演 / 清单）。
+ *
+ * 这**不是**影片 —— 点进去才看这个实体的作品。与 JavMovieCard 是两回事，
+ * 别为了省一个类型把它们塞进同一个数组。
+ */
+export interface JavEntity {
+  id: string;
+  name: string;
+  /**
+   * 它是什么：`actor` / `series` / `maker` / `director` / `lists`。
+   *
+   * 清单这里是**复数** `lists`（界面口径，全模块统一），上游用的单数是服务层
+   * 翻译的细节，前端不必知道。
+   */
+  kind: JavEntityKind;
+  /** 头像。只有演员有，而且必须过 javImageURL（上游是 XOR 混淆的）。 */
+  avatar_url: string;
+  /** 这个实体有多少部作品。清单读 movies_count、其余读 videos_count，后端已归一。 */
+  count: number;
+  /** 清单的可见性（open / private），其余档为空串。 */
+  privacy: string;
+  /** 上游性别码：1 = 男优。只有演员有值。 */
+  gender: number;
+}
+
+/** 能被「按实体搜」的几档。清单是 `lists`（界面口径）。 */
+export type JavEntityKind = "actor" | "series" | "maker" | "director" | "lists";
+
 /** 榜单种类。 */
 export type JavRankingKind = "top250" | "daily" | "weekly" | "monthly" | "actor";
 
@@ -536,6 +565,14 @@ export interface JavConfig {
   api_base: string;
   api_nodes: JavAPINode[];
   javbus_base: string;
+  /**
+   * JAVDB **官网**地址（与 api_base 是两个域名）。
+   *
+   * 只有「清单里的影片」与「演员/系列/片商/导演的作品」两档用得上 ——
+   * 它们都得抓官网 HTML（上游 API 没有「按 id 取作品」的接口）。
+   * 空串表示用内置默认（镜像域名 javdb580.com）。
+   */
+  site_base: string;
   use_proxy: boolean;
   /** 用户自己配了代理并且开着（仅供开关回显）。 */
   proxy_ready: boolean;
@@ -591,6 +628,7 @@ export interface JavConfigInput {
   token?: string;
   api_base?: string;
   javbus_base?: string;
+  site_base?: string;
   use_proxy?: boolean;
   min_interval_ms?: number;
   request_gap_ms?: number;

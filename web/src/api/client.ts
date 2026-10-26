@@ -127,7 +127,8 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
 }
 
 export const http = {
-  get: <T>(path: string, query?: Query) => request<T>("GET", path, { query }),
+  get: <T>(path: string, query?: Query, signal?: AbortSignal) =>
+    request<T>("GET", path, { query, signal }),
   post: <T>(path: string, body?: unknown, query?: Query, signal?: AbortSignal) =>
     request<T>("POST", path, { body, query, signal }),
   postWithTimeout: <T>(path: string, body: unknown, timeoutMs: number, signal?: AbortSignal) =>

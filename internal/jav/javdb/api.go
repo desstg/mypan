@@ -292,6 +292,57 @@ func (c *Client) Related(ctx context.Context, movieID string, limit int) ([]Rela
 // 拿它当清单内容会订到一堆不相干的片。清单的真实成员只能抓官网清单页的 HTML，
 // 见 listpage.go 的 Client.ListPage。
 
+// SearchEntities 搜「实体」：演员 / 系列 / 片商 / 导演 / 清单。
+//
+// # 为什么这是另一条路，而不是 SearchPage 换个 movie_type
+//
+// 上游 `/v2/search` 有**两个**互不相干的分类型维度：
+//
+//	`type`       决定返回**什么东西** —— movie（影片）/ actor / series / maker /
+//	             director / list（清单，**单数**）
+//	`movie_type` 决定**影片**的内容分类 —— all / 0 有码 / 1 无码 / 2 欧美 / 3 FC2
+//
+// 改造前 SearchPage 把界面上那个下拉的值（actor / lists …）直接塞进了
+// `movie_type`，而 `type` 写死 `movie`。实测（2026-10-26）`movie_type=actor`
+// 与 `movie_type=all` 返回**逐条相同**：上游不认识那个值，静默按 all 处理。
+// 于是下拉里六个档位出来的都是同一批影片 —— 只是 `number` 那档另有本地精确匹配、
+// 看起来像是生效了。
+//
+// 现在按实体搜走这条：`type` 传实体类型，解 `data.actors / series / makers /
+// directors / lists` 里对应的那份。
+//
+// # 上游的两个脾气（实测 2026-10-26）
+//
+//   - **limit 不生效**：传 10 / 20 / 50 都按上游自己的 20 条给（命中多的查询）；
+//   - **page 不生效**：翻到第 2 页给的还是第 1 页那 20 条。
+//
+// 所以这里不提供分页参数 —— 参数传了只会让调用方以为能翻页。
+// 一个查询最多 20 个实体，界面上就按「一屏候选、点一个进去」来设计。
+//
+// kind 必须是 Entity* 之一；未知值直接报错，别静默回到「搜影片」那种降级 ——
+// 那会让人以为按导演搜生效了、只是恰好没有导演匹配。
+func (c *Client) SearchEntities(ctx context.Context, keyword, kind string) ([]Entity, error) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return nil, nil
+	}
+	switch kind {
+	case EntityActor, EntitySeries, EntityMaker, EntityDirector, EntityList:
+	default:
+		return nil, fmt.Errorf("未知的搜索类型：%s（可用 actor / series / maker / director / list）", kind)
+	}
+
+	var data EntitiesResp
+	err := c.get(ctx, "/v2/search", url.Values{
+		"q":    {keyword},
+		"type": {kind},
+	}, &data)
+	if err != nil {
+		return nil, err
+	}
+	return data.Pick(kind), nil
+}
+
 func (c *Client) requireToken() error {
 	if c.Token() == "" {
 		return ErrNoToken

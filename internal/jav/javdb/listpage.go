@@ -2,6 +2,7 @@ package javdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,10 +26,31 @@ import (
 //
 // 源码 javdb-center 也是这个结论，它的清单详情页同样抓官网 HTML
 // （webapp.py 的 `_scrape_list_page`），这里照搬它那套正则。
+//
+// ⚠️ **同一条路也是「实体作品表」的唯一来源**（2026-10-26 扩到这里）：
+// 演员 / 系列 / 片商 / 导演的「有哪些作品」在 API 侧同样取不到 ——
+// `/v1/actors/{id}/movies`、`/v1/series/{id}/movies`、`/v1/makers/{id}/movies`、
+// `/v1/directors/{id}/movies` 全是 404，`/v1/lists/{id}/movies` 也是。
+// 但官网的那四个页面（`/actors/{id}`、`/series/{id}`、`/makers/{id}`、
+// `/directors/{id}`）与清单页是**同一套卡片标记**（实测四页逐字相同：
+// `<a href="/v/" class="box" title="…"><strong>番号</strong><img src=…>`），
+// 所以解析与抓取一份就够，只是 URL 的那一段不同。
 
 // listPageUA 用浏览器 UA：官网对非浏览器 UA 不友好。
 const listPageUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 	"(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+
+// entityPageSlugs 把实体类型翻成官网 URL 的那一段。
+//
+// 与 API 的 `type` 取值**不是同一套**：API 用单数 `list`，官网路径是复数 `lists`。
+// 两套各存一份、别互相推导 —— 上游哪天改了其中一个，另一个不该跟着一起错。
+var entityPageSlugs = map[string]string{
+	EntityActor:    "actors",
+	EntitySeries:   "series",
+	EntityMaker:    "makers",
+	EntityDirector: "directors",
+	EntityList:     "lists",
+}
 
 var (
 	// 一张卡片：`<a href="/v/<id>" class="box" title="<片名>">…</a>`。
@@ -39,6 +61,31 @@ var (
 	// 页眉那句「共 N 部影片」。
 	reListTotal = regexp.MustCompile(`(\d+)\s*部影片`)
 )
+
+// 地区封锁页的两句原文（同一个页面里英文与繁体中文各一份）。
+//
+// 为什么必须单独认它：被封锁时官网回的是 **HTTP 200 + 一段短 HTML**，
+// 里面一个字都没有我们的卡片。当成「空页」处理的话，调用方会把它读成
+// 「这个清单/这个演员就这些片」—— 界面上是一片空白，而真正的原因完全看不见。
+// 实测翻到最后一页也是空页（HTTP 200、24KB、标题正常），所以**不能靠长度区分**，
+// 只能靠这两句原文。
+var blockedPageMarkers = []string{
+	"prohibited in the country",
+	"版權限制",
+}
+
+// blockedPageError 判断一段 HTML 是不是地区封锁页。
+//
+// 命中时返回 error（不是空切片）：这两件事在调用方那里要走完全不同的分支 ——
+// 一个该提示用户「这条路不通」，一个该安静地结束翻页。
+func blockedPageError(html string) error {
+	for _, m := range blockedPageMarkers {
+		if strings.Contains(html, m) {
+			return &APIError{Message: "官网给你所在地区限流了（页面显示「由于版权限制，本站禁止了你的网络所在国家的访问」）"}
+		}
+	}
+	return nil
+}
 
 // 封面 CDN 的两个形态。官网页面与 API 给的是**两个不同的域名**，而只有一个能取到。
 const (
@@ -185,15 +232,32 @@ func (c *Client) listPageStore(key string, movies []Movie, total int) {
 //
 // 命中的缓存直接返回，不打上游。
 func (c *Client) ListPage(ctx context.Context, listID string, page int) ([]Movie, int, error) {
-	listID = strings.TrimSpace(listID)
-	if listID == "" {
-		return nil, 0, fmt.Errorf("清单 id 为空")
+	return c.EntityPage(ctx, EntityList, listID, page)
+}
+
+// EntityPage 抓某个「实体」的作品页第 page 页。
+//
+// kind 取 Entity* 常量（演员 / 系列 / 片商 / 导演 / 清单），id 是上游那个短 id。
+// 五种实体的作品页在官网是**同一套卡片标记**，所以与清单页共用解析、缓存与重试
+// （见本文件开头那段说明）。
+//
+// total 只有清单页给（页眉那句「共 N 部影片」），另外四种恒为 0 —— 那不是失败：
+// 调用方据 total==0 知道「这一页没写总数，只能一直翻到空页」。
+func (c *Client) EntityPage(ctx context.Context, kind, id string, page int) ([]Movie, int, error) {
+	slug, ok := entityPageSlugs[kind]
+	if !ok {
+		return nil, 0, fmt.Errorf("未知的页面类型：%s（可用 actor / series / maker / director / list）", kind)
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, 0, fmt.Errorf("页面 id 为空")
 	}
 	if page <= 0 {
 		page = 1
 	}
-	// 清单 id 与页码都是短字符串，直接拼当键。
-	cacheKey := listID + "|" + strconv.Itoa(page)
+	// 类型 + id + 页码拼成键：同一个短 id 在两种实体下不是同一份内容
+	// （`/actors/7R` 与 `/makers/7R` 是两回事），少了类型那一段会串味。
+	cacheKey := slug + "/" + id + "|" + strconv.Itoa(page)
 	if movies, total, ok := c.listPageCached(cacheKey); ok {
 		return movies, total, nil
 	}
@@ -202,7 +266,7 @@ func (c *Client) ListPage(ctx context.Context, listID string, page int) ([]Movie
 	if base == "" {
 		base = defaultSiteBase
 	}
-	url := fmt.Sprintf("%s/lists/%s?page=%d", base, listID, page)
+	pageURL := fmt.Sprintf("%s/%s/%s?page=%d", base, slug, id, page)
 
 	// 这一页比 API 脆：实测同一个地址一会儿 200、一会儿 EOF、一会儿 403。
 	// 所以退回 c.retries 次（与 API 请求同一份重试设置）。
@@ -219,7 +283,7 @@ func (c *Client) ListPage(ctx context.Context, listID string, page int) ([]Movie
 			case <-time.After(time.Duration(attempt) * 800 * time.Millisecond):
 			}
 		}
-		movies, total, err := c.fetchListPage(ctx, url)
+		movies, total, err := c.fetchListPage(ctx, pageURL)
 		if err == nil {
 			c.listPageStore(cacheKey, movies, total)
 			return movies, total, nil
@@ -247,11 +311,37 @@ func retryableListStatus(status int) bool {
 }
 
 // fetchListPage 抓一次清单页。重试与收尾都在 ListPage 里。
+//
+// # 两条出口，顺序是「先直连、后代理」
+//
+// 官网除了会按 IP 反爬，还会**按地区封人**：实测同一条 `/lists/<id>`，
+// 直连拿到的是正常页面（40 张卡片），走代理（出口在国外）拿到的是
+// **HTTP 200 + 一句「由于版权限制，本站禁止了你的网络所在国家的访问」**。
+// 所以这里与 API 那条路（能直连就直连、连不上才走代理，见 client.go 的注释）
+// 顺序**相反**：官网先直连。
+//
+// 只在直连给出「地区封锁页」或网络错误时才换代理试一次 ——
+// 不是两个都试，否则每一页都要打两次外站。
 func (c *Client) fetchListPage(ctx context.Context, url string) ([]Movie, int, error) {
-	// 与 API 共用同一套限流与代理：同一个站 family，抓猛了一样会被挡。
 	if err := c.throttle(ctx); err != nil {
 		return nil, 0, err
 	}
+
+	movies, total, err := c.fetchListPageOnce(ctx, url, c.direct)
+	if err == nil {
+		return movies, total, nil
+	}
+	// 代理这条路只有在**配了代理**、且直连是被地区封的情况下才值得再试。
+	// 其余错误（404 / 被反爬 403 / 超时）换条路也还是同一个结果，
+	// 多打一次只是把封锁拖长。
+	if !c.hasProxy || !isRegionBlocked(err) {
+		return nil, 0, err
+	}
+	return c.fetchListPageOnce(ctx, url, c.http)
+}
+
+// fetchListPageOnce 用指定的那个 http.Client 抓一次。
+func (c *Client) fetchListPageOnce(ctx context.Context, url string, hc *http.Client) ([]Movie, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, 0, err
@@ -259,7 +349,7 @@ func (c *Client) fetchListPage(ctx context.Context, url string) ([]Movie, int, e
 	req.Header.Set("User-Agent", listPageUA)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 
-	resp, err := c.http.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -273,6 +363,29 @@ func (c *Client) fetchListPage(ctx context.Context, url string) ([]Movie, int, e
 	if err != nil {
 		return nil, 0, err
 	}
-	movies, total := ParseListPage(string(body))
+	html := string(body)
+	// 地区封锁页是 **HTTP 200** 的短页面 —— 不在这儿拦住，它会一路变成
+	// 「这个清单就这些片」的空列表。
+	if berr := blockedPageError(html); berr != nil {
+		return nil, 0, &regionBlockedError{err: berr}
+	}
+	movies, total := ParseListPage(html)
 	return movies, total, nil
+}
+
+// regionBlockedError 给「地区封锁」这个失败打上可识别的标。
+//
+// 它会被包成 error 往外传，而 ListPage 的重试判断会把它当作**确定性失败**
+// （重试同一个出口没意义），fetchListPage 则靠它决定「换代理再试一次」。
+type regionBlockedError struct {
+	err error
+}
+
+func (e *regionBlockedError) Error() string { return e.err.Error() }
+func (e *regionBlockedError) Unwrap() error { return e.err }
+
+// isRegionBlocked 报告这个错误是不是「官网按地区封了我们」。
+func isRegionBlocked(err error) bool {
+	var rb *regionBlockedError
+	return errors.As(err, &rb)
 }

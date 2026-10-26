@@ -210,6 +210,17 @@ type JavdbClient interface {
 	// 那个参数是拿清单名去**模糊匹配影片标题**，不是清单成员 —— 搜「驾驶双马尾」
 	// 会返回《双子コー…》，条数永远只是页上限。留着它只会再被误用一次。
 	ListPage(ctx context.Context, listID string, page int) ([]javdb.Movie, int, error)
+	// SearchEntities 按实体搜（`/v2/search?type=actor|series|maker|director|list`）。
+	//
+	// 与 SearchPage 是两个维度：那个的 `type` 恒为 movie、分类型靠 movie_type
+	// （影片的内容分类），这个的 `type` 才是「返回什么东西」。改造前把实体名
+	// 塞进 movie_type 是那次「六个档位出来同一批影片」的根因，见 javdb/api.go。
+	SearchEntities(ctx context.Context, keyword, kind string) ([]javdb.Entity, error)
+	// EntityPage 抓官网某实体的作品页（HTML），kind 取 javdb.Entity*。
+	//
+	// 与 ListPage 同一条路（上游 API 没有「按实体 id 取影片」的接口），
+	// 区别只是 URL 那一段：actors / series / makers / directors / lists。
+	EntityPage(ctx context.Context, kind, id string, page int) ([]javdb.Movie, int, error)
 	// LastUsedAt 是上一次向上游发请求的时刻 —— **由所有上游请求推动，含后台自己的**。
 	//
 	// ⚠️ 它**不是**「用户在不在用」的判据（这个实例是模块级共享的：hydrate 队列、

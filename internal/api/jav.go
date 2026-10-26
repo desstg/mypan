@@ -524,6 +524,51 @@ func (h *Handler) javListMovies(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{"items": items, "total": total})
 }
 
+// javSearchEntities 按实体搜（演员 / 系列 / 片商 / 导演 / 清单）。
+//
+// 与 /search 是两个端点，**不要合并**：那个搜的是影片（返回卡片，能本地过滤
+// 排序分页），这个搜的是「人 / 系列 / 片单」（返回候选，点一个进去才看作品）。
+// 合并成一个端点的话，前端拿到的 data 形状要按 type 变，两边都会写一堆分支。
+//
+// 没有分页参数：上游的 limit/page 对这个接口都不生效（固定 20 条、翻页还是
+// 那 20 条，实测 2026-10-26），传了只会让调用方以为能翻。
+func (h *Handler) javSearchEntities(w http.ResponseWriter, r *http.Request) {
+	if !h.javReady(w) {
+		return
+	}
+	q := r.URL.Query()
+	items, err := h.jav.SearchEntities(r.Context(), q.Get("q"), q.Get("type"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if items == nil {
+		items = []jav.EntityView{}
+	}
+	writeOK(w, map[string]any{"items": items})
+}
+
+// javEntityMovies 取某个实体的作品（一页 40 部）。
+//
+// kind 走路径而不是 query：它是这条路由的身份（`/entities/lists/{id}/movies`
+// 与 `/entities/actor/{id}/movies` 是两份不同的东西），放进 query 容易被漏传
+// 而静默按某个默认档给结果。
+func (h *Handler) javEntityMovies(w http.ResponseWriter, r *http.Request) {
+	if !h.javReady(w) {
+		return
+	}
+	items, total, err := h.jav.EntityMovies(r.Context(),
+		chi.URLParam(r, "kind"), chi.URLParam(r, "id"), queryIntDefault(r, "page", 1))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if items == nil {
+		items = []jav.MovieCard{}
+	}
+	writeOK(w, map[string]any{"items": items, "total": total})
+}
+
 // javUserShares 取某位分享者分享过的影片（按影片聚合）。
 func (h *Handler) javUserShares(w http.ResponseWriter, r *http.Request) {
 	if !h.javReady(w) {

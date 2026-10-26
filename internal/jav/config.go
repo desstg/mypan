@@ -40,7 +40,13 @@ type ConfigView struct {
 	APIBase    string `json:"api_base"`
 	APINodes   []Node `json:"api_nodes"`
 	JavbusBase string `json:"javbus_base"`
-	UseProxy   bool   `json:"use_proxy"`
+	// SiteBase 是 JAVDB **官网**的地址（与 api_base 是两个域名）。
+	//
+	// 只有「清单里的影片」与「演员/系列/片商/导演的作品」这两档用得上 ——
+	// 它们都得抓官网 HTML（上游 API 没有「按 id 取作品」的接口）。
+	// 空串表示用内置默认（镜像域名 javdb580.com）。
+	SiteBase string `json:"site_base"`
+	UseProxy bool   `json:"use_proxy"`
 	// ProxyReady 是「用户自己配了代理并且开着」，仅供界面回显开关状态。
 	ProxyReady bool `json:"proxy_ready"`
 	// EffectiveProxy 是**实际会走的那条路**，用来消除一个必然会出现的困惑：
@@ -125,6 +131,7 @@ type ConfigInput struct {
 
 	APIBase       string `json:"api_base"`
 	JavbusBase    string `json:"javbus_base"`
+	SiteBase      string `json:"site_base"`
 	UseProxy      bool   `json:"use_proxy"`
 	MinIntervalMS *int   `json:"min_interval_ms"`
 	RequestGapMS  *int   `json:"request_gap_ms"`
@@ -202,6 +209,7 @@ func (s *Service) Config(ctx context.Context) (ConfigView, error) {
 		APIBase:        strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavAPIBase)),
 		APINodes:       s.apiNodes(),
 		JavbusBase:     strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavJavbusBase)),
+		SiteBase:       strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavSiteBase)),
 		UseProxy:       s.settings.Bool(settings.KeyJavUseProxy),
 		ProxyReady:     s.useProxy(),
 		EffectiveProxy: s.effectiveProxyLabel(),
@@ -329,6 +337,7 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 		settings.KeyJavEnabled:             boolString(in.Enabled),
 		settings.KeyJavAPIBase:             strings.TrimSpace(in.APIBase),
 		settings.KeyJavJavbusBase:          strings.TrimSpace(in.JavbusBase),
+		settings.KeyJavSiteBase:            strings.TrimSpace(in.SiteBase),
 		settings.KeyJavUseProxy:            boolString(in.UseProxy),
 		settings.KeyJavDefaultParentID:     strings.TrimSpace(in.DefaultParentID),
 		settings.KeyJavDefaultPath:         strings.TrimSpace(in.DefaultDisplayPath),

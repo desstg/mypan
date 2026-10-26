@@ -91,13 +91,18 @@ func (s *Service) Search(ctx context.Context, p SearchParams) (SearchResult, err
 		return s.searchLocal(ctx, keyword, p, err)
 	}
 
-	// 上游只认这几个 movie_type，其余按 all（源码同款白名单）。
-	upstreamType := p.Type
-	switch upstreamType {
-	case "actor", "series", "maker", "director", "lists":
-	default:
-		upstreamType = "all"
-	}
+	// 这里**不再**把搜索类型当成 movie_type 传给上游。
+	//
+	// 改造前那一段是白名单 `case "actor","series","maker","director","lists"`，
+	// 然后把命中的值塞进 `movie_type` —— 而 movie_type 是**影片的内容分类**
+	// （all / 0 有码 / 1 无码 / 2 欧美 / 3 FC2）。上游对不认识的值静默按 all 处理，
+	// 于是搜索框六个档位出来的是同一批影片（实测 2026-10-26，`movie_type=actor`
+	// 与 `movie_type=all` 逐条相同）。
+	//
+	// 现在：内容分类固定 all（本地按 p.Filter 再过一遍），而「按实体搜」
+	// （演员 / 系列 / 片商 / 导演 / 清单）走的是另一条路 —— 见 entities.go 的
+	// Service.SearchEntities。走到这里的 Type 只剩 all 与 number。
+	const upstreamType = "all"
 
 	// 从「最新优先」拉，还是按相关度拉：上映日期倒序时用 from_recent，
 	// 其余维持官网顺序。与源码一致。

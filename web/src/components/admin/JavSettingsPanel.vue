@@ -94,6 +94,7 @@ type JavDraft = {
   token: string;
   api_base: string;
   javbus_base: string;
+  site_base: string;
   use_proxy: boolean;
   min_interval_ms: number;
   request_gap_ms: number;
@@ -130,6 +131,7 @@ const draft = reactive<JavDraft>({
   token: "",
   api_base: "",
   javbus_base: "",
+  site_base: "",
   use_proxy: true,
   min_interval_ms: 500,
   request_gap_ms: 1000,
@@ -166,6 +168,7 @@ function snapshot() {
     username: draft.username,
     api_base: draft.api_base,
     javbus_base: draft.javbus_base,
+    site_base: draft.site_base,
     use_proxy: draft.use_proxy,
     min_interval_ms: draft.min_interval_ms,
     request_gap_ms: draft.request_gap_ms,
@@ -209,6 +212,7 @@ function applyConfig(cfg: JavConfig) {
   draft.token = "";
   draft.api_base = cfg.api_base;
   draft.javbus_base = cfg.javbus_base;
+  draft.site_base = cfg.site_base ?? "";
   draft.use_proxy = cfg.use_proxy;
   draft.min_interval_ms = cfg.min_interval_ms;
   draft.request_gap_ms = cfg.request_gap_ms;
@@ -583,6 +587,18 @@ onMounted(async () => {
             </template>
             <template #control>
               <AppInput v-model="draft.javbus_base" placeholder="https://www.javbus.com" style="width: 260px" />
+            </template>
+            </SettingsRow>
+
+          <SettingsRow>
+            <template #info>
+              <SettingsRowLabel
+                label="官网域名"
+                help-text="抓官网页面用的地址（与上面的 API 节点是两个域名）。「清单里的影片」和「演员/系列/片商/导演的作品」这两档没有对应的 API 接口，只能抓官网 HTML。默认的 javdb580.com 是镜像：javdb.com 本身在境内直连不通、走代理又会被官网按地区封掉。空着就用默认。"
+              />
+            </template>
+            <template #control>
+              <AppInput v-model="draft.site_base" placeholder="https://javdb580.com" style="width: 260px" />
             </template>
             </SettingsRow>
 

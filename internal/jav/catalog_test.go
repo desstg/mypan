@@ -55,6 +55,14 @@ type stubJavdb struct {
 	listTotal     int
 	listPageErr   error
 	listPageCalls []string
+	// entityResult / entityErr / entityCalls 给「按实体搜」用。
+	// entityCalls 记的是**上游取值**（actor / list …），用来验界面 `lists` 翻成了 `list`。
+	entityResult []javdb.Entity
+	entityErr    error
+	entityCalls  []string
+	// entityPageCalls 记 "kind/id"，给「实体的作品页」那一档用。
+	entityPageCalls []string
+	entityPageErr   error
 	// lastUsed 给「后台避让」用：默认零值 → 当作一直闲着。
 	lastUsed time.Time
 	// magnetsByID / magnetByIDErr / magnetCalls 给磁链那条路用（JAVDB 主源）。
@@ -156,6 +164,29 @@ func (s *stubJavdb) ListPage(_ context.Context, listID string, page int) ([]javd
 		return nil, 0, s.listPageErr
 	}
 	// 分页模式：按 listPages 逐页给，翻到底给空页（官网就是这么收尾的）。
+	if len(s.listPages) > 0 {
+		if page > len(s.listPages) {
+			return nil, s.listTotal, nil
+		}
+		return s.listPages[page-1], s.listTotal, nil
+	}
+	return s.listPage, s.listTotal, nil
+}
+
+// SearchEntities 按实体搜。记录 kind 好验「界面取值有没有翻成上游取值」
+// （清单那对单复数是这一层最容易漏的地方）。
+func (s *stubJavdb) SearchEntities(_ context.Context, _ string, kind string) ([]javdb.Entity, error) {
+	s.entityCalls = append(s.entityCalls, kind)
+	return s.entityResult, s.entityErr
+}
+
+// EntityPage 抓官网实体作品页。与 ListPage 同一套：记的是 "kind/id"，
+// 让用例能验「清单走的是 lists、演员走的是 actors」。
+func (s *stubJavdb) EntityPage(_ context.Context, kind, id string, page int) ([]javdb.Movie, int, error) {
+	s.entityPageCalls = append(s.entityPageCalls, kind+"/"+id)
+	if s.entityPageErr != nil {
+		return nil, 0, s.entityPageErr
+	}
 	if len(s.listPages) > 0 {
 		if page > len(s.listPages) {
 			return nil, s.listTotal, nil

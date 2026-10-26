@@ -196,6 +196,30 @@ function clearJavSearch() {
   javKeyword.value = "";
 }
 
+/**
+ * 搜索框的占位文字跟着类型下拉走。
+ *
+ * 按「清单」搜和按「番号」搜要输的东西完全不是一回事（前者是清单名，后者是
+ * SSIS-001 这种码）—— 一个固定的「搜索番号 / 演员 / 片商…」会让人在清单档里
+ * 输番号，然后看着空结果以为清单功能坏了。
+ */
+const javSearchPlaceholder = computed(() => {
+  switch (javType.value) {
+    case "number":
+      return "输入番号，如 SSIS-001";
+    case "series":
+      return "输入系列名，如 Kissing Sis";
+    case "maker":
+      return "输入片商名，如 S1";
+    case "director":
+      return "输入导演名";
+    case "lists":
+      return "输入清单名，如 驾驶双马尾";
+    default:
+      return "搜索番号 / 演员 / 片商…";
+  }
+});
+
 /** 已订阅的番号集合，卡片用它把「订阅」换成「已订阅」。 */
 const javSubscribedKeys = computed(() => {
   const set = new Set<string>();
@@ -371,14 +395,14 @@ function searchJavActor(name: string) {
 }
 
 /**
- * 从详情里点「关联清单」→ 按清单名搜片，落在影库那一档。
+ * 从详情里点「关联清单」→ 直接打开那个清单的作品。
  *
- * 与 searchJavActor 是同一套：搜索类型选「清单」、关键词填清单名，
- * 上游的 /v2/search?type=lists 就是「按清单名找片子」。
+ * 与 searchJavActor 不是同一套：**不走搜索**。清单成员只能靠抓官网清单页拿
+ * （`/lists/{id}` 那套 HTML 抓取），而上游 `type=lists` 是拿清单名去模糊匹配
+ * **影片标题** —— 搜「驾驶双马尾」会返回标题里含「双马尾」的无关片子。
  *
- * 源码那边点清单是跳 /list/<id>（它有个清单详情页，影片靠抓官网 HTML 拿）；
- * LitePan 没有那条链，走搜索这条路结果一样，而且复用现成的影库页 ——
- * 卡片、筛选、翻页、订阅按钮全都是现成的。
+ * 所以这里把清单 id 交给影库页，它按 id 去抓官网清单页（见 JavLibraryPanel 的
+ * activeEntity）。这样点「关联清单」进去看到的就是那份清单真实的内容。
  */
 function searchJavList(list: { id: string; name: string }) {
   if (!list.id) return;
@@ -549,7 +573,7 @@ onMounted(async () => {
             <div class="tg-tabbar-tools__search">
               <AppInput
                 v-model="javKeywordInput"
-                placeholder="搜索番号 / 演员 / 片商…"
+                :placeholder="javSearchPlaceholder"
                 @input="onJavSearchInput"
                 @keyup.enter="submitJavSearch"
               />

@@ -130,6 +130,84 @@ type RelatedList struct {
 	MoviesCount int    `json:"movies_count"`
 }
 
+// 实体类型：搜索框那几个「按谁搜」的档位，对应上游 `/v2/search?type=`。
+//
+// ⚠️ 清单在上游是**单数** `list`（复数 `lists` 是「拿清单名去模糊匹配影片标题」，
+// 返回 data.movies，见 api.go 里那段说明）。这里的常量按上游的真实取值写，
+// 界面上那个下拉的 `lists` 在服务层翻成 `list`。
+const (
+	EntityActor    = "actor"
+	EntitySeries   = "series"
+	EntityMaker    = "maker"
+	EntityDirector = "director"
+	EntityList     = "list"
+)
+
+// Entity 是 `/v2/search?type=actor|series|maker|director|list` 返回的一项。
+//
+// 四种「作品归属」（演员 / 系列 / 片商 / 导演）形状一致：id + name + videos_count，
+// 演员多一个头像与性别。清单是另一套：id + name + movies_count + privacy。
+// 用一个结构装五种，靠 VideosCount / MoviesCount 两个字段各归各位 ——
+// 拆成五个几乎相同的类型只会让调用方到处写 switch。
+type Entity struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// NameZHT 是繁体名（只有演员有）。
+	NameZHT string `json:"name_zht"`
+	// OtherName 是别名，逗号分隔（只有演员有）。
+	OtherName string `json:"other_name"`
+	// AvatarURL 只有演员有；图片是 XOR 混淆的，要过图片代理。
+	AvatarURL string `json:"avatar_url"`
+	// Gender 是上游性别码（1 = 男优），只有演员有。
+	Gender FlexInt `json:"gender"`
+	// VideosCount 是「这个人 / 这个系列 / 这家片商 / 这位导演有多少部作品」。
+	VideosCount FlexInt `json:"videos_count"`
+	// MoviesCount 是清单里的影片数（清单用的是另一个字段名）。
+	MoviesCount FlexInt `json:"movies_count"`
+	// Privacy 是清单的可见性（open / private …）。
+	Privacy string `json:"privacy"`
+	// IsDefault 是上游那两个「默认收藏」清单（看过 / 想看）的标记。
+	IsDefault bool `json:"is_default"`
+}
+
+// Count 返回这个实体的作品数。清单读 movies_count，其余读 videos_count。
+//
+// 两个字段**不会同时有值**：上游按实体类型给不同的键。取错就是恒 0，
+// 卡片上「共 0 部」而点进去有几十部 —— 所以归一在这里做一次。
+func (e Entity) Count() int {
+	if n := e.MoviesCount.Int(); n > 0 {
+		return n
+	}
+	return e.VideosCount.Int()
+}
+
+// EntitiesResp 是实体搜索的响应。上游按 type 给不同的键，五个都声明出来。
+type EntitiesResp struct {
+	Actors    []Entity `json:"actors"`
+	Series    []Entity `json:"series"`
+	Makers    []Entity `json:"makers"`
+	Directors []Entity `json:"directors"`
+	Lists     []Entity `json:"lists"`
+}
+
+// Pick 按实体类型取对应的那一份。
+func (r EntitiesResp) Pick(kind string) []Entity {
+	switch kind {
+	case EntityActor:
+		return r.Actors
+	case EntitySeries:
+		return r.Series
+	case EntityMaker:
+		return r.Makers
+	case EntityDirector:
+		return r.Directors
+	case EntityList:
+		return r.Lists
+	default:
+		return nil
+	}
+}
+
 // RelatedResp 是 /v1/lists/related 的响应。
 //
 // ⚠️ 解的是 **lists** 而不是 movies：这个端点返回的是**清单**（谁整理了一份

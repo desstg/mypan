@@ -775,9 +775,11 @@ func defaultSpecs() []Spec {
 		{Key: KeyJavTranslateEnabled, Type: TypeBool, Default: "false", Hidden: true},
 		{Key: KeyJavTranslateFields, Type: TypeString, Default: `["summary"]`, Hidden: true},
 		{Key: KeyJavTranslatePrompt, Type: TypeString, Default: "", Hidden: true},
-		// 官网地址。上游给的清单分享链接里指向的是 javdb580.com 这类镜像，但镜像
-		// 不稳（实测同一条链接一会儿 200 一会儿 EOF），所以做成可改的配置。
-		{Key: KeyJavSiteBase, Type: TypeString, Default: "https://javdb.com", Hidden: true},
+		// 官网地址。上游给的清单分享链接里指向的就是 javdb580.com 这类镜像，而且
+		// **javdb.com 本身在境内根本连不上**（实测直连 code 000、走代理是被地区封锁页
+		// 顶上）。默认因此用镜像域名：留 javdb.com 会让「清单里的影片」「演员/系列/
+		// 片商/导演的作品」两档永远是空的，而界面上看不出任何异常。
+		{Key: KeyJavSiteBase, Type: TypeString, Default: "https://javdb580.com", Hidden: true},
 		// 默认开代理：JAVDB 与 JAVBUS 都是境外站，国内直连基本不通。
 		// 这是与网盘搜索相反的一侧 —— 那个站是国内的，默认 false。
 		{Key: KeyJavUseProxy, Type: TypeBool, Default: "true", Hidden: true},

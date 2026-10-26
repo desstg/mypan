@@ -17,6 +17,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -53,7 +54,12 @@ var device = map[string]string{
 }
 
 // defaultSiteBase 是 JAVDB **官网**的默认地址（与 API 域名不是一回事）。
-const defaultSiteBase = "https://javdb.com"
+//
+// 用镜像而不是 javdb.com：后者在境内**直连不通**（实测 code 000）、走代理又被
+// 地区封锁页顶上。设置里那条同名字段的默认值要与它保持一致（见
+// settings/registry.go 的 KeyJavSiteBase），否则「新库是镜像、重置后又变回
+// javdb.com」，而症状只是「清单和演员作品永远是空的」。
+const defaultSiteBase = "https://javdb580.com"
 
 // Options 构造客户端。
 type Options struct {
@@ -72,9 +78,13 @@ type Options struct {
 
 // Client 是 JAVDB 客户端。可安全并发使用。
 type Client struct {
-	apiBase     string
-	siteBase    string
-	http        *http.Client
+	apiBase  string
+	siteBase string
+	http     *http.Client
+	direct   *http.Client
+	// hasProxy 记「用户显式配了代理」。官网那条路要靠它决定**先用直连还是先用代理**
+	// —— 官网是按 IP 地区封人的，代理出口在国外时直连反而才是通的那条。
+	hasProxy    bool
 	minInterval time.Duration
 	retries     int
 
@@ -126,6 +136,18 @@ func New(opts Options) (*Client, error) {
 		siteBase = defaultSiteBase
 	}
 
+	// 官网 HTML 还有一个**直连**通道，见 fetchListPage 的说明：官网按 IP 的地区
+	// 封人 —— 走代理反而必被拒（实测代理出口在国外，页面只有一句「由于版权限制…」）。
+	//
+	// API 那条**主通道仍是代理**（见 do 的说明），但代理在网络层抽风时会退到这条直连
+	// 重打一次 —— 这是 2026-10-26 补的：那个代理会间歇性 5 秒超时 / EOF，
+	// 而同一时刻直连三个节点都是 0.7 秒 200。
+	directTransport := &http.Transport{
+		MaxIdleConns:        8,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     30 * time.Second,
+	}
+
 	return &Client{
 		apiBase:  base,
 		siteBase: siteBase,
@@ -142,8 +164,17 @@ func New(opts Options) (*Client, error) {
 				return http.ErrUseLastResponse
 			},
 		},
+		direct: &http.Client{
+			Timeout:   timeout,
+			Transport: directTransport,
+			// 同一条理由：302 → /login 要被看见，不能被跟成一张登录页。
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		minInterval: opts.MinInterval,
 		retries:     max(opts.Retries, 1),
+		hasProxy:    strings.TrimSpace(opts.ProxyURL) != "",
 		token:       strings.TrimSpace(opts.Token),
 		now:         time.Now,
 	}, nil
@@ -255,8 +286,43 @@ func (c *Client) applyHeaders(req *http.Request, extra map[string]string) {
 	}
 }
 
+// do 发一次 API 请求：先走主通道（配了代理就走代理），**代理在网络层失败时换直连再打一次**。
+//
+// 为什么要这一条（2026-10-26 实测）：用户配的代理 `192.168.31.9:7890` 会间歇性
+// 抽风 —— 同一时刻 curl 直连三个 API 节点都是 0.7 秒 200，走那个代理却 5 秒超时
+// 或者回 EOF。而 request() 的重试只会**在同一个通道上**退避重打，于是网络一抖就是
+// 3 × 5 秒，搜索请求看着像是卡死；搜索这一档还算轻微的（它有几档回落到本地库），
+// 表现是「在线站点不可用」+ 结果变少。
+//
+// 只在**网络错误**上换路（连接被重置、超时、EOF、代理自己报错）。HTTP 状态码错误
+// （403 / 404 / 429）不换：那是上游明确表态，换个出口只会多打一次外站。
+// 没配代理时不换 —— 那时主通道本来就是直连，换过去是同一个结果。
 func (c *Client) do(req *http.Request) (json.RawMessage, int, error) {
-	resp, err := c.http.Do(req)
+	data, status, err := c.doOnce(c.http, req)
+	if err == nil || c.direct == nil || !c.hasProxy || isStatusError(err) {
+		return data, status, err
+	}
+	// 重放请求：body 是空的，但 Body 已经被第一次 Do 消费掉了，
+	// 直接拿原对象再 Do 会报 "http: ContentLength=0 with Body length ..."。
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		if body, berr := req.GetBody(); berr == nil {
+			retry.Body = body
+		}
+	}
+	return c.doOnce(c.direct, retry)
+}
+
+// isStatusError 报告这个错误是不是「上游明确回了一个非 200 的状态码」。
+// 与网络层错误相对 —— 前者换出口没意义，后者换出口可能就是通的。
+func isStatusError(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae)
+}
+
+// doOnce 用指定的那个 http.Client 打一次并把响应读成 JSON。
+func (c *Client) doOnce(hc *http.Client, req *http.Request) (json.RawMessage, int, error) {
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("网络错误: %w", err)
 	}
