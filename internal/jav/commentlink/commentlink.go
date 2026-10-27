@@ -17,6 +17,7 @@ import (
 	"html"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -53,7 +54,35 @@ type Link struct {
 //
 // 结尾那个字符类（排除空白与尖括号引号）是关键：评论里链接后面常常直接跟中文
 // 或标点（「…magnet:?xt=urn:btih:abc，这个我下过」），不排掉会整段吞进来。
+//
+// ⚠️ 它对 ed2k 有个已知的坏处：ed2k 的**文件名字段是允许空格的**，而这里遇到
+// 第一个空白就收尾。所以完整链接由 reEd2kWhole 先认一遍，这一条只负责
+// 磁链和残缺的 ed2k（见 findLinks）。
 var reLink = regexp.MustCompile(`(?i)(?:magnet:\?[^\s<>"']+|ed2k://[^\s<>"']+)`)
+
+// reEd2kWhole 认**结构完整**的 ed2k 链接，文件名里允许空格。
+//
+// 为什么需要它（2026-10-26 用户报的 JUR-890）：ed2k 的形状是
+// `|file|<名字>|<字节数>|<hash>|/`，而分享者写的名字几乎都是
+// 「www.98T.la@JUR-890 七海蒂娜 LTX_restored.mp4」这样带空格的。
+// reLink 一刀切在第一个空格上，于是
+//
+//	ed2k://|file|www.98T.la@JUR-890 七海蒂娜 LTX_restored.mp4|7708397628|A3A0…|/
+//
+// 被砍成 `ed2k://|file|www.98T.la@JUR-890` —— **推给网盘是一颗不存在的文件**，
+// 而界面上看不出任何异常（体积空、名字是后半截，看着就像分享者乱写的）。
+//
+// 本地库实测（2026-10-26，3562 条带 ed2k 的评论）：658 条链接的文件名带空格。
+// 不是个别现象。
+//
+// 形状卡得比较死（`|file|` + 名字 + `|字节数|` + `|32 位 hash|` + 最多三个尾字段 + `|/`），
+// 这样它只命中**能直接拿去用**的那种；残缺的（`ed2k://|file|` 后面直接跟中文、
+// 或者 hash 不是 32 位十六进制）仍然落到 reLink 那一套，行为与以前一致。
+//
+// 尾字段那个 `[^|/\r\n]+` 排掉 `/` 是必须的：同一行里两条 ed2k 之间夹着中文时
+// （`…|hash|/ 后面还有 ed2k://|file|…`），不去掉 `/` 的话尾字段会把
+// 「/ 后面还有 ed2k://」整段吃进去，把两条链接并成一条。
+var reEd2kWhole = regexp.MustCompile(`(?i)ed2k://\|file\|[^|\r\n]{1,400}\|\d+\|[0-9a-f]{32}\|(?:[^|/\r\n]+\|){0,3}/`)
 
 // reDn 取磁链的 dn= 参数，它就是种子名。
 var reDn = regexp.MustCompile(`[?&]dn=([^&\s]+)`)
@@ -62,6 +91,57 @@ var reDn = regexp.MustCompile(`[?&]dn=([^&\s]+)`)
 //
 // 按 rune 截而不是按字节：正文基本是中文，按字节截会把最后一个字劈成乱码。
 const nameFromCommentLimit = 80
+
+// findLinks 按出现顺序返回正文里的所有链接。
+//
+// 先用 reEd2kWhole 认完整的 ed2k（文件名可以带空格），再用 reLink 认磁链与
+// **残缺的** ed2k；与完整 ed2k 重叠的那些丢掉 —— 否则一条带空格的 ed2k 会被
+// 数成两条（完整的一条 + 被空格截断的半条）。
+//
+// 顺序按在正文里的起始位置排（两个正则各自是有序的，合并后要重排）。
+func findLinks(content string) []string {
+	type hit struct {
+		start, end int
+		uri        string
+	}
+	var hits []hit
+
+	wholeSpans := reEd2kWhole.FindAllStringIndex(content, -1)
+	for _, m := range wholeSpans {
+		hits = append(hits, hit{m[0], m[1], content[m[0]:m[1]]})
+	}
+
+	for _, m := range reLink.FindAllStringIndex(content, -1) {
+		overlapped := false
+		for _, w := range wholeSpans {
+			if m[0] < w[1] && m[1] > w[0] {
+				overlapped = true
+				break
+			}
+		}
+		if overlapped {
+			continue
+		}
+		hits = append(hits, hit{m[0], m[1], content[m[0]:m[1]]})
+	}
+
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].start < hits[j].start })
+	out := make([]string, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.uri)
+	}
+	return out
+}
+
+// stripLinks 去掉正文里的链接，只留下人写的那部分。
+//
+// 与 findLinks 同一套判据：先按完整 ed2k 抹，再抹剩下的。只抹 reLink 的话，
+// 带空格的 ed2k 会在正文里留下一截尾巴（「七海蒂娜 LTX_restored.mp4|7708…」），
+// 那截还会被当成「原评论」展示出来。
+func stripLinks(content string) string {
+	content = reEd2kWhole.ReplaceAllString(content, " ")
+	return reLink.ReplaceAllString(content, " ")
+}
 
 // Extract 从一条评论正文里提取所有链接。
 //
@@ -84,7 +164,7 @@ func Extract(content string) []Link {
 	// `&quot;` / `&#39;` 变成真正的引号、在正确的位置把链接切开。
 	content = html.UnescapeString(content)
 
-	found := reLink.FindAllString(content, -1)
+	found := findLinks(content)
 	if len(found) == 0 {
 		return nil
 	}
@@ -92,7 +172,7 @@ func Extract(content string) []Link {
 	// 去掉链接之后剩下的正文：体积从它里面认，也是展示那一行「原评论」的内容。
 	// 用 Fields 折叠空白 —— 评论里换行、制表符、连续空格都很常见，
 	// 直接展示会把卡片撑得忽高忽低。
-	text := strings.Join(strings.Fields(reLink.ReplaceAllString(content, " ")), " ")
+	text := strings.Join(strings.Fields(stripLinks(content)), " ")
 
 	// 正文里写的体积：一条评论只认一次，这条评论里的每颗链接共用它（源码同此：
 	// 评论里写的「5GB」是描述这批链接的，不是某一条独有的）。
@@ -203,10 +283,14 @@ var reBtihJunk = regexp.MustCompile(`(?i)(urn:btih:[0-9a-f]{40})[^&]*`)
 
 // normalizeURI 把链接里粘上去的杂字清掉。
 //
-// 只做两件**只会删尾随垃圾**的事，不改动链接本身的任何合法部分：
+// 只做**不让链接变得更不像话**的事：
 //
 //   - 磁链：40 位 hash 后面若跟了 `&` 以外的东西（漏写分隔符的说明文字），砍掉；
-//   - ed2k：规范形式以 `|/` 收尾，那之后的一切都不是链接的一部分。
+//   - ed2k：规范形式以 `|/` 收尾，那之后的一切都不是链接的一部分；
+//   - ed2k 少写了收尾的 `/`（只有 `…|hash|`、甚至 `…|hash`）时补回 `|/` ——
+//     这一条是**补**不是删，但它补的是规范形式本身：网盘收到一条没有收尾的
+//     ed2k 会照单收下再一直失败，界面上看不出原因（实测评论里有这种写法）。
+//     只在 hash 确实是 32 位十六进制时才补，半截链接不猜。
 //
 // 注意：JAVBUS 抓来的磁链（详情页「磁力链接」tab）本来就是干净的
 // （实测 6000 条零问题），这里治的是**评论里手贴的**那些。
@@ -219,9 +303,19 @@ func normalizeURI(uri string) string {
 		if i := strings.Index(uri, "|/"); i >= 0 {
 			return uri[:i+2]
 		}
+		if ed2kHashOnlyAtEnd.MatchString(uri) {
+			return strings.TrimSuffix(uri, "|") + "|/"
+		}
 	}
 	return uri
 }
+
+// ed2kHashOnlyAtEnd 命中「hash 齐全、但没写收尾 `/`」的 ed2k。
+//
+// 四种形态，实际评论里都出现过：`…|hash`、`…|hash|`、`…|hash|h=AICH`、
+// `…|hash|h=AICH|`（后两种是带 AICH 但漏了斜杠）。前面必须已经是
+// `ed2k://|file|名字|字节数`，否则补了也不是合法链接。
+var ed2kHashOnlyAtEnd = regexp.MustCompile(`(?i)^ed2k://\|file\|[^|\r\n]{1,400}\|\d+\|[0-9a-f]{32}\|?(?:h=[a-z2-7]+\|?)?$`)
 
 // kindOf 认链接的种类。前缀已经由正则保证，这里是纯分类。
 func kindOf(uri string) string {
@@ -232,6 +326,10 @@ func kindOf(uri string) string {
 }
 
 // nameOf 取链接的展示名。
+//
+// 两条链接形态各有自己的「自带名字」：磁链是 `dn=` 参数，ed2k 是第 3 个字段
+// （文件名）。两者都优先于评论正文 —— 正文常常只有一句「LTX」或者「无码破解」，
+// 那不是这部片的名字，而是分享者的评语。
 func nameOf(uri, text string) string {
 	if m := reDn.FindStringSubmatch(uri); m != nil {
 		// 用 PathUnescape 而不是 QueryUnescape：后者会把种子名里的 `+`
@@ -245,12 +343,15 @@ func nameOf(uri, text string) string {
 			return name
 		}
 	}
-	if name := truncateRunes(text, nameFromCommentLimit); name != "" {
+	// ed2k 的文件名就写在链接里（`ed2k://|file|<名字>|…`），与磁链的 dn= 同一个地位。
+	//
+	// 以前是「正文优先、正文为空才用它」，于是
+	// 「LTX ed2k://|file|www.98T.la@JUR-890 七海蒂娜 LTX_restored.mp4|…」这条
+	// 展示成「LTX」—— 一列名字全是评语，看不出是哪部片。
+	if name := ed2kFileName(uri); name != "" {
 		return name
 	}
-	// 正文被链接占满、一个字都不剩时：ed2k 的文件名就在链接里，用它。
-	// （实测有分享者整条评论只贴一个链接，那时以前会把**整条 ed2k 当名字**摆出来。）
-	if name := ed2kFileName(uri); name != "" {
+	if name := truncateRunes(text, nameFromCommentLimit); name != "" {
 		return name
 	}
 	// 最后才退成链接本身，总比空着强。

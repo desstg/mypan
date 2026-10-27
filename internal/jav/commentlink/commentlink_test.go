@@ -292,6 +292,107 @@ func TestExtractNoLinks(t *testing.T) {
 	}
 }
 
+// **ed2k 的文件名里带空格时不能被截断。**
+//
+// 实测（2026-10-26 用户报的 JUR-890）：分享者写的名字是
+// 「www.98T.la@JUR-890 七海蒂娜 LTX_restored.mp4」，而 reLink 遇到第一个空白
+// 就收尾，于是推送记录里存的是 `ed2k://|file|www.98T.la@JUR-890` ——
+// 一颗不存在的文件，网盘照单收下、然后一直失败，界面上看不出哪里错了。
+// 本地库 4021 条 ed2k 里有 659 条属于这一族。
+func TestExtractEd2kKeepsSpacesInFileName(t *testing.T) {
+	content := "LTX ed2k://|file|www.98T.la@JUR-890 七海蒂娜 LTX_restored.mp4|7708397628|A3A0C10669347894F9C0E94217835241|/"
+	got := Extract(content)
+	if len(got) != 1 {
+		t.Fatalf("应当提取出 1 条，got %d: %+v", len(got), got)
+	}
+	want := "ed2k://|file|www.98T.la@JUR-890 七海蒂娜 LTX_restored.mp4|7708397628|A3A0C10669347894F9C0E94217835241|/"
+	if got[0].URI != want {
+		t.Errorf("带空格的 ed2k 应当整条保留\n  got  %q\n  want %q", got[0].URI, want)
+	}
+	if strings.Contains(got[0].Name, "|") {
+		t.Errorf("名字不该是链接的残片，got %q", got[0].Name)
+	}
+	if !got[0].HasSize || got[0].SizeBytes != 7708397628 {
+		t.Errorf("体积应当取自第 4 个字段，got %d (has=%v)", got[0].SizeBytes, got[0].HasSize)
+	}
+	// 正文里不该留下链接的尾巴（那截会被当成「原评论」展示出来）。
+	if strings.Contains(got[0].Comment, "restored.mp4") {
+		t.Errorf("原评论里应当已经把整条链接抹掉，got %q", got[0].Comment)
+	}
+	if !strings.HasPrefix(got[0].Comment, "LTX") {
+		t.Errorf("链接前的人写正文要留着，got %q", got[0].Comment)
+	}
+}
+
+// 一条评论里两颗都带空格的 ed2k：两条都要出来，且不能串成一条。
+func TestExtractTwoSpacedEd2kLinks(t *testing.T) {
+	content := "A ed2k://|file|www.98T.la@AAA-001 第一部.mp4|1000000000|" +
+		strings.Repeat("a", 32) + "|/ 还有 B ed2k://|file|www.98T.la@BBB-002 第二部.mp4|2000000000|" +
+		strings.Repeat("b", 32) + "|/"
+	got := Extract(content)
+	if len(got) != 2 {
+		t.Fatalf("应当提取出 2 条，got %d: %+v", len(got), got)
+	}
+	if !strings.HasSuffix(got[0].URI, strings.Repeat("a", 32)+"|/") {
+		t.Errorf("第一条不该把后面那条并进来，got %q", got[0].URI)
+	}
+	if !strings.HasSuffix(got[1].URI, strings.Repeat("b", 32)+"|/") {
+		t.Errorf("第二条不完整，got %q", got[1].URI)
+	}
+	if got[1].SizeBytes != 2000000000 {
+		t.Errorf("第二条的体积 = %d", got[1].SizeBytes)
+	}
+}
+
+// 带 AICH 尾字段（`h=…`）且名字带空格：整条都要保留。实际尾字段最多三个。
+func TestExtractSpacedEd2kKeepsAICH(t *testing.T) {
+	uri := "ed2k://|file|SNIS-941 1080p restored.mp4|7687591721|" +
+		strings.Repeat("A", 32) + "|h=EMQV3H6E6PFMTQOHUZVNGI7NP67YV5SE|/"
+	if got := Extract(uri); len(got) != 1 || got[0].URI != uri {
+		t.Fatalf("带 AICH 的带空格 ed2k 应当原样保留，got %+v", got)
+	}
+}
+
+// 残缺的 ed2k（没有 hash、或 `|file|` 后面直接跟中文）仍走老路：
+// 不能因为放宽了完整形态就把它们也当完整链接。
+func TestExtractBrokenEd2kStillYieldsSomething(t *testing.T) {
+	got := Extract("ed2k://|file|MIMK-034（佐山愛,陽木かれん）孕ませ！！性春")
+	if len(got) != 1 {
+		t.Fatalf("残缺的 ed2k 也该出一张卡片（让用户看得见），got %d", len(got))
+	}
+	if got[0].Kind != KindEd2k {
+		t.Errorf("种类应当是 ed2k，got %q", got[0].Kind)
+	}
+}
+
+// 少写收尾 `/` 的 ed2k 要补回规范形式 —— hash 齐全就是不完整的链接，
+// 原样推给网盘只会「收下然后一直失败」。
+func TestExtractCompletesEd2kMissingTerminator(t *testing.T) {
+	body := "|file|www.98T.la@start-048_000^WM.mp4|7845305131|D063016E89C3E499AFE2617CDAE1E243"
+	aich := "|h=YUYB7SM5K6PKTZIU5A5DCCQYZ3PAUHVN"
+	for _, tail := range []string{"", "|", aich, aich + "|"} {
+		got := Extract("ed2k://" + body + tail)
+		if len(got) != 1 {
+			t.Fatalf("应当提取出 1 条（tail=%q），got %d", tail, len(got))
+		}
+		want := "ed2k://" + body + strings.TrimSuffix(tail, "|") + "|/"
+		if got[0].URI != want {
+			t.Errorf("tail=%q 应当补成规范形式\n  got  %q\n  want %q", tail, got[0].URI, want)
+		}
+		if !got[0].HasSize || got[0].SizeBytes != 7845305131 {
+			t.Errorf("补完之后体积还该认得出，got %d", got[0].SizeBytes)
+		}
+	}
+}
+
+// 半截链接不猜：hash 不完整就原样留着，别补出一个看起来合法的链接。
+func TestExtractDoesNotCompleteIncompleteEd2k(t *testing.T) {
+	uri := "ed2k://|file|a.mp4|7845305131|D063016E89C3E499AFE2617CDA"
+	if got := Extract(uri); len(got) != 1 || got[0].URI != uri {
+		t.Errorf("hash 不全时应当原样保留，got %+v", got)
+	}
+}
+
 // 体积认不出来时 HasSize=false，不能当成 0 ——「没有大小」和「大小是 0」
 // 在排序与展示上都是两件事（quality.ParseSizeBytes 的注释里有同样的告诫）。
 func TestExtractSizeAbsent(t *testing.T) {
