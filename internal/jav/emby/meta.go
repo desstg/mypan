@@ -79,14 +79,22 @@ type MovieMeta struct {
 	TrailerURL string    `json:"trailer_url"` // <trailer>
 	AddedAt    time.Time `json:"added_at"`
 
-	// —— 三个标记 ——
+	// —— 四个标记 ——
 	//
-	// 它们在 nfo 里**没有独立元素**，只以合成后的 `<genre>`（4K / 破解）或
-	// `<fileinfo>` 的形式存在。所以编辑表单必须把它们做成可见字段：否则
+	// 它们在 nfo 里**没有独立元素**，只以合成后的 `<genre>`（4K / 破解 / LTX破解）
+	// 或 `<fileinfo>` 的形式存在。所以编辑表单必须把它们做成可见字段：否则
 	// 「为什么我的标签里有个 4K」「保存后破解标记会不会掉」永远说不清。
 	FourK       bool `json:"four_k"`
 	Uncensored  bool `json:"uncensored"`
 	HasSubtitle bool `json:"has_subtitle"`
+	// LTX 表示这一部是「LTX 修复版」（nfo 的 `<genre>LTX破解</genre>`）。
+	//
+	// **只从侧车的 `resource.ltx` 来**，不从文件名反推（见 emby.SidecarResource）。
+	// 它与 Uncensored 是两个独立事实：LTX 版几乎都是破解，但「是不是破解」
+	// 由资源名的 tag 判定、由 `quality.uncensored` 记录，两者可以不一致
+	// （侧车说破解、名字里没有标记的情况真实存在）。所以这里照样单独一个 bool，
+	// 不写成 `LTX ⟹ Uncensored`。
+	LTX bool `json:"ltx"`
 
 	// SubtitleExt / SubtitleLang 是**实际落盘那份外挂字幕**的属性，
 	// 只用来写 <fileinfo><streamdetails><subtitle> 的 codec/language。
@@ -229,6 +237,9 @@ func MovieMetaFromSidecar(doc *SidecarDoc, opts NFOOptions) *MovieMeta {
 		AddedAt:     opts.DateAdded,
 		FourK:       doc.Quality.FourK,
 		Uncensored:  doc.Quality.Uncensored,
+		// LTX 只认侧车那一刻记下的 `resource.ltx`，不从文件名反推 ——
+		// 理由见 SidecarResource 的说明（nfo 会在此后被反复重建）。
+		LTX: doc.Resource.LTX,
 		// 中字：侧车有两个来源（影片级的 has_cnsub、资源名里的中字），任一为真就算有。
 		HasSubtitle: doc.HasCNSub || doc.Quality.Subtitle,
 		// 外挂字幕的真实属性：有就按它写 <subtitle> 的 codec/language，
@@ -402,6 +413,7 @@ func BuildNFOFromMeta(meta *MovieMeta) ([]byte, error) {
 			letter:    meta.NumberLetter,
 			actors:    meta.Actors,
 			uncensor:  meta.Uncensored,
+			ltx:       meta.LTX,
 			series:    meta.Series,
 			maker:     meta.Maker,
 			publisher: meta.Publisher,
@@ -461,23 +473,32 @@ func releaseYear(releaseDate string) string {
 	return releaseDate[:4]
 }
 
+// ltxGenre 是 LTX 修复版在 nfo 里的词条。
+//
+// 写成常量而不是散在各处的字面量：它同时出现在 buildGenres（写）、
+// recoverTags（消去）、ParseNFO（识别）和海报墙的窄解析（识别）四处，
+// 四处各写一个字面量，改词就是改四处、漏一处就是静默多出一个标签。
+const ltxGenre = "LTX破解"
+
 // genreInput 是 buildGenres 的输入。
 //
 // 抽成一个结构体而不是八个位置参数：合成的**顺序**是这个函数的全部价值，
 // 而八个裸参数（三个 string 挨在一起）调起来太容易传错位。
 type genreInput struct {
-	tags      []string
-	fourK     bool
-	letter    string
-	actors    []string
-	uncensor  bool
+	tags     []string
+	fourK    bool
+	letter   string
+	actors   []string
+	uncensor bool
+	// ltx 是「LTX 修复版」，紧跟在 uncensor 之后输出 `LTX破解`。
+	ltx       bool
 	series    string
 	maker     string
 	publisher string
 }
 
 // buildGenres 拼 <genre> 列表，顺序与样本一致：
-// 标签 → 画质标记（4K）→ 番号字母（JUR）→ 演员 → 破解 → 系列 / 片商 / 发行。
+// 标签 → 画质标记（4K）→ 番号字母（JUR）→ 演员 → 破解 → LTX破解 → 系列 / 片商 / 发行。
 //
 // 三个带前缀的（系列 / 片商 / 发行）是**合成**出来的，侧车里只存原料 ——
 // 这样以后想改风格（比如「系列：X」改成「X 系列」）只动这一处，
@@ -510,6 +531,15 @@ func buildGenres(in genreInput) []string {
 	}
 	if in.uncensor {
 		add("破解")
+	}
+	// LTX破解 排在 破解 **之后**：它是 破解 的一个更细的旁支，紧着看才对得上；
+	// 位置也是 recoverTags / ParseNFO 消去时的判据（三处必须同一个顺序）。
+	//
+	// 与用户标签重名时由 add 的去重吃掉 —— 用户手工在 Tags 里写了「LTX破解」
+	// 不想看到两个。代价是 recoverTags 只消一次，多出来的那个会当成真标签读回
+	// （与「破解」被手工写进 Tags 的既有行为一致）。
+	if in.ltx {
+		add(ltxGenre)
 	}
 	if name := strings.TrimSpace(in.series); name != "" {
 		add("系列: " + name)

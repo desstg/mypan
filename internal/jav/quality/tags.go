@@ -1,6 +1,7 @@
 package quality
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -92,6 +93,22 @@ var (
 	reHD     = regexp.MustCompile(`(?i)` + resBoundaryStart + `(?:720p|1080p|hd|fhd|blu-?ray|bd)` + resBoundaryEnd + `|高清`)
 	reSub    = regexp.MustCompile(`(?i)字幕|中文|中字|sub(?:title)?`)
 	reEdited = regexp.MustCompile(`(?i)编辑|精剪|剪辑|edited|director'?s cut`)
+
+	// reLTX 认「LTX 修复版」的资源名标记（2026-10-27 用户需求）。
+	//
+	// LTX 是分享者在自己压好的修复版文件名上打的标（实测样本：
+	// `www.98T.la@MISM-305_LTX.mp4`、`PPPE-447.restored.LTX.mp4`、
+	// `MDHR-001_PJ-LTX.mp4`）。它**不是**一个新的质量档，也不改打分 ——
+	// 它只是回答「这一颗是不是 LTX 版」，由订阅的 ltx_mode 决定要不要优先它。
+	//
+	// 前后界用 `[^a-z0-9]` 而不是裸 `strings.Contains`：
+	//   - 前界挡住 `xltx`（某种编码名里可能连写的片段）；
+	//   - 后界挡住 `ltxy` / `ltx2` 这类别的型号名。
+	// 实测里 LTX 永远是独立的三个字母（`_LTX`、`.LTX`、`-LTX`），所以边界不会漏真样本。
+	//
+	// 判据只看**名字**（磁链的 dn= / ed2k 的文件名，commentlink 已经取好了），
+	// 不看评论正文 —— 正文里写「LTX」而链接文件名没写的，按用户 2026-10-27 的决定不算。
+	reLTX = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])ltx(?:[^a-z0-9]|$)`)
 )
 
 // 源码的关键词兜底表。正则打不中的中文/口语化标记靠它接住。
@@ -390,6 +407,81 @@ func IsUncensored(name string) bool {
 		}
 	}
 	return false
+}
+
+// IsLTX 判断资源名是不是「LTX 修复版」。
+//
+// **刻意不放进 Tags**：Tags 的每一项都参与打分、档位与角标（见 ResourceScore /
+// Resolution / ResolutionBadge），加一个字段进去会让人以为它参与排序；而它的作用
+// 恰恰是「在评分相等的候选之间额外给的偏好」，由订阅的 ltx_mode 在挑选那一步读
+// （见 internal/jav/push.go 的 pickCandidate）。
+//
+// 空串返回 false，与 IsUncensored / IsChinese 同一条取向。
+func IsLTX(name string) bool {
+	if name == "" {
+		return false
+	}
+	return reLTX.MatchString(name)
+}
+
+// reLTXDn 取磁链的 dn= 参数。
+//
+// 与 commentlink 的 reDn 同形，但**不受依赖方向约束**：commentlink 已经 import 了
+// 本包，这里反过来依赖它就会成环，所以各写一条（判定不同：这条只用来找 LTX 标注）。
+var reLTXDn = regexp.MustCompile(`(?i)[?&]dn=([^&\s]+)`)
+
+// LinkName 从链接本体里取「自带的文件名」：磁链取 dn= 参数，ed2k 取第 3 个字段。
+//
+// 取不到返回空串，**不回落**到别的东西 —— 这个问题问的是「链接上有没有标注」，
+// 不是「怎么展示它」（后者是 commentlink.nameOf 的活，它会退成评论正文）。
+//
+// 磁链的 dn 必须 percent 解码：`dn=SSIS-001%20LTX_restored.mp4` 不解码时 LTX 前面
+// 是 `%20` 的末位 `0`，边界判据会判否 —— 而 `%20` 恰恰是磁链里最常见的空格写法。
+// 解不开（罕见的坏编码）就退回原串，让后面按原样判断。
+//
+// ed2k 那个分支**不解码**：ed2k 的文件名是裸的，名字里真出现 `%41` 这种序列时
+// 解码反而是破坏（`%` 在 ed2k 名里是合法字符，不是转义引导符）。
+func LinkName(uri string) string {
+	if uri == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(uri), "ed2k://|file|") {
+		parts := strings.Split(uri, "|")
+		if len(parts) < 3 {
+			return ""
+		}
+		return strings.TrimSpace(parts[2])
+	}
+	m := reLTXDn.FindStringSubmatch(uri)
+	if m == nil {
+		return ""
+	}
+	if decoded, err := url.PathUnescape(m[1]); err == nil {
+		return strings.TrimSpace(decoded)
+	}
+	return strings.TrimSpace(m[1])
+}
+
+// LTXMarked 报告「这一颗资源带 LTX 标注」。
+//
+// 判据只落在**链接自带的文件名**上（见 LinkName）。链接没带名字时才看资源名，
+// 而且**只在非评论来源成立**：评论链接的展示名认不出文件名时会退成评论正文
+// （commentlink.nameOf），那里写「LTX」是分享者的评语，不是链接上的标注。
+// 用户 2026-10-27 明确选了「只看链接自带的文件名」，这条就是那个选择的落点 ——
+// 代价是「只在正文写 LTX、链接名没写」的片子认不出来，那是已知且被接受的。
+func LTXMarked(uri, name string, fromComment bool) bool {
+	if fromComment {
+		// 评论链接**只认链接自带的名字**。名字认不出来时宁可判否 ——
+		// 那时 name 已经退成评论正文（commentlink.nameOf 的最后一步），
+		// 正文里的「LTX」是分享者的评语，不是文件名上的标注。
+		return IsLTX(LinkName(uri))
+	}
+	if IsLTX(name) {
+		return true
+	}
+	// 磁链表那一路的 name 就是种子名，正常不会走到这里；
+	// 但它是「链接自带的文件名」的权威来源，比 name 更不会歧义。
+	return IsLTX(LinkName(uri))
 }
 
 // IsChinese 判断名称是否含中文字幕。逐字移植源码 javbus.is_chinese。

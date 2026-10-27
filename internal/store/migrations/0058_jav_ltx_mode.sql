@@ -1,0 +1,17 @@
+-- 订阅级策略：评论区里的 LTX 资源怎么挑。三态文本，默认**不启用**。
+--
+-- 取值：
+--   ''       不启用 —— 与升级前逐字节一致
+--   'prefer' LTX 优先：有 LTX 就挑它，没有就退回原来的挑法
+--   'only'   仅 LTX：只推 LTX；一颗都没有时这一轮什么都不推（是 Idle，不是失败）
+--
+-- 为什么是三态文本而不是两列 bool（ltx_prefer / ltx_only）：「二选一 + 都不选」
+-- 本身就是三态，两个 bool 会允许 prefer && only 这种无意义组合，还得在每个读它的
+-- 地方写一遍互斥归一 —— 那正是 hd/uhd 在界面上踩过的坑（见 JavSubscribePanel 的
+-- normalizeExclusiveQualities）。文本列也让以后加 'lowest' 这类第三种策略只需加取值。
+--
+-- 为什么不复用 include_comment_links：那一列回答「要不要看评论区」，
+-- 这一列回答「评论区里带 LTX 标记的那颗要不要优先」。前提是评论链接开着、且质量勾了
+-- 破解；不满足前提时校验层（quality.normalizeLTXMode）会把它归一成空串，
+-- 于是老数据、以及「先选了 LTX 再把破解取消勾选」这类历史状态都自然收敛。
+ALTER TABLE jav_subscriptions ADD COLUMN ltx_mode TEXT NOT NULL DEFAULT '';

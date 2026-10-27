@@ -15,7 +15,7 @@ import (
 type javSubscriptionRepo struct{ db *DB }
 
 const javSubColumns = `id, target_type, target_id, target_url, target_key, target_name, status,
-       download_mode, pre_download, include_comment_links, qualities_json, min_size_mb, max_size_mb, max_file_count,
+       download_mode, pre_download, include_comment_links, ltx_mode, qualities_json, min_size_mb, max_size_mb, max_file_count,
        release_date_from, release_date_to, expiry_days, categories_json, exclude_categories_json,
        enabled, target_account_id, target_parent_id, target_display_path, push_provider, subfolder_mode,
        last_checked_at, last_push_at, completed_at, last_error, matched_count, created_at, updated_at`
@@ -29,14 +29,14 @@ func (r *javSubscriptionRepo) Create(ctx context.Context, s *domain.JavSubscript
 	// 让它以一句 SQLite 的 constraint failed 收场实在没必要。
 	res, err := r.db.write.ExecContext(ctx, `
 INSERT INTO jav_subscriptions(target_type, target_id, target_url, target_key, target_name, status,
-       download_mode, pre_download, include_comment_links, qualities_json, min_size_mb, max_size_mb, max_file_count,
+       download_mode, pre_download, include_comment_links, ltx_mode, qualities_json, min_size_mb, max_size_mb, max_file_count,
        release_date_from, release_date_to, expiry_days, categories_json, exclude_categories_json,
        enabled, target_account_id, target_parent_id, target_display_path, push_provider, subfolder_mode)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.TargetType, s.TargetID, s.TargetURL, s.TargetKey, s.TargetName,
 		defaultStr(s.Status, domain.JavSubStatusActive),
 		defaultStr(s.DownloadMode, domain.JavDownloadModeStrict), boolToInt(s.PreDownload),
-		boolToInt(s.IncludeCommentLinks),
+		boolToInt(s.IncludeCommentLinks), s.LTXMode,
 		jsonOr(s.Qualities, "[]"),
 		optionalInt(s.MinSizeMB, s.HasMinSize), optionalInt(s.MaxSizeMB, s.HasMaxSize),
 		optionalInt(s.MaxFileCount, s.HasMaxFileCount),
@@ -57,7 +57,7 @@ func (r *javSubscriptionRepo) Update(ctx context.Context, s *domain.JavSubscript
 	_, err := r.db.write.ExecContext(ctx, `
 UPDATE jav_subscriptions SET
     target_type=?, target_id=?, target_url=?, target_key=?, target_name=?, status=?,
-    download_mode=?, pre_download=?, include_comment_links=?, qualities_json=?, min_size_mb=?, max_size_mb=?, max_file_count=?,
+    download_mode=?, pre_download=?, include_comment_links=?, ltx_mode=?, qualities_json=?, min_size_mb=?, max_size_mb=?, max_file_count=?,
     release_date_from=?, release_date_to=?, expiry_days=?, categories_json=?, exclude_categories_json=?,
     enabled=?, target_account_id=?, target_parent_id=?, target_display_path=?, push_provider=?,
     subfolder_mode=?, updated_at=CURRENT_TIMESTAMP
@@ -65,7 +65,7 @@ WHERE id=?`,
 		s.TargetType, s.TargetID, s.TargetURL, s.TargetKey, s.TargetName,
 		defaultStr(s.Status, domain.JavSubStatusActive),
 		defaultStr(s.DownloadMode, domain.JavDownloadModeStrict), boolToInt(s.PreDownload),
-		boolToInt(s.IncludeCommentLinks),
+		boolToInt(s.IncludeCommentLinks), s.LTXMode,
 		jsonOr(s.Qualities, "[]"),
 		optionalInt(s.MinSizeMB, s.HasMinSize), optionalInt(s.MaxSizeMB, s.HasMaxSize),
 		optionalInt(s.MaxFileCount, s.HasMaxFileCount),
@@ -230,6 +230,7 @@ func scanJavSubscription(sc javRowScanner) (*domain.JavSubscription, error) {
 		s            domain.JavSubscription
 		preDownload  int
 		commentLinks int
+		ltxMode      string
 		qualities    string
 		minSize      sql.NullInt64
 		maxSize      sql.NullInt64
@@ -245,7 +246,7 @@ func scanJavSubscription(sc javRowScanner) (*domain.JavSubscription, error) {
 		updatedAt    sql.NullString
 	)
 	err := sc.Scan(&s.ID, &s.TargetType, &s.TargetID, &s.TargetURL, &s.TargetKey, &s.TargetName, &s.Status,
-		&s.DownloadMode, &preDownload, &commentLinks, &qualities, &minSize, &maxSize, &maxFiles,
+		&s.DownloadMode, &preDownload, &commentLinks, &ltxMode, &qualities, &minSize, &maxSize, &maxFiles,
 		&s.ReleaseDateFrom, &s.ReleaseDateTo, &expiryDays, &cats, &excludeCats,
 		&enabled, &s.TargetAccountID, &s.TargetParentID, &s.TargetDisplayPath, &s.PushProvider, &s.SubfolderMode,
 		&lastChecked, &lastPush, &completedAt, &s.LastError, &s.MatchedCount, &createdAt, &updatedAt)
@@ -254,6 +255,7 @@ func scanJavSubscription(sc javRowScanner) (*domain.JavSubscription, error) {
 	}
 	s.PreDownload = preDownload != 0
 	s.IncludeCommentLinks = commentLinks != 0
+	s.LTXMode = ltxMode
 	s.Enabled = enabled != 0
 	_ = json.Unmarshal([]byte(qualities), &s.Qualities)
 	_ = json.Unmarshal([]byte(cats), &s.Categories)

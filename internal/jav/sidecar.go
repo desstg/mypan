@@ -179,6 +179,16 @@ type sidecarResourceJSON struct {
 	InfoHash    string `json:"info_hash"`
 	Source      string `json:"source"`
 	FromComment bool   `json:"from_comment"`
+	// LTX 表示这一颗资源的**文件名**里带 LTX 标记（LTX 修复版）。
+	//
+	// 落在 resource 而不是 quality 块：它描述的是「这一颗资源叫什么」，
+	// 与 source / from_comment 同类；quality 块是 quality.DetectTags 的镜像，
+	// 混进去会让人以为标签判定也认 LTX（而 IsLTX 刻意不参与打分，见 quality.IsLTX）。
+	//
+	// 读侧（internal/jav/emby）靠它给 nfo 加 `LTX破解` 这个 genre；
+	// 侧车文件名后缀（sidecarFileName 的 Marks）**刻意不带它** —— 那是整理侧
+	// 反解番号用的命名契约，加一个后缀等于动那条链。
+	LTX bool `json:"ltx"`
 }
 
 // sidecarQualityJSON 是质量标记。判定全部复用 quality 包，这里只负责搬字段 ——
@@ -402,6 +412,9 @@ func buildSidecar(in sidecarInput) ([]byte, string, error) {
 			InfoHash:    strings.TrimSpace(in.InfoHash),
 			Source:      resSource,
 			FromComment: resSource == domain.JavSourceComment,
+			// 判据与 buildCandidate 那条路**同一个函数**（链接自带的文件名优先，
+			// 评论来源不拿正文兜底），免得「候选说是 LTX、侧车说不是」。
+			LTX: quality.LTXMarked(magnet, resName, resSource == domain.JavSourceComment),
 		},
 		Quality: sidecarQualityJSON{
 			Resolution: tagsOfResource.ResolutionBadge(sizeBytes),

@@ -314,6 +314,14 @@ export interface WallDetail {
   /** 番号：系列；TMDB：所属合集。 */
   series?: string;
   tags?: string[];
+  /**
+   * 这一部是 **LTX 修复版**（nfo 里有 `<genre>LTX破解</genre>`）。
+   *
+   * 只有番号那面墙会给（TMDB 那面没有这个概念）。抽屉在番号旁标一颗胶囊，
+   * 与卡片上那颗同一个来源 —— 别拿 `tags` 里有没有 `LTX破解` 来判断：
+   * 那是「类别」，这里是「这一部是 LTX 版」这个结论。
+   */
+  ltx?: boolean;
   actors?: WallActor[];
   poster_url?: string;
   /**

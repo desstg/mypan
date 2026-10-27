@@ -194,6 +194,14 @@ func (s *Service) SaveJavWallMeta(ctx context.Context, src WallSourceRef, relDir
 	if meta.AddedAt.IsZero() {
 		meta.AddedAt = prev.AddedAt
 	}
+	// LTX 与上面那几项同一个道理：**编辑器表单里没有这个字段**，只有 nfo 里那条
+	// `<genre>LTX破解</genre>`。前端会把它原样带回来，但任何没带它的客户端
+	// （老版本前端、脚本、手搓的 PUT）提交上来就是 `false` —— 那样一次「只改标题」
+	// 的保存会把 LTX 标记**静默抹掉**，而 Emby 那边只表现为「这部片变了」。
+	// 所以这里取并：盘上有就保住。反过来说，编辑器也就没法取消它 —— 反正本来就没入口。
+	if !meta.LTX && prev.LTX {
+		meta.LTX = prev.LTX
+	}
 	if meta.Label == "" {
 		meta.Label = meta.Maker
 	}

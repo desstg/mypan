@@ -37,6 +37,9 @@ type SubscriptionView struct {
 
 	IncludeCommentLinks bool `json:"include_comment_links"`
 
+	// LTXMode 是评论区里的 LTX 资源怎么挑："" / prefer / only。见 domain.JavSubscription。
+	LTXMode string `json:"ltx_mode"`
+
 	Qualities         []string `json:"qualities"`
 	MinSizeMB         *int     `json:"min_size_mb"`
 	MaxSizeMB         *int     `json:"max_size_mb"`
@@ -92,6 +95,9 @@ type SubscriptionInput struct {
 
 	IncludeCommentLinks bool `json:"include_comment_links"`
 
+	// LTXMode 见 SubscriptionView.LTXMode。
+	LTXMode string `json:"ltx_mode"`
+
 	Qualities         []string `json:"qualities"`
 	MinSizeMB         *int     `json:"min_size_mb"`
 	MaxSizeMB         *int     `json:"max_size_mb"`
@@ -118,6 +124,7 @@ func (in SubscriptionInput) toQualityInput() quality.Input {
 		TargetName:   in.TargetName,
 		DownloadMode: in.DownloadMode, PreDownload: in.PreDownload,
 		IncludeCommentLinks: in.IncludeCommentLinks,
+		LTXMode:             in.LTXMode,
 		Qualities:           in.Qualities, MinSizeMB: in.MinSizeMB, MaxSizeMB: in.MaxSizeMB,
 		MaxFileCount: in.MaxFileCount, ReleaseDateFrom: in.ReleaseDateFrom,
 		ReleaseDateTo: in.ReleaseDateTo, ExpiryDays: in.ExpiryDays,
@@ -206,6 +213,7 @@ func viewToDomain(p *quality.Payload) *domain.JavSubscription {
 		TargetKey: p.TargetKey, TargetName: p.TargetName,
 		DownloadMode: p.DownloadMode, PreDownload: p.PreDownload,
 		IncludeCommentLinks: p.IncludeCommentLinks,
+		LTXMode:             p.LTXMode,
 		Qualities:           p.Qualities,
 		MinSizeMB:           p.MinSizeMB, HasMinSize: p.HasMinSize,
 		MaxSizeMB: p.MaxSizeMB, HasMaxSize: p.HasMaxSize,
@@ -229,6 +237,7 @@ func toSubscriptionView(s *domain.JavSubscription) SubscriptionView {
 		TargetName: s.TargetName, Status: s.Status,
 		Mode: s.Mode(), DownloadMode: s.DownloadMode, PreDownload: s.PreDownload,
 		IncludeCommentLinks: s.IncludeCommentLinks,
+		LTXMode:             s.LTXMode,
 		Qualities:           orEmptyStrings(s.Qualities),
 		MinSizeMB:           intPtrIf(s.MinSizeMB, s.HasMinSize),
 		MaxSizeMB:           intPtrIf(s.MaxSizeMB, s.HasMaxSize),

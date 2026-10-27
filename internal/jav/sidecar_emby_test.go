@@ -103,9 +103,11 @@ func TestSidecarRoundTripFeedsEmbyBuilder(t *testing.T) {
 		Actors: []*domain.JavActor{{ID: "a1", Name: sentActor}},
 		// 资源名带着画质标记：侧车的 quality 是**从磁链名推出来的**
 		// （quality.DetectTags），不带 4K/破解/中字这三个词就一个标记都不会有。
+		// 末尾的 `_LTX` 是这一条的**哨兵**：resource.ltx 必须原样穿过读侧，
+		// 变成 nfo 的 <genre>LTX破解</genre>。
 		Record: &domain.JavPushRecord{
 			ID: 1, MovieID: sentJavdbID, Code: sentNumber,
-			Name:   sentNumber + "-U 4K REMUX 中文字幕",
+			Name:   sentNumber + "-U 4K REMUX 中文字幕_LTX",
 			Magnet: "magnet:?xt=urn:btih:" + strings.Repeat("b", 40),
 		},
 		InfoHash: strings.Repeat("b", 40),
@@ -158,6 +160,10 @@ func TestSidecarRoundTripFeedsEmbyBuilder(t *testing.T) {
 	if doc.Duration != 137 || doc.ReviewsCount != 4321 || !doc.HasCNSub || !doc.Quality.FourK {
 		t.Errorf("标量字段串了：%+v", doc)
 	}
+	// LTX 走 resource 而不是 quality 那一块（见写侧 sidecarResourceJSON.LTX 的说明）。
+	if !doc.Resource.LTX {
+		t.Error("资源名带 _LTX，侧车的 resource.ltx 应当为 true")
+	}
 	if doc.IsCensored() {
 		t.Error("type=1 是无码，不该判成有码（判错会让每张海报都切到右边）")
 	}
@@ -184,6 +190,10 @@ func TestSidecarRoundTripFeedsEmbyBuilder(t *testing.T) {
 		"<name>" + sentActor + "</name>",
 		"<series>" + sentSeries + "</series>",
 		"<genre>" + sentTag + "</genre>",
+		// 哨兵：resource.ltx → nfo 的 <genre>LTX破解</genre>。
+		// 读侧漏声明 resource 块时，这一条会当场红（否则只是默默少一个元素）。
+		"<genre>LTX破解</genre>",
+		"<tag>LTX破解</tag>",
 		"<cover>" + sentCover + "</cover>",
 		"<trailer>" + sentTrailer + "</trailer>",
 		"<dateadded>2019-05-06 07:08:09</dateadded>",

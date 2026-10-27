@@ -292,14 +292,16 @@ func ParseNFO(data []byte, hints NFOReadHints) (*MovieMeta, error) {
 		meta.AddedAt = t
 	}
 
-	// 标记与标签从**同一份** genre 列表里拆出来：先认出 4K / 破解（它们在
-	// buildGenres 的输出里是固定词），再按同一顺序消去其余合成项。
+	// 标记与标签从**同一份** genre 列表里拆出来：先认出 4K / 破解 / LTX破解
+	// （它们在 buildGenres 的输出里是固定词），再按同一顺序消去其余合成项。
 	for _, g := range raw.Genres {
 		switch strings.TrimSpace(g) {
 		case "4K":
 			meta.FourK = true
 		case "破解":
 			meta.Uncensored = true
+		case ltxGenre:
+			meta.LTX = true
 		}
 	}
 	meta.Tags = recoverTags(raw.Genres, genreInput{
@@ -307,6 +309,7 @@ func ParseNFO(data []byte, hints NFOReadHints) (*MovieMeta, error) {
 		letter:    meta.NumberLetter,
 		actors:    meta.Actors,
 		uncensor:  meta.Uncensored,
+		ltx:       meta.LTX,
 		series:    meta.Series,
 		maker:     meta.Maker,
 		publisher: meta.Publisher,
@@ -351,6 +354,30 @@ type JavNFOInfo struct {
 	Number  string
 	Release string // 发行日期 YYYY-MM-DD，缺失为空串
 	AddedAt string // 入库时间 `2006-01-02 15:04:05`，缺失为空串
+	// LTX 报告经里有没有 `LTX破解`（海报墙番号旁的胶囊）。
+	//
+	// 这条路径刻意**不建 genre 切片**：这里读几千份 nfo，只要一个布尔。
+	// 用 ltxGenreOnly 让每一条 <genre> 解完就地丢掉，只留下"见过没有"。
+	LTX bool
+}
+
+// ltxGenreOnly 是「genre 列表里有没有 LTX破解」的窄解析器。
+//
+// encoding/xml 对非切片字段每遇到一个同名元素就调一次 UnmarshalXML，
+// 所以重复的 <genre> 会被逐条喂进来，值累积在这个 bool 上。
+// 比 `Genres []string` 少一次切片分配和几十个字符串头 —— 本包这条路的
+// 全部价值就在省这一次（见 TitleAndNumber 的说明）。
+type ltxGenreOnly bool
+
+func (l *ltxGenreOnly) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	var s string
+	if err := d.DecodeElement(&s, &start); err != nil {
+		return err
+	}
+	if strings.TrimSpace(s) == ltxGenre {
+		*l = true
+	}
+	return nil
 }
 
 // TitleNumberDates 一次解出「标题 / 番号 / 两个日期」。
@@ -376,6 +403,9 @@ func TitleNumberDates(data []byte) (JavNFOInfo, error) {
 		ReleaseDate string   `xml:"releasedate"`
 		Release     string   `xml:"release"`
 		DateAdded   string   `xml:"dateadded"`
+		// 只关心「有没有 LTX破解」这一条，不把整个 genre 列表建出来
+		// （见 ltxGenreOnly 的说明）。
+		LTX ltxGenreOnly `xml:"genre"`
 	}
 	if err := xml.Unmarshal(data, &light); err != nil {
 		return JavNFOInfo{}, err
@@ -388,6 +418,7 @@ func TitleNumberDates(data []byte) (JavNFOInfo, error) {
 		// （仓库根那份 JUR-019-U.nfo 三个都在，但 `91CM-109-cd1.nfo` 只有 premiered）。
 		Release: firstNonEmpty(light.Premiered, light.ReleaseDate, light.Release),
 		AddedAt: strings.TrimSpace(light.DateAdded),
+		LTX:     bool(light.LTX),
 	}, nil
 }
 
@@ -476,6 +507,9 @@ func recoverTags(genres []string, in genreInput) []string {
 	}
 	if in.uncensor {
 		add("破解")
+	}
+	if in.ltx {
+		add(ltxGenre)
 	}
 	if name := strings.TrimSpace(in.series); name != "" {
 		add("系列: " + name)

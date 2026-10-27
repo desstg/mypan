@@ -62,6 +62,28 @@ const (
 	// JavQualityEdited 由 detect_quality_tags 产出，但不在可勾选的 QUALITY_VALUES 里 ——
 	// 它只参与打分时的标记展示，不能作为订阅条件。
 	JavQualityEdited = "edited"
+	// JavQualityLTX 是「资源名里带 LTX 标记」这条事实在候选上的标签名。
+	//
+	// 与 JavQualityEdited 一样**不进** QUALITY_VALUES（它不是一个可以筛的质量条件），
+	// 但它比 edited 多一个用途：订阅的 ltx_mode 靠它决定挑哪一颗（见 push.go）。
+	// 它只记录「这一颗资源的名字带了 LTX」，判定由 quality.IsLTX 负责。
+	JavQualityLTX = "ltx"
+)
+
+// LTX 资源的挑选策略。三态：不启用 / 优先 / 只要。
+//
+// 用三态字符串而不是两个 bool（prefer + only）：「二选一 + 都不选」本身就是三态，
+// 两个 bool 会允许 prefer&&only 这种无意义组合，还得在每个读它的地方写一遍互斥归一。
+//
+// ⚠️ **仅在订阅同时满足「勾了破解」+「勾了评论区链接」时才有意义** ——
+// 那是 UI 上的可用性约束，后端在 validate 里把不满足前提的值归一成空串
+// （见 quality.ValidateSubscriptionPayload），而不是报错。
+const (
+	// JavLTXModePrefer：有 LTX 资源就优先它，没有就退回原来的挑法。
+	JavLTXModePrefer = "prefer"
+	// JavLTXModeOnly：只推 LTX 资源。没有就这一轮什么都不推 ——
+	// **这是 Idle 不是失败**，不能发失败通知，也不能留下失败记录。
+	JavLTXModeOnly = "only"
 )
 
 // 候选 / 推送记录的来源。
@@ -269,6 +291,13 @@ type JavSubscription struct {
 	// 这件回答「从哪儿找资源」。默认关 —— 这条链路放宽了质量判定
 	// （评论链接缺分辨率角标/文件数/体积，那些项跳过不判）。
 	IncludeCommentLinks bool
+
+	// LTXMode 是评论区链接里「带 LTX 标记的资源」怎么挑："" / prefer / only。
+	//
+	// 与 IncludeCommentLinks 正交的第四维：那一件回答「要不要看评论区」，
+	// 这件回答「评论区里的 LTX 版要不要优先」。前提是勾了评论区链接、且质量勾了破解 ——
+	// 不满足时校验层会把它归一成空串（见 quality.ValidateSubscriptionPayload）。
+	LTXMode string
 
 	Qualities         []string
 	MinSizeMB         int

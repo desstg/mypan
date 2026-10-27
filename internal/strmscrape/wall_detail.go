@@ -70,6 +70,12 @@ type WallDetail struct {
 	Publisher string   `json:"publisher"`
 	Series    string   `json:"series"`
 	Tags      []string `json:"tags"`
+	// LTX 表示这一部是 **LTX 修复版**（nfo 的 `<genre>LTX破解</genre>`）。
+	//
+	// 与卡片上那颗胶囊**同一个来源**（nfo 的 genre），抽屉在番号旁再标一次 ——
+	// 抽屉里 tags 卡片也会出现 `LTX破解` 这个词，但那是「类别」，不是「这一部是
+	// LTX 版」这个结论；两者不该让人自己去对照。
+	LTX bool `json:"ltx,omitempty"`
 
 	Actors []WallActor `json:"actors"`
 
@@ -194,6 +200,10 @@ func (s *Service) JavWallDetail(ctx context.Context, srcRef WallSourceRef, relDi
 			hints.Censored = doc.IsCensored()
 		}
 		if meta, parseErr := emby.ParseNFO(data, hints); parseErr == nil {
+			// LTX 只从 nfo 的 genre 读，**不看侧车的 resource.ltx** ——
+			// 与卡片那颗胶囊同一个来源（见 strmscrape.JavWallItem.LTX 的说明）；
+			// 两处各读一份，就会出现「卡片上有胶囊、点开抽屉却没有」。
+			detail.LTX = meta.LTX
 			if meta.Number != "" {
 				detail.Number = meta.Number
 			}

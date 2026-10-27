@@ -58,15 +58,16 @@ type SidecarDoc struct {
 	PreviewVideoURL string  `json:"preview_video_url"`
 	GeneratedAt     string  `json:"generated_at"`
 
-	Dest      SidecarDest    `json:"dest"`
-	Director  SidecarCredit  `json:"director"`
-	Maker     SidecarCredit  `json:"maker"`
-	Publisher SidecarCredit  `json:"publisher"`
-	Series    SidecarCredit  `json:"series"`
-	Actors    []SidecarActor `json:"actors"`
-	Tags      []string       `json:"tags"`
-	Images    SidecarImages  `json:"images"`
-	Quality   SidecarQuality `json:"quality"`
+	Dest      SidecarDest     `json:"dest"`
+	Director  SidecarCredit   `json:"director"`
+	Maker     SidecarCredit   `json:"maker"`
+	Publisher SidecarCredit   `json:"publisher"`
+	Series    SidecarCredit   `json:"series"`
+	Actors    []SidecarActor  `json:"actors"`
+	Tags      []string        `json:"tags"`
+	Images    SidecarImages   `json:"images"`
+	Resource  SidecarResource `json:"resource"`
+	Quality   SidecarQuality  `json:"quality"`
 }
 
 // SidecarDest 是落盘现场。本包只取 added_at（nfo 的 <dateadded>）。
@@ -120,6 +121,18 @@ type SidecarImages struct {
 	Thumb       string   `json:"thumb"`
 	JavbusCover string   `json:"javbus_cover"`
 	Previews    []string `json:"previews"`
+}
+
+// SidecarResource 只取「这一颗资源是不是 LTX 版」。
+//
+// 侧车的 resource 块整块是「按侧车改名」那一路的输入（磁链、指纹、落盘现场），
+// 与 Emby 无关；**唯一的例外是 ltx** —— 它是 nfo 的 `LTX破解` 这个 genre 的来源。
+//
+// 为什么 LTX 不从文件名反推：侧车里的 resource.name 是**推送那一刻**的名字，
+// 而 nfo 会在此之后被反复重建（元数据编辑器、补齐缺失字段、重新刮削）。从名字
+// 反推要多信一次「名字没被改过」，而写侧那一刻的结论就摆在这儿。
+type SidecarResource struct {
+	LTX bool `json:"ltx"`
 }
 
 // SidecarQuality 只取 nfo 与命名用得到的三个标记。
@@ -230,31 +243,39 @@ func IgnoredPaths() map[string]string {
 // 每一项都要写明理由：那个测试的价值全在「漏了一个字段会被发现」，
 // 而白名单是唯一能让它闭嘴的东西 —— 理由不清楚的白名单等于把闸门拆了。
 //
-// 键可以是**整棵子树**（`resource` 就是整块忽略），闸门一按前缀判定。
+// 键可以是**整棵子树**（`dest.files` 就盖住它下面每个条目），闸门一按前缀判定。
 var ignoredSidecarPaths = map[string]string{
-	"javdb_id":           "nfo 用 <website>（javdb_url）指回详情页，id 本身没有元素可放",
-	"type_label":         "「有码 / 无码」的中文名，样本 nfo 没有对应元素（判定本身走 type）",
-	"review":             "JAVDB 单独给的简评，样本 nfo 里没有对应元素（先留着，将来可作 <tagline>）",
-	"fetched_at":         "上游详情的抓取时间，与媒体库无关",
-	"magnets_count":      "磁链条数，界面角标用",
-	"resource":           "磁链 / 指纹 / 来源整块，是「按侧车改名」那一路的输入",
-	"dest.account_id":    "账号 id，本地元数据不需要",
-	"dest.parent_id":     "网盘目录 id，同上",
-	"dest.path":          "网盘路径，同上",
-	"dest.files":         "落盘文件清单（含它下面每个条目），同上",
-	"actors[].id":        "JAVDB 自家演员 id，写进 <tmdbid> 会让 Emby 认到别人",
-	"actors[].avatar":    "头像地址同样经 XOR 混淆，写进 <thumb> 只会让 Emby 拉到花屏图",
-	"director.id":        "同 actors[].id",
-	"maker.id":           "同 actors[].id",
-	"publisher.id":       "同 actors[].id",
-	"series.id":          "同 actors[].id",
-	"images.note":        "写给外部脚本的取图说明，不是数据",
-	"quality.resolution": "界面角标文案，Emby 没有对应元素",
-	"quality.tier":       "同上",
-	"quality.uhd":        "同上（4K 已单独用 four_k 出 <genre>）",
-	"quality.hd":         "同上",
-	"quality.edited":     "片源是否剪辑过，样本 nfo 没有对应元素",
-	"quality.source":     "REMUX 之类，同上",
-	"quality.codec":      "编码，同上",
-	"quality.pack":       "合集标记，同上",
+	"javdb_id":      "nfo 用 <website>（javdb_url）指回详情页，id 本身没有元素可放",
+	"type_label":    "「有码 / 无码」的中文名，样本 nfo 没有对应元素（判定本身走 type）",
+	"review":        "JAVDB 单独给的简评，样本 nfo 里没有对应元素（先留着，将来可作 <tagline>）",
+	"fetched_at":    "上游详情的抓取时间，与媒体库无关",
+	"magnets_count": "磁链条数，界面角标用",
+	// resource 块原来整块忽略；LTX 进了 nfo 之后收窄成剩下的子路径 ——
+	// 留着整块会把「resource.ltx 漏读了」也一并盖住。
+	"resource.name":         "资源名，是「按侧车改名」那一路的输入，不参与 nfo",
+	"resource.size_text":    "体积文本，同上（体积只用于打分与展示）",
+	"resource.size_bytes":   "体积，同上",
+	"resource.magnet":       "磁链原文，同上",
+	"resource.info_hash":    "磁链指纹，同上",
+	"resource.source":       "来源（javbus / comment），同上",
+	"resource.from_comment": "是否来自评论区，同上",
+	"dest.account_id":       "账号 id，本地元数据不需要",
+	"dest.parent_id":        "网盘目录 id，同上",
+	"dest.path":             "网盘路径，同上",
+	"dest.files":            "落盘文件清单（含它下面每个条目），同上",
+	"actors[].id":           "JAVDB 自家演员 id，写进 <tmdbid> 会让 Emby 认到别人",
+	"actors[].avatar":       "头像地址同样经 XOR 混淆，写进 <thumb> 只会让 Emby 拉到花屏图",
+	"director.id":           "同 actors[].id",
+	"maker.id":              "同 actors[].id",
+	"publisher.id":          "同 actors[].id",
+	"series.id":             "同 actors[].id",
+	"images.note":           "写给外部脚本的取图说明，不是数据",
+	"quality.resolution":    "界面角标文案，Emby 没有对应元素",
+	"quality.tier":          "同上",
+	"quality.uhd":           "同上（4K 已单独用 four_k 出 <genre>）",
+	"quality.hd":            "同上",
+	"quality.edited":        "片源是否剪辑过，样本 nfo 没有对应元素",
+	"quality.source":        "REMUX 之类，同上",
+	"quality.codec":         "编码，同上",
+	"quality.pack":          "合集标记，同上",
 }

@@ -193,6 +193,10 @@ watch(lightboxIndex, (v) => {
       <div class="jd-meta">
         <div class="jd-meta__left">
           <span class="jd-num">{{ detail.number }}</span>
+          <!-- LTX 胶囊：与卡片上那颗同一个来源（nfo 的 genre），同一套颜色。
+               `tags` 卡片里也会出现「LTX破解」这个词，但那是类别 —— 这里说的是
+               「这一部是 LTX 版」，别让用户自己去对照。 -->
+          <span v-if="detail.ltx" class="jd-num jd-num--ltx" title="LTX 修复版">LTX</span>
           <span v-if="detail.release_date" class="jd-meta__item">{{ detail.release_date }}</span>
           <span v-if="durationText" class="jd-meta__item">{{ durationText }}</span>
         </div>

@@ -87,6 +87,13 @@ type JavWallItem struct {
 
 	ReleaseDate string `json:"release_date,omitempty"`
 	AddedAt     string `json:"added_at,omitempty"`
+
+	// LTX 表示这一部是 LTX 修复版（nfo 的 `<genre>LTX破解</genre>`）。
+	//
+	// 只从 **nfo 的 genre** 来，不读侧车：两者由同一次推送写出、正常同步，
+	// 而每部片多读一次侧车会把 sfc / SMB 上的冷启动拖垮（见 fillJavWallRowMeta
+	// 上面那段关于「一份快照读一次全库」的说明）。
+	LTX bool `json:"ltx,omitempty"`
 }
 
 // JavWallStats 是 tab 与视图切换要用的几个数字。
@@ -935,6 +942,10 @@ func fillJavWallRowMeta(rows []javWallRow, titles javTitleLookup) {
 		nfo := titles(rows[i])
 		rows[i].item.ReleaseDate = nfo.Release
 		rows[i].item.AddedAt = nfo.AddedAt
+		// LTX 要在下面那个 `continue` **之前**填：卡片上番号旁那颗胶囊与标题无关，
+		// 而 continue 是「标题和番号都读不到就什么都不干」—— 一份只有 <genre> 的
+		// 残缺 nfo 会从那儿溜走，胶囊就永远不出现。
+		rows[i].item.LTX = nfo.LTX
 		// 标题 / 番号：读不到（没有 nfo、不是 <movie> 结构）就保持主干，卡片上不至于空着。
 		if nfo.Title == "" && nfo.Number == "" {
 			continue

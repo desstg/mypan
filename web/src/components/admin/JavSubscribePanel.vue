@@ -52,6 +52,7 @@ import type {
 import {
   JAV_DOWNLOAD_MODES,
   JAV_EXCLUSIVE_QUALITIES,
+  JAV_LTX_MODES,
   JAV_QUALITY_OPTIONS,
   javModeToFields,
   javStatusLabel,
@@ -143,6 +144,8 @@ type JavForm = {
   download_mode: string;
   pre_download: boolean;
   include_comment_links: boolean;
+  /** 评论区链接里的 LTX 资源怎么挑："" / "prefer" / "only"。见 JavSubscription.ltx_mode。 */
+  ltx_mode: string;
   qualities: string[];
   min_size_mb: number | null;
   max_size_mb: number | null;
@@ -223,6 +226,8 @@ function blankForm(): JavForm {
     // 默认关：这条链路放宽了质量判定（评论链接缺角标/文件数/体积，那些项跳过不判），
     // 代价是真的，所以得用户明确勾。
     include_comment_links: false,
+    // LTX 策略默认关：它的前提（破解 + 评论区链接）新建时都还没勾。
+    ltx_mode: "",
     // 默认勾「高清」：它是这套库里最普遍的一档，不勾等于不限、什么分辨率都收，
     // 反而会把 480p 那类也算进来。要更严就改成勾「超清」（两者互斥，不能同选），
     // 要放开就取消勾选。
@@ -735,6 +740,7 @@ function openEdit(sub: JavSubscription) {
   form.download_mode = sub.download_mode;
   form.pre_download = sub.pre_download;
   form.include_comment_links = sub.include_comment_links;
+  form.ltx_mode = sub.ltx_mode || "";
   // 旧数据里可能同时存着 hd + uhd（改互斥之前建/编辑过的订阅会这样）。
   // 这种组合在判定上等价于「至少高清」，显示成两颗都亮会让人以为能筛 1080p，
   // 所以读进来时就收口成最高那一档。
@@ -766,6 +772,36 @@ const modeValue = computed({
     form.pre_download = fields.pre_download;
   },
 });
+
+/**
+ * 「LTX 优先 / 仅 LTX」那一对胶囊可不可用。
+ *
+ * 前提两条，与后端 `quality.normalizeLTXMode` 逐条对应：
+ *   1. 勾了「破解」质量 —— LTX 是破解的旁支，勾了破解才谈得上挑哪一种；
+ *   2. 开了「评论区链接」—— LTX 标记来自分享链接自带的文件名，不开评论区就无源。
+ *
+ * 两处各写一份是有意的：前端管**能不能点**，后端管**存不存得住**。
+ * 后端那条还会把不满足前提的值归一成空串，所以老前端 / 脚本提交也不会存进脏值。
+ */
+const ltxAvailable = computed(
+  () => form.include_comment_links && form.qualities.includes("uncensored"),
+);
+
+/**
+ * 前提没了就把值清掉。
+ *
+ * ⚠️ 不能只把胶囊灰掉：那样用户先选「仅 LTX」、再把「破解」取消勾选，
+ * 值还留在表单里 —— 后端虽然会归一成空串，但**前端显示与后端存的不一致**，
+ * 用户下次打开编辑会看到「明明没勾破解，LTX 也没启用」这种自我矛盾。
+ */
+watch(ltxAvailable, (ok) => {
+  if (!ok) form.ltx_mode = "";
+});
+
+/** 点一颗 LTX 胶囊。二选一：点已选中的那颗 = 取消（回到不启用）。 */
+function toggleLTXMode(value: string) {
+  form.ltx_mode = form.ltx_mode === value ? "" : value;
+}
 
 /**
  * 点一颗质量胶囊。
@@ -1742,10 +1778,27 @@ onMounted(() => {
                  排在它们前面会让人在还不知道放宽什么的情况下先勾。 -->
             <div class="jav-field">
               <span>评论区链接</span>
-              <label style="display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px">
-                <input v-model="form.include_comment_links" type="checkbox" />
-                把影片评论区里分享的链接也纳入候选
-              </label>
+              <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap">
+                <label style="display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px">
+                  <input v-model="form.include_comment_links" type="checkbox" />
+                  把影片评论区里分享的链接也纳入候选
+                </label>
+                <!-- LTX 策略：与上面那个复选框**同一行**（它说的正是「评论区链接里怎么挑」），
+                     但只在前提满足时可点。灰掉而不是藏掉 —— 藏掉的话用户不知道有这两个选项，
+                     勾了破解与评论区之后它也不会出现，会以为是没这功能。 -->
+                <button
+                  v-for="m in JAV_LTX_MODES"
+                  :key="m.value"
+                  type="button"
+                  class="jav-sort-chip"
+                  :class="{ 'jav-sort-chip--active': form.ltx_mode === m.value }"
+                  :disabled="!ltxAvailable"
+                  :title="ltxAvailable ? '' : '需要勾上「破解」质量并开启评论区链接'"
+                  @click="toggleLTXMode(m.value)"
+                >
+                  {{ m.label }}
+                </button>
+              </div>
             </div>
             <div class="jav-hint">
               只对**本地已经抓过评论**的影片生效（在详情页打开过「评论区分享」，或后台铺评论扫到过它）。
@@ -1754,6 +1807,12 @@ onMounted(() => {
             <div class="jav-hint">
               评论里的链接通常没有分辨率角标、文件数和体积，这些**缺的项跳过不判**（不会因此被拒），
               其余条件照常 —— 所以它会让这条订阅收进来的资源变多。
+            </div>
+            <div v-if="ltxAvailable" class="jav-hint">
+              LTX 是分享者在链接的文件名上标的修复版标记（<code>xxx_LTX.mp4</code>），两项只能选一个。
+              <b>LTX 优先</b>：有 LTX 就挑它，没有就按原来的规则挑；
+              <b>仅 LTX</b>：只推 LTX，没有就一直等着 —— 这不算失败，也不会发失败通知。
+              两项都不选 = 按原来的规则挑，不特别照顾 LTX。
             </div>
 
             <div class="jav-field">
@@ -1845,6 +1904,8 @@ onMounted(() => {
                     {{ c.resolution_badge }}
                   </span>
                   <span v-if="c.uncensored" class="jav-badge jav-badge--break">破解</span>
+                  <!-- LTX 角标：与「破解」挨着，因为「为什么这颗被挑中」往往就这两个词。 -->
+                  <span v-if="c.ltx" class="jav-badge jav-badge--break" title="LTX 修复版">LTX</span>
                   <span v-if="c.subtitle" class="jav-badge jav-badge--on">字幕</span>
                   <span v-if="c.push_ok" class="jav-badge jav-badge--on">合格</span>
                   <span v-if="c.predownload" class="jav-badge">待确认</span>

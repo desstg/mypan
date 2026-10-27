@@ -263,6 +263,91 @@ func TestIsUncensoredBoundaries(t *testing.T) {
 	}
 }
 
+// TestIsLTX 钉住「LTX 修复版」的判据。
+//
+// 真样本取自用户 2026-10-27 给的那三条 —— 它们的共同点是 **LTX 永远是一个独立的
+// token**（前面是 `_` / `.` / `-`）。所以负样本的重点是「连写的三个字母不算」：
+// `LXTA-001` 是番号前缀、`planet`/`xltx` 里 ltx 分别是词的一部分。
+func TestIsLTX(t *testing.T) {
+	yes := []string{
+		"www.98T.la@MISM-305_LTX.mp4",
+		"PPPE-447.restored.LTX.mp4",
+		"MDHR-001_PJ-LTX.mp4",
+		"SSIS-001-LTX.mkv",
+		// 大小写不敏感：分享者两种写法都有。
+		"JUR-890 ltx_restored.mp4",
+	}
+	for _, name := range yes {
+		if !IsLTX(name) {
+			t.Errorf("IsLTX(%q) = false, want true", name)
+		}
+	}
+	no := []string{
+		"", "LXTA-001.mp4", "planet.mkv", "xltx.mp4", "ltxy.mp4",
+		// 前界是字母时不算：`XLTX` 是一个连写的 token。
+		"SSIS-001XLTX.mkv",
+		// 只有正文/评语里提到 LTX、文件名里没有 —— IsLTX 只管名字，
+		// 这条判据由调用方保证（见 LTXMarked）。
+		"SSIS-001.mp4",
+	}
+	for _, name := range no {
+		if IsLTX(name) {
+			t.Errorf("IsLTX(%q) = true, want false", name)
+		}
+	}
+}
+
+// TestLTXMarked 钉住「从链接本体取名字」这条判据 —— 用户 2026-10-27 选的
+// 「只看链接自带的文件名」。评论正文里写 LTX 不算，链接名里写才算。
+func TestLTXMarked(t *testing.T) {
+	const btih = "magnet:?xt=urn:btih:" + "0123456789abcdef0123456789abcdef01234567"
+	cases := []struct {
+		name        string
+		uri         string
+		display     string
+		fromComment bool
+		want        bool
+	}{
+		{name: "磁链 dn= 带 LTX", uri: btih + "&dn=MISM-305_LTX.mp4", display: "MISM-305_LTX.mp4", want: true},
+		// dn 里的空格常写成 %20 —— 不解码时 LTX 前面是 `0`，边界判据会判否。
+		{
+			name: "磁链 dn= 做过 percent 编码（%20）", uri: btih + "&dn=SSIS-001%20LTX_restored.mp4",
+			display: "SSIS-001 LTX_restored.mp4", fromComment: true, want: true,
+		},
+		{
+			name: "磁链 dn= 把下划线也编码了（%5FLTX）", uri: btih + "&dn=MISM-305%5FLTX.mp4",
+			display: "MISM-305_LTX.mp4", fromComment: true, want: true,
+		},
+		{name: "磁链 dn= 不带但展示名带（非评论来源）", uri: btih, display: "MISM-305_LTX.mp4", want: true},
+		{
+			name: "评论链接、dn= 不带 LTX，正文里写了 LTX",
+			uri:  btih + "&dn=MISM-305.mp4", display: "MISM-305.mp4 这个有 LTX 修复版",
+			fromComment: true, want: false,
+		},
+		{
+			name: "评论链接认不出文件名时展示名退成正文 —— 不因此判是 LTX",
+			uri:  btih, display: "LTX", fromComment: true, want: false,
+		},
+		{
+			name:    "ed2k 的文件名字段带 LTX",
+			uri:     "ed2k://|file|www.98T.la@JUR-890 七海蒂娜 LTX_restored.mp4|7708397628|A3A0C10669347894F9C0E94217835241|/",
+			display: "www.98T.la@JUR-890 七海蒂娜 LTX_restored.mp4", fromComment: true, want: true,
+		},
+		{
+			name:    "ed2k 文件名不带 LTX，评论正文里写了",
+			uri:     "ed2k://|file|JUR-890_restored.mp4|7708397628|A3A0C10669347894F9C0E94217835241|/",
+			display: "LTX 这一部", fromComment: true, want: false,
+		},
+		{name: "什么都没有", uri: "", display: "", want: false},
+	}
+	for _, c := range cases {
+		if got := LTXMarked(c.uri, c.display, c.fromComment); got != c.want {
+			t.Errorf("%s：LTXMarked(%q, %q, %v) = %v, want %v",
+				c.name, c.uri, c.display, c.fromComment, got, c.want)
+		}
+	}
+}
+
 // TestIsChinese 钉住「名字里带中字标记」的判据。
 //
 // ⚠️ `-UC` 那一条是**有意偏离源码**的（见 tags.go 里 reChinese 的长注释）：
@@ -725,6 +810,82 @@ func TestValidateSubscriptionPayload(t *testing.T) {
 	got, _ = ValidateSubscriptionPayload(in, true)
 	if got.HasMaxFileCount {
 		t.Error("最大文件数为 0 时应当视同不限")
+	}
+}
+
+// TestValidateLTXMode 钉住 LTX 策略的校验口径：
+//
+//   - 非法值**报错**（与 download_mode / subfolder_mode 一致 —— 静默降级会让用户
+//     以为开关生效了）；
+//   - 前提不成立（没开评论区链接 / 没勾破解）时**归一成空串、不报错**。
+//     那个开关在界面上就是灰的，老前端或脚本带着旧值提交上来不该让整个保存失败。
+func TestValidateLTXMode(t *testing.T) {
+	base := func() Input {
+		return Input{
+			TargetType: "movie", TargetID: "SSIS-001", TargetName: "SSIS-001",
+			DownloadMode: "strict", Enabled: true,
+			IncludeCommentLinks: true,
+			Qualities:           []string{"uncensored"},
+		}
+	}
+
+	// 前提齐了：原样存下来。
+	for _, mode := range []string{"prefer", "only"} {
+		in := base()
+		in.LTXMode = mode
+		got, err := ValidateSubscriptionPayload(in, true)
+		if err != nil {
+			t.Fatalf("LTXMode=%s 校验失败: %v", mode, err)
+		}
+		if got.LTXMode != mode {
+			t.Errorf("LTXMode = %q, want %q", got.LTXMode, mode)
+		}
+	}
+
+	// 大小写与空白归一。
+	in := base()
+	in.LTXMode = "  OnLY "
+	if got, err := ValidateSubscriptionPayload(in, true); err != nil || got.LTXMode != "only" {
+		t.Errorf("LTXMode 应当归一成 only，got %q / %v", got.LTXMode, err)
+	}
+
+	// 非法值报错。
+	in = base()
+	in.LTXMode = "always"
+	if _, err := ValidateSubscriptionPayload(in, true); err == nil {
+		t.Error("非法的 LTX 策略应当报错")
+	}
+
+	// 没开评论区链接 → 归空，不报错。
+	in = base()
+	in.LTXMode = "only"
+	in.IncludeCommentLinks = false
+	got, err := ValidateSubscriptionPayload(in, true)
+	if err != nil {
+		t.Fatalf("前提不成立时不该报错: %v", err)
+	}
+	if got.LTXMode != "" {
+		t.Errorf("没开评论区链接时 LTXMode 应当归空，got %q", got.LTXMode)
+	}
+
+	// 质量里没有破解 → 归空，不报错。
+	in = base()
+	in.LTXMode = "only"
+	in.Qualities = []string{"hd", "subtitle"}
+	got, err = ValidateSubscriptionPayload(in, true)
+	if err != nil {
+		t.Fatalf("前提不成立时不该报错: %v", err)
+	}
+	if got.LTXMode != "" {
+		t.Errorf("没勾破解时 LTXMode 应当归空，got %q", got.LTXMode)
+	}
+
+	// 空串永远合法（默认不启用）。
+	in = base()
+	in.IncludeCommentLinks = false
+	in.Qualities = nil
+	if got, err := ValidateSubscriptionPayload(in, true); err != nil || got.LTXMode != "" {
+		t.Errorf("不启用 LTX 时应当通过且为空，got %q / %v", got.LTXMode, err)
 	}
 }
 

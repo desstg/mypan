@@ -280,6 +280,15 @@ export interface JavSubscription {
   pre_download: boolean;
   /** 把影片评论区里分享的链接也纳入自动推送的候选。默认关。 */
   include_comment_links: boolean;
+  /**
+   * 评论区里的 **LTX 资源**怎么挑：`""` 不启用 / `"prefer"` 优先 / `"only"` 仅 LTX。
+   *
+   * 与 `include_comment_links` 正交，但**有前提**：必须同时勾了「破解」质量
+   * 且开着评论区链接，后端才认（quality.normalizeLTXMode 会把不满足前提的归成 `""`）。
+   *
+   * 三态字符串而不是两个 bool：「二选一 + 都不选」本身就是三态。
+   */
+  ltx_mode: string;
   qualities: string[];
   min_size_mb: number | null;
   max_size_mb: number | null;
@@ -318,6 +327,8 @@ export interface JavSubscriptionInput {
   pre_download: boolean;
   /** 把影片评论区里分享的链接也纳入自动推送的候选。默认关。 */
   include_comment_links: boolean;
+  /** LTX 策略，见 JavSubscription.ltx_mode。不传 = 不改 / 新增时为空。 */
+  ltx_mode?: string;
   qualities: string[];
   min_size_mb?: number | null;
   max_size_mb?: number | null;
@@ -365,6 +376,13 @@ export interface JavCandidate {
   codec_label: string;
   /** 这颗资源来自**影片评论区的用户分享**，而不是 JAVBUS 磁链表。 */
   from_comment: boolean;
+  /**
+   * 这颗资源是 **LTX 修复版**（链接自带的文件名里带 LTX 标记）。
+   *
+   * 判定只看链接里的文件名（磁链 `dn=` / ed2k 的文件名），不看评论正文。
+   * 不参与打分，只决定「LTX 优先 / 仅 LTX」这两条策略挑不挑它。
+   */
+  ltx: boolean;
 }
 
 export interface JavCheckResult {
@@ -771,6 +789,18 @@ export const JAV_SUBFOLDER_MODES = [
   { value: "code", label: "按番号（SSIS-001/）" },
   { value: "title", label: "按片名" },
   { value: "none", label: "不建子目录" },
+] as const;
+
+/**
+ * LTX 策略的两颗胶囊。**二选一**，且都可以不选（= 不启用）。
+ *
+ * 只有同时满足「勾了破解质量」+「开了评论区链接」才可用 —— 那两条判据在
+ * `JavSubscribePanel.vue` 的 `ltxAvailable` 里，后端同一个判据在
+ * `quality.normalizeLTXMode`。
+ */
+export const JAV_LTX_MODES = [
+  { value: "prefer", label: "LTX 优先" },
+  { value: "only", label: "仅 LTX" },
 ] as const;
 
 /** 把 download_mode + pre_download 合成三档，与后端 SubscriptionMode 同一套规则。 */

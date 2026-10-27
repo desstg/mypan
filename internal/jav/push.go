@@ -309,6 +309,31 @@ func (s *Service) pushBatch(ctx context.Context, sub *domain.JavSubscription, li
 	return pushOutcome{Pushed: pushed, Failed: failed, Reason: lastMsg}
 }
 
+// ltxCandidates 返回池里带 LTX 标记的那些（可能为空，但不会是 nil）。
+//
+// 判据走候选表里的标签名，不拿名字重算 —— 见 check.go 的 isLTXCandidate。
+func ltxCandidates(pool []*domain.JavCandidate) []*domain.JavCandidate {
+	ltxPool := make([]*domain.JavCandidate, 0, len(pool))
+	for _, c := range pool {
+		if isLTXCandidate(c) {
+			ltxPool = append(ltxPool, c)
+		}
+	}
+	return ltxPool
+}
+
+// preferLTX 是「LTX 优先」：池里有 LTX 就只在 LTX 里挑，一颗都没有就原样落回全体
+// —— 那正是用户说的「如果没有 LTX 资源，就还是保持以前那种方法选择」。
+//
+// 不改 ResourceScore / RankKey，也不改挑法（组内照样走 betterCandidate）：
+// LTX 只决定**在哪一组里挑**，不参与打分。
+func preferLTX(pool []*domain.JavCandidate) []*domain.JavCandidate {
+	if ltxPool := ltxCandidates(pool); len(ltxPool) > 0 {
+		return ltxPool
+	}
+	return pool
+}
+
 // pickCandidate 按订阅模式挑出要推的那一颗。
 //
 // 返回 (nil, 原因) 表示没有可推的，原因是要给用户看的一句话。
@@ -418,6 +443,37 @@ func (s *Service) pickCandidate(ctx context.Context, sub *domain.JavSubscription
 		}
 		pool = qualified
 	}
+
+	// LTX 策略（订阅上的 ltx_mode）：在**合格与否**那道闸**之后**再按「是不是 LTX」分组。
+	//
+	// ⚠️ 顺序不能反过来。先分组再筛合格的话，「优先」模式下那颗不合格的 LTX
+	// （体积不够 / 名字太杂）会把整池收窄成它自己，然后被筛掉 —— 池子空了，
+	// 订阅报「没有符合推送条件的资源」，而旁边明明躺着一颗合格的普通资源。
+	// 用户要的是「有 LTX 就优先它」，不是「有 LTX 就只认它」。
+	//
+	// 放在这里而不是塞进打分，理由有两层：
+	//  1. ResourceScore 是**落库的排序事实**（resource_score_json 里存着三元组），
+	//     改它的语义等于改所有存量候选的排序；
+	//  2. RankKey 追加在末尾才不影响主键（CompareRankKey 只比到较短的一方），
+	//     而「优先」这件事必须压过体积 —— 一颗 3GB 的 LTX 版该压过一颗 20GB 的普通版，
+	//     那是用户说的「有 LTX 就优先选择这资源」。
+	switch sub.LTXMode {
+	case domain.JavLTXModeOnly:
+		pool = ltxCandidates(pool)
+		if len(pool) == 0 {
+			// 「仅 LTX」且一颗都没有。
+			//
+			// ⚠️ 返回 **(nil, 原因)**，不能返回 error：`autoPush` 会把 nil 候选变成
+			// `PushResultView{OK:false, Message:…}`，而 `pushBatch` 判的是
+			// `res.ResourceFingerprint == ""` → 这一轮是 **Idle**（无事可做），
+			// 不是失败、不发通知。这正是用户要的「暂时不选择、不推送，直到有 LTX 才推」。
+			// 返回 error 会被 pushBatch 当成「整条订阅推不动」立刻收手并发 warning。
+			return nil, "还没有 LTX 资源，等它出现再推", nil
+		}
+	case domain.JavLTXModePrefer:
+		pool = preferLTX(pool)
+	}
+
 	if len(pool) == 0 {
 		return nil, "没有符合推送条件的资源", nil
 	}
@@ -808,7 +864,69 @@ func (s *Service) SubscribeMovie(ctx context.Context, subscriptionID int64, movi
 		return &PushResultView{OK: false, Message: "这部影片没有可推送的资源", MovieID: movieID}, nil
 	}
 
+	// LTX 策略与 pickCandidate 同源（preferLTX / ltxCandidates）。差别只在**怎么重新挑**：
+	// 那边是拿着整个池子在内存里比，这边是 SQL 的 PickBest，所以这里多取一次。
+	//
+	// 「仅 LTX」空了给的是 Idle 口径的提示（OK:false + 一句话），不是错误 ——
+	// 与自动推送那条一致：用户点了这一部，但 LTX 版还没出现，等它。
+	//
+	// relaxed 只在「仅 LTX」时放行：那时宁可推一颗不够完美的 LTX（与下面
+	// PickBest 的回退同一个取向），也不要因为「只有一颗不合格的 LTX」就永远不推。
+	// 「优先」模式**必须**限定合格的 —— 否则一颗不合格的 LTX 会顶掉手上这颗合格的
+	// 普通资源，与 pickCandidate 里「先筛合格、再分组」的顺序正好相反。
+	if sub.LTXMode == domain.JavLTXModeOnly || sub.LTXMode == domain.JavLTXModePrefer {
+		relaxed := sub.LTXMode == domain.JavLTXModeOnly
+		if ltxCand := s.pickLTXCandidate(ctx, sub, movieID, relaxed); ltxCand != nil {
+			cand = ltxCand
+		} else if sub.LTXMode == domain.JavLTXModeOnly {
+			return &PushResultView{OK: false, Message: "这部影片还没有 LTX 资源，等它出现再推", MovieID: movieID}, nil
+		}
+	}
+
 	return s.deliverCandidate(ctx, sub, cand, quality.SubscribeMovieKey(sub.ID, movieID, cand.ResourceFingerprint))
+}
+
+// pickLTXCandidate 在这一部影片的未试候选里挑一颗 LTX 的，没有就返回 nil。
+//
+// relaxed=false（「LTX 优先」）**只认合格的那些**，与 pickCandidate 里
+// 「先筛合格、再分组」是同一个顺序；relaxed=true（「仅 LTX」）才在第一轮落空后
+// 放宽到不合格的 —— 那时宁可推一颗不够完美的 LTX，也不要永远推不动。
+//
+// 为什么不用 SQL 加一个过滤条件：`ltx` 是 quality_tags_json 里的一个元素，
+// 用 SQL 判要么 `LIKE '%"ltx"%'`（字符串匹配，脆），要么 `json_each`（要改
+// javCandidateWhere 的语义，那里面每条都被 List/PickBest 共用）。而这里的候选集
+// 已经被 `movie_id` + `untried` 收在个位数，取回来在内存里过一遍更省事也更明确。
+func (s *Service) pickLTXCandidate(ctx context.Context, sub *domain.JavSubscription, movieID string, relaxed bool) *domain.JavCandidate {
+	passes := []bool{true}
+	if relaxed {
+		passes = append(passes, false)
+	}
+	for _, pushOKOnly := range passes {
+		rows, _, err := s.candidates.List(ctx, domain.JavCandidateFilter{
+			SubscriptionID: sub.ID, MovieID: movieID,
+			MatchedOnly: true, PushOKOnly: pushOKOnly, UntriedOnly: true,
+			Limit: 100,
+		})
+		if err != nil {
+			s.logWarn("jav list ltx candidates failed", "sub", sub.ID, "movie", movieID, "err", err)
+			return nil
+		}
+		var best *domain.JavCandidate
+		for _, c := range rows {
+			if !isLTXCandidate(c) {
+				continue
+			}
+			// List 的排序是「push_ok 优先 + 分数」，这里仍按 betterCandidate 挑，
+			// 与 pickCandidate 用的是同一个判据（不让两处挑出不同的那颗）。
+			if best == nil || betterCandidate(c, best) {
+				best = c
+			}
+		}
+		if best != nil {
+			return best
+		}
+	}
+	return nil
 }
 
 // PushCandidate 手动推一颗指定的候选。

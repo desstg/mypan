@@ -1648,7 +1648,13 @@ defineExpose({
           <div v-if="busyStem === item.stem" class="jav-wall__busy" />
         </div>
         <div class="jav-wall__meta">
-          <div class="jav-wall__number" :title="item.number">{{ item.number }}</div>
+          <!-- 番号那一行改成 flex：LTX 胶囊挂在番号右边，不压海报图。
+               `min-width: 0` 给番号本体 —— 省略号要靠它才生效，
+               否则长番号会把胶囊挤出卡片。 -->
+          <div class="jav-wall__number" :title="item.number">
+            <span class="jav-wall__number-text">{{ item.number }}</span>
+            <span v-if="item.ltx" class="jav-wall__ltx" title="LTX 修复版">LTX</span>
+          </div>
           <div class="jav-wall__title" :title="item.title">{{ item.title }}</div>
           <div class="jav-wall__sub">{{ subtitle(item) }}</div>
         </div>
@@ -1766,7 +1772,24 @@ defineExpose({
 /* 海报图视图用 2:3，缩略图视图保持 .jav-card__cover 原本的 3:2 */
 .jav-card__cover--poster { aspect-ratio: 2 / 3; }
 .jav-wall__meta { padding: 8px 2px 0; display: flex; flex-direction: column; gap: 2px; }
-.jav-wall__number { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jav-wall__number { display: flex; align-items: center; gap: 5px; min-width: 0; font-weight: 600; font-size: 13px; }
+/* 番号本体吃掉剩余宽度并自己省略 —— 胶囊 `flex: none` 永远留在卡片里。 */
+.jav-wall__number-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* LTX 修复版的胶囊。刻意做小（10px / 30px 宽），它是**附加信息**，
+   不该抢番号的位置；也正因为小，≤640px 那两列布局不需要单独一档断点。
+   低饱和的危险色系与候选弹窗里的 `LTX` 角标同族（那里是「破解」的橙红），
+   一眼就能把「这部是 LTX 版」与番号读成一句话。 */
+.jav-wall__ltx {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  letter-spacing: 0.02em;
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.14);
+}
 .jav-wall__title { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jav-wall__sub { font-size: 11px; color: var(--text-muted); }
 

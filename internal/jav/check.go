@@ -62,6 +62,9 @@ type CandidateView struct {
 	// 候选弹窗上标一下 —— 那个弹窗回答的正是「为什么挑了这颗」，
 	// 而「它是评论里来的、条件被放宽过」是这个答案的一半。
 	FromComment bool `json:"from_comment"`
+	// LTX 表示这颗资源的名字里带 LTX 标记（LTX 修复版）。
+	// 与 Uncensored / Subtitle 一样是「这颗资源是什么」的角标，不参与打分。
+	LTX bool `json:"ltx"`
 }
 
 // CheckSubscription 跑一轮订阅检查。
@@ -342,7 +345,9 @@ func (s *Service) buildCandidate(
 	reasons = append(reasons, movieReasons...)
 	reasons = append(reasons, pushReasons...)
 
-	tagList := make([]string, 0, 5)
+	tagList := make([]string, 0, 6)
+	// 来源先算出来：下面的 LTX 判定与 Source 字段都用它，各算一次迟早会算出不一样。
+	resSource := sourceOfMagnet(mg)
 	for _, t := range []struct {
 		on   bool
 		name string
@@ -352,6 +357,11 @@ func (s *Service) buildCandidate(
 		{tags.HD, domain.JavQualityHD},
 		{tags.Subtitle, domain.JavQualitySubtitle},
 		{tags.Edited, domain.JavQualityEdited},
+		// LTX 的判据是**链接自带的文件名**（磁链 dn= / ed2k 第 3 个字段），
+		// 不是 mg.Name —— 后者在评论链接认不出文件名时会退成评论正文，
+		// 正文里的「LTX」是分享者的评语。见 quality.LTXMarked 的说明。
+		// 它不参与打分，只在挑选那一步被 ltx_mode 读（见 push.go 的 pickCandidate）。
+		{quality.LTXMarked(mg.Magnet, mg.Name, resSource == domain.JavSourceComment), domain.JavQualityLTX},
 	} {
 		if t.on {
 			tagList = append(tagList, t.name)
@@ -410,6 +420,16 @@ func containsTag(tags []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// isLTXCandidate 报告这条候选是不是 LTX 修复版。
+//
+// 判据走候选表里的标签名（检查那一刻由 quality.IsLTX 写下的），不拿名字重算 ——
+// 与 tagsOf 那条「名称 → 标签只有一份事实来源」相反，这里的标签本来就是从名字
+// 算出来的**一个事实**，不是可以从名字重新推导的质量档位（它不影响打分）。
+// 重算还多一个坏处：候选的 MagnetName 可能被后续的清洗改过，而标签是当时那份的结论。
+func isLTXCandidate(c *domain.JavCandidate) bool {
+	return c != nil && containsTag(c.QualityTags, domain.JavQualityLTX)
 }
 
 // ————————————————————— 目标解析 —————————————————————
@@ -959,6 +979,7 @@ func (s *Service) candidatesToViews(ctx context.Context, rows []*domain.JavCandi
 			SourceLabel:     quality.SourceLabel(tags.Source),
 			CodecLabel:      quality.CodecLabel(tags.Codec),
 			FromComment:     c.Source == domain.JavSourceComment,
+			LTX:             containsTag(c.QualityTags, domain.JavQualityLTX),
 		}
 		if mv != nil {
 			view.MovieNumber = mv.Number

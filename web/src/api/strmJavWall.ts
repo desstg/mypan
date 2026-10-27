@@ -41,6 +41,13 @@ export interface JavWallItem {
   poster_rev?: string;
   release_date?: string;
   added_at?: string;
+  /**
+   * 这一部是 **LTX 修复版**（nfo 里有 `<genre>LTX破解</genre>`）。
+   *
+   * 卡片在番号旁挂一颗小胶囊。只从 nfo 读 —— 侧车里的 `resource.ltx` 是同一份
+   * 事实的另一个落点，nfo 与侧车由同一次推送写出，正常是同步的。
+   */
+  ltx?: boolean;
 }
 
 export interface JavWallStats {
@@ -115,6 +122,15 @@ export interface JavMovieMeta {
   four_k: boolean;
   uncensored: boolean;
   has_subtitle: boolean;
+  /**
+   * 这一部是 **LTX 修复版**（nfo 的 `<genre>LTX破解</genre>`）。
+   *
+   * 编辑器不在表单上暴露它，但**必须让它穿过保存**：这份对象会被 `Object.assign`
+   * 灌进表单、再用 `{...form}` 原样提交回去，后端重建 nfo 时按它决定写不写那条 genre。
+   * 类型里漏了它，TS 虽然不报错（运行时照样带着），但任何人想在这里加逻辑时
+   * 都会以为「没有这个字段」。
+   */
+  ltx: boolean;
   lock_data: boolean;
   custom_rating: string;
   mpaa: string;

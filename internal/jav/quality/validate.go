@@ -13,6 +13,8 @@ var (
 	ValidDownloadModes  = map[string]struct{}{"strict": {}, "upgrade": {}}
 	ValidQualities      = map[string]struct{}{"hd": {}, "uhd": {}, "subtitle": {}, "uncensored": {}}
 	ValidSubfolderModes = map[string]struct{}{"none": {}, "code": {}, "title": {}}
+	// ValidLTXModes 是 LTX 挑选策略的合法取值。空串 = 不启用，也在这一层判之前跳过。
+	ValidLTXModes = map[string]struct{}{"prefer": {}, "only": {}}
 )
 
 // Input 是订阅表单提交上来的原始数据。
@@ -27,6 +29,10 @@ type Input struct {
 
 	// IncludeCommentLinks 把评论区分享的链接也纳入候选池。见 domain.JavSubscription。
 	IncludeCommentLinks bool
+
+	// LTXMode 是评论区里 LTX 资源的挑选策略（"" / prefer / only）。
+	// 前提不成立时（没开评论链接、或质量没勾破解）会被归一成空串，不报错。
+	LTXMode string
 
 	Qualities         []string
 	MinSizeMB         *int
@@ -59,6 +65,9 @@ type Payload struct {
 	PreDownload  bool
 
 	IncludeCommentLinks bool
+
+	// LTXMode 见 Input.LTXMode。不满足前提时这里拿到的是空串。
+	LTXMode string
 
 	Qualities         []string
 	MinSizeMB         int
@@ -183,6 +192,11 @@ func ValidateSubscriptionPayload(in Input, creating bool) (*Payload, error) {
 		provider = "auto"
 	}
 
+	ltxMode, err := normalizeLTXMode(in.LTXMode, in.IncludeCommentLinks, qualities)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Payload{
 		TargetType: targetType,
 		TargetID:   targetID,
@@ -194,6 +208,7 @@ func ValidateSubscriptionPayload(in Input, creating bool) (*Payload, error) {
 		PreDownload:  in.PreDownload,
 
 		IncludeCommentLinks: in.IncludeCommentLinks,
+		LTXMode:             ltxMode,
 
 		Qualities:         qualities,
 		MinSizeMB:         minSize,
@@ -240,6 +255,40 @@ func normalizeQualities(values []string) ([]string, error) {
 	// 顺序不稳定时脏判断（比较前后串）会误报「有未保存的改动」。
 	sort.Strings(out)
 	return out, nil
+}
+
+// normalizeLTXMode 归一 LTX 挑选策略。
+//
+// 两件事：
+//  1. **非法取值报错** —— 与 `download_mode` / `subfolder_mode` 同一取向，
+//     静默降级会让人以为开关生效了；
+//  2. **前提不成立时归一成空串，而不是报错** —— 这个开关只有「勾了评论区链接」
+//     且「质量勾了破解」时才可用（见 JavSubscribePanel 里那两颗 chip 的 disabled 条件）。
+//     前端若因为用户先把「破解」取消勾选而带着一个旧值提交上来，报错会让整个保存失败，
+//     而用户的意图明明很清楚：那两个前提都没了，这个策略自然不成立。
+//     归一成空串与他在界面上看到的状态一致。
+func normalizeLTXMode(raw string, includeCommentLinks bool, qualities []string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		return "", nil
+	}
+	if _, ok := ValidLTXModes[mode]; !ok {
+		return "", fmt.Errorf("LTX 策略无效：%s", raw)
+	}
+	if !includeCommentLinks {
+		return "", nil
+	}
+	uncensored := false
+	for _, q := range qualities {
+		if q == "uncensored" {
+			uncensored = true
+			break
+		}
+	}
+	if !uncensored {
+		return "", nil
+	}
+	return mode, nil
 }
 
 // optionalInt 把表单里的可选数字归一成「值 + 有没有设」。

@@ -173,6 +173,104 @@ func TestParseNFOWithoutHints(t *testing.T) {
 	}
 }
 
+// TestLTXGenreRoundTrip 钉住 `LTX破解` 这一条的三面契约：
+// buildGenres 写出、recoverTags 消去、ParseNFO 识别，三处必须同一个词同一个位置。
+//
+// 少改一处就会表现成「打开编辑器保存一次，标签里多出一个 LTX破解」（消去漏了）
+// 或「保存之后 LTX 标记掉了」（识别漏了）—— 两者都是静默的。
+func TestLTXGenreRoundTrip(t *testing.T) {
+	doc := mustParse(t, `{"schema":"litepan.jav.sidecar/1","number":"MISM-305","number_letter":"MISM",
+		"tags":["巨乳"],"actors":[{"name":"演员甲"}],
+		"resource":{"ltx":true},
+		"quality":{"uncensored":true,"four_k":false,"subtitle":false}}`)
+	out, err := BuildNFO(doc, NFOOptions{Names: TargetNames("MISM-305", false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 写：LTX破解 必须在 genre 里，且**紧跟在 破解 之后**（顺序是三面契约的一部分）。
+	xml := string(out)
+	if !strings.Contains(xml, "<genre>破解</genre>") {
+		t.Fatalf("前提不成立：这份 nfo 里没有 破解\n%s", xml)
+	}
+	if !strings.Contains(xml, "<genre>LTX破解</genre>") {
+		t.Fatalf("侧车 resource.ltx=true，nfo 里应当有 <genre>LTX破解</genre>\n%s", xml)
+	}
+	// <tag> 是 genre 的排序副本 —— 同一批词，必须也在。
+	if !strings.Contains(xml, "<tag>LTX破解</tag>") {
+		t.Errorf("<tag> 应当与 <genre> 同批，nfo 里找不到 <tag>LTX破解</tag>\n%s", xml)
+	}
+	if strings.Index(xml, "<genre>破解</genre>") > strings.Index(xml, "<genre>LTX破解</genre>") {
+		t.Error("LTX破解 应当排在 破解 之后（buildGenres 的顺序）")
+	}
+
+	// 读：LTX 标记必须还原，且**不能留在 Tags 里**（与 破解 同款）。
+	meta, err := ParseNFO(out, NFOReadHints{NumberLetter: "MISM", Censored: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.LTX {
+		t.Error("nfo 里有 <genre>LTX破解</genre>，meta.LTX 应当为 true")
+	}
+	if !meta.Uncensored {
+		t.Error("meta.Uncensored 应当仍然为 true")
+	}
+	if strings.Join(meta.Tags, "|") != "巨乳" {
+		t.Errorf("合成项应当被剥干净，只留真标签，got %v", meta.Tags)
+	}
+
+	// 往返：编辑器打开、什么都不改、保存 —— 字节必须一模一样。
+	again, err := BuildNFOFromMeta(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out, again) {
+		t.Errorf("LTX 影片的往返应当字节相同\n--- 第一次\n%s\n--- 第二次\n%s", out, again)
+	}
+
+	// 反方向：侧车没有 resource.ltx（存量片）时，nfo 里一条都不该多出来。
+	plain := mustParse(t, `{"schema":"litepan.jav.sidecar/1","number":"MISM-305","number_letter":"MISM",
+		"quality":{"uncensored":true}}`)
+	out2, err := BuildNFO(plain, NFOOptions{Names: TargetNames("MISM-305", false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out2, []byte("LTX破解")) {
+		t.Error("侧车没有 resource.ltx 时不该写出 LTX破解（不回填存量）")
+	}
+	m2, err := ParseNFO(out2, NFOReadHints{NumberLetter: "MISM", Censored: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m2.LTX {
+		t.Error("存量 nfo 读回来 LTX 应当为 false")
+	}
+}
+
+// TestTitleNumberDatesLTX 钉住海报墙那条窄解析：只要一个布尔，不建 genre 切片。
+func TestTitleNumberDatesLTX(t *testing.T) {
+	withLTX := []byte(`<movie><title>MISM-305 标题</title><num>MISM-305</num>
+<genre>巨乳</genre><genre>破解</genre><genre>LTX破解</genre><genre>片商: X</genre></movie>`)
+	info, err := TitleNumberDates(withLTX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.LTX {
+		t.Error("genre 里有 LTX破解 时 info.LTX 应当为 true")
+	}
+	if info.Number != "MISM-305" || info.Title != "MISM-305 标题" {
+		t.Errorf("标题/番号不该被这次改动影响，got %+v", info)
+	}
+
+	noLTX := []byte(`<movie><title>T</title><num>X-1</num><genre>破解</genre></movie>`)
+	info, err = TitleNumberDates(noLTX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.LTX {
+		t.Error("没有 LTX破解 时不该判 true")
+	}
+}
+
 // TestParseNFOTagEqualsActorName 记录一条**已知且接受**的损失，不是 bug。
 //
 // buildGenres 会去重，所以「真标签恰好等于演员名」时那份词只出现一次，读回来

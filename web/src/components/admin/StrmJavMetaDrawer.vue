@@ -113,6 +113,11 @@ function emptyMeta(): JavMovieMeta {
     release_date: "", duration: 0, score: 0, score_max: 5, votes: 0, rating_name: "javdb",
     javdb_url: "", cover_url: "", trailer_url: "", added_at: "",
     four_k: false, uncensored: false, has_subtitle: false,
+    // LTX 不在表单上出现，但**要跟着一起提交**：后端就是按它决定 nfo 里写不写
+    // `<genre>LTX破解</genre>`。这里给 false 只是兜底的值，真实值由
+    // `Object.assign(form, emptyMeta(), data.meta)` 用后端返回的那份盖掉 ——
+    // 所以顺序不能反，反了就会把已保存的 LTX 标记默默抹掉。
+    ltx: false,
     lock_data: false, custom_rating: "JP-18+", mpaa: "JP-18+", country_code: "JP",
   };
 }
