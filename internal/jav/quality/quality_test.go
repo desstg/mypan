@@ -371,6 +371,125 @@ func TestLTXMarked(t *testing.T) {
 	}
 }
 
+// TestLTXMarkedNegation 钉住「正文里的 LTX 被否定/求片语境包着时判否」。
+//
+// 2026-10-28 用户拍板加的。真误判只有一条（群晖库、movie=5EZM6D）：
+//
+//	4KLADA破解，坐等LTX ed2k://|file|www.98T.la@MIDV-433-U.mp4|…
+//
+// 意思是「我等着 LTX 版」，贴的却是普通版；配上「仅 LTX」会把这座普通版推出去。
+//
+// 两条**绝对不能被这条闸碰到**：
+//   - 链接自带文件名里有 LTX（那是发布者对文件的标注，正文说什么都不能推翻）；
+//   - 「最新LTX」这类含「新」的**肯定**说法（真库里最常见的写法）。
+func TestLTXMarkedNegation(t *testing.T) {
+	const btih = "magnet:?xt=urn:btih:" + "0123456789abcdef0123456789abcdef01234567"
+	// 真样本：群晖库 5EZM6D，链接名里没有 LTX。
+	const plain4k = "ed2k://|file|www.98T.la@MIDV-433-U.mp4|28277487747|14A8E509C8597BC9AA035CAB5B0C241A|/"
+	cases := []struct {
+		name        string
+		uri         string
+		display     string
+		body        string
+		fromComment bool
+		want        bool
+	}{
+		// —— 该判否的 ——
+		{
+			name: "真样本 5EZM6D：坐等LTX，贴的是普通版", uri: plain4k,
+			display: "www.98T.la@MIDV-433-U.mp4", body: "4KLADA破解，坐等LTX", fromComment: true, want: false,
+		},
+		{
+			name: "求 LTX 版，贴的是普通版", uri: plain4k,
+			display: "www.98T.la@MIDV-433-U.mp4", body: "求LTX版本", fromComment: true, want: false,
+		},
+		{
+			name: "这个不是LTX吧", uri: plain4k,
+			display: "www.98T.la@MIDV-433-U.mp4", body: "这个不是LTX吧，假的", fromComment: true, want: false,
+		},
+		{
+			name: "没有LTX吗", uri: plain4k,
+			display: "www.98T.la@MIDV-433-U.mp4", body: "有没有LTX吗", fromComment: true, want: false,
+		},
+		{
+			name: "LTX吧（后界提问）", uri: plain4k,
+			display: "www.98T.la@MIDV-433-U.mp4", body: "这算LTX吧", fromComment: true, want: false,
+		},
+		// —— 绝不能被误伤的 ——
+		{
+			name: "最新LTX 是真样本最常见的肯定写法", uri: plain4k,
+			display: "www.98T.la@MIDV-433-U.mp4", body: "高金自购最新LTX模型敬请取用", fromComment: true, want: true,
+		},
+		{
+			name: "LTX 前面只是图解语气词，不算否定", uri: plain4k,
+			display: "www.98T.la@MIDV-433-U.mp4", body: "孩子们，这不是白上咲花😭LTX :", fromComment: true, want: true,
+		},
+		{
+			name: "LTX搬运（转贴 LTX 版，是肯定）", uri: plain4k,
+			display: "www.98T.la@MIDV-433-U.mp4", body: "LTX搬运", fromComment: true, want: true,
+		},
+		{
+			// 关键：链接自带的文件名是权威，正文的否定推翻不了它。
+			name: "链接名带 LTX，正文说不是 LTX → 仍算",
+			uri:  "ed2k://|file|www.98T.la@MIDV-433-U-LTX.mp4|28277487747|14A8E509C8597BC9AA035CAB5B0C241A|/",
+			display: "www.98T.la@MIDV-433-U-LTX.mp4",
+			body:    "这个不是LTX吧", fromComment: true, want: true,
+		},
+		{
+			// 磁链 dn= 同理：正文（这里本来也不看）怎么否定都不影响。
+			name: "磁链 dn= 带 LTX，正文否定 → 仍算",
+			uri:  btih + "&dn=MIDV-433-U-LTX.mp4", display: "MIDV-433-U-LTX.mp4",
+			body: "求LTX版本", fromComment: true, want: true,
+		},
+		{
+			// 否定词隔得远就不是对同一个词的态度：一条评论里既求又发是常态。
+			name: "否定词离得远（超过 8 字）不算否定", uri: plain4k,
+			display: "www.98T.la@MIDV-433-U.mp4",
+			body:    "求一下这部片的字幕，另外这个是LTX修复版", fromComment: true, want: true,
+		},
+	}
+	for _, c := range cases {
+		if got := LTXMarked(c.uri, c.display, c.body, c.fromComment); got != c.want {
+			t.Errorf("%s：LTXMarked(%q, %q, %q, %v) = %v, want %v",
+				c.name, c.uri, c.display, c.body, c.fromComment, got, c.want)
+		}
+	}
+}
+
+// TestLTXNegatedTokenPosition 钉住 ltxNegated 的位置计算。
+//
+// reLTX 的边界类 `(?:^|[^a-z])` 会把前一个字符**吃进 match**，
+// 所以直接拿 m.start() 截上下文会截到边界字符（`坐等LTX` 截到 `等` 前面的 `坐`），
+// `等\s*$` 这种前缀永远匹配不上 —— 第一版正是这么写的，真库上测出 0 条判否。
+func TestLTXNegatedTokenPosition(t *testing.T) {
+	negated := []string{
+		"坐等LTX",       // 前界把「等」吃进 match 的典型
+		"坐等 LTX",      // 带空格
+		"求LTX",
+		"不是LTX",
+		"没有LTX",
+		"LTX吧",
+		"LTX吗",
+	}
+	notNegated := []string{
+		"最新LTX",
+		"LTX搬运",
+		"隔壁4k画质的ltx破解",
+		"LTX模型破解堪比无码",
+		"",
+	}
+	for _, s := range negated {
+		if !ltxNegated(s) {
+			t.Errorf("%q 应判为否定", s)
+		}
+	}
+	for _, s := range notNegated {
+		if ltxNegated(s) {
+			t.Errorf("%q 不该判为否定", s)
+		}
+	}
+}
+
 // TestIsChinese 钉住「名字里带中字标记」的判据。
 //
 // ⚠️ `-UC` 那一条是**有意偏离源码**的（见 tags.go 里 reChinese 的长注释）：

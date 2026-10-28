@@ -484,23 +484,91 @@ func LinkName(uri string) string {
 // 注释里；实测发现大量分享者把「LTX 模型」写在正文、链接名保持原样
 // （`/＊/高金自购最新LTX模型敬请取用 ed2k://|file|…PRWF-017_restored.mp4|…`），
 // 于是那条规矩会漏掉真样本。用户明确要求「正文里的也算上，不要开关」，
-// 所以：**不加开关、不做反向否定、判据只有这一份**。
+// 所以：**不加开关、判据只有这一份**。
 //
-// 已知代价（用户已知悉并接受）：正文写「求 LTX 版」「这个不是 LTX」这类**否定义**
-// 的评论同样会被判成 LTX，配上「仅 LTX」等于把一颗其实不是修复版的资源推出去。
-// 想收紧只能再加判据，不要再回到「某些来源不看正文」那种按来源分叉的老路上。
+// # 否定/求片（2026-10-28 加的，第 1 条链接名仍然绝对优先）
+//
+// 「正文也算」的第一版有个真误判：`4KLADA破解，坐等LTX ed2k://|file|…MIDV-433-U.mp4|…`
+// —— 这句话的意思是「我等着 LTX 版」，贴的却是普通版，可它被判成了 LTX。
+// 配上「仅 LTX」就会把一颗其实不是修复版的资源推出去。
+//
+// 所以正文与展示名这两处**多一道否定闸**（见 ltxNegated）：`不是 ltx` / `非 ltx` /
+// `没有 ltx` / `求 ltx` / `坐等 ltx` / `等 ltx` / `ltx 吧` / `ltx 吗` 这类紧邻句式判否。
+//
+// **这个闸只作用于「名字里出现 ltx 就算数」的那两处**，绝不影响第 1 条：
+// 链接自带的文件名是分享者自己对文件的标注，那是权威，正文说什么都不能推翻它。
+// 换句话说：`_LTX.mp4` 这种链接哪怕正文写着「这个不是 LTX」，也照样判是。
+//
+// 真库量过（2026-10-28，本机 118 条 + 群晖 221 条就是闸的全部作用面）：
+// 只翻掉 1 条（本机 0、群晖 1），其余 338 条「链接名没写 LTX、正文写了」的
+// 真样本一条不动。所以它是**纯收益**，不存在「为了修 1 条误判丢掉一堆真样本」的取舍。
 func LTXMarked(uri, name, body string, fromComment bool) bool {
+	// 第 1 条：链接自带的名字。权威，不受下面的否定闸影响。
 	if IsLTX(LinkName(uri)) {
 		return true
 	}
 	if fromComment {
 		// 评论正文与展示名一起看：name 在认不出链接文件名时本来就是正文的前 80 字
 		// （commentlink.nameOf），两者重叠是常态，分开判是为了正文超长时也不漏。
+		if ltxNegated(name) || ltxNegated(body) {
+			return false
+		}
 		return IsLTX(name) || IsLTX(body)
 	}
 	// 磁链表那一路的 name 就是种子名；链接自带的 dn= 在上面已经认过了。
+	// 种子名是发布者给文件起的名字（与链接文件名同源），同样不受否定闸影响。
 	return IsLTX(name)
 }
+
+// ltxNegated 判定一段文本里的 LTX 是不是被否定/求片语境包着的。
+//
+// 只看**紧邻**（前后 8 个字符内）：这些说法在中文里都是贴着写的
+// （`坐等LTX`、`求LTX`、`不是LTX吧`），隔得远就不再是同一个人对同一个词的态度 ——
+// 一条评论里既有「求 LTX」又有真链接是常态，放宽范围会把整条评论判死。
+//
+// ⚠️ **token 的位置必须自己算**：reLTX 的边界类是 `(?:^|[^a-z])…(?:[^a-z]|$)`，
+// 前界那个「不是字母的字符」会被吃进 match 里。拿 m.start() 去截上下文，
+// 截到的是边界字符（`坐等LTX` 的 `等`），于是 `等\s*$` 这种前缀永远匹配不上 ——
+// 第一版就是这么写的，真库上测出 0 条判否（而 `坐等LTX` 明明该判否）。
+func ltxNegated(text string) bool {
+	if text == "" || !reLTX.MatchString(text) {
+		return false
+	}
+	for _, m := range reLTX.FindAllStringIndex(text, -1) {
+		// 从 match 里找出 ltx 三字母的真实起止，边界字符不属于它。
+		start, end := m[0], m[1]
+		if off := strings.Index(strings.ToLower(text[start:end]), "ltx"); off >= 0 {
+			start, end = start+off, start+off+3
+		}
+		if reLTXNegBefore.MatchString(text[max(0, start-ltxNegContext):start]) {
+			return true
+		}
+		if reLTXNegAfter.MatchString(text[end:min(len(text), end+ltxNegContext)]) {
+			return true
+		}
+	}
+	return false
+}
+
+// ltxNegContext 是判「否定/求片」时往前后看多远。
+//
+// 8 个字符够容纳「坐等」「不是」「有没有」再加上一点语气词，又不至于跨到
+// 同一句话里另一个分句去。调大只会变激进（把真样本也判否），调小会漏掉
+// 「求一个 LTX」这种中间带量词的写法。
+const ltxNegContext = 8
+
+// reLTXNegBefore / reLTXNegAfter 是「否定或求片」贴在 LTX 前后的说法。
+//
+// 这两条只用来**否决**「正文/展示名里出现了 ltx」这个信号，不会把任何东西
+// 判成 LTX。所以宁可收得准一点：把「最新」「更新」这类**含 新 字但意思是肯定**的
+// 说法排除在外（`最新LTX` 是最常见的一种真样本写法，绝不能被误判）。
+var (
+	// 前界：这些词直接贴在 LTX 前面。
+	// 「等」单独成条是因为 `坐等LTX` 里「坐」也在，但 `等 LTX` 单独写也常见。
+	reLTXNegBefore = regexp.MustCompile(`(?:不是|并非|非|没有|没|求|跪求|求购|求个|求一个|想要|需要|缺|坐等|等|要|找个|哪个|有没有|谁有|哪位|找不到)\s*$`)
+	// 后界：LTX 后面紧跟提问/索取的语气。
+	reLTXNegAfter = regexp.MustCompile(`^\s*(?:吧|吗|呢|有没有|链接有没有|在哪)`)
+)
 
 // IsChinese 判断名称是否含中文字幕。逐字移植源码 javbus.is_chinese。
 func IsChinese(name string) bool {

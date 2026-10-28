@@ -363,6 +363,8 @@ func (s *Service) buildCandidate(
 		// 大量分享者只在正文写「最新 LTX 模型」、链接名保持原样（用户 2026-10-27
 		// 改口，且明确不加开关）。mg.CommentText 由 commentMagnets 一路上填过来，
 		// 磁链表那条路是空串。
+		// 正文与展示名另有**否定闸**（「求 LTX」「不是 LTX」判否，见 quality.ltxNegated），
+		// 链接自带的文件名不受它影响 —— 那是发布者对文件的标注，正文推翻不了。
 		// 它不参与打分，只在挑选那一步被 ltx_mode 读（见 push.go 的 pickCandidate）。
 		{quality.LTXMarked(mg.Magnet, mg.Name, mg.CommentText, resSource == domain.JavSourceComment), domain.JavQualityLTX},
 	} {

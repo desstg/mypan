@@ -188,7 +188,8 @@ type sidecarResourceJSON struct {
 	Source      string `json:"source"`
 	FromComment bool   `json:"from_comment"`
 	// LTX 表示这一颗资源是 LTX 修复版（链接自带的文件名 / 资源名 / 评论正文任一
-	// 命中，判据见 quality.LTXMarked）。
+	// 命中，判据见 quality.LTXMarked；正文与资源名另有否定闸，
+	// 「求 LTX」「不是 LTX」判否，链接名不受影响）。
 	//
 	// 落在 resource 而不是 quality 块：它描述的是「这一颗资源是什么」，
 	// 与 source / from_comment 同类；quality 块是 quality.DetectTags 的镜像，

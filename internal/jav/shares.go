@@ -43,7 +43,8 @@ type CommentShareView struct {
 	Uncensored      bool   `json:"uncensored"`
 	Subtitle        bool   `json:"subtitle"`
 	// LTX 表示这一条是 LTX 修复版。判据与自动挑选那一路**同一个函数**
-	// （quality.LTXMarked：链接文件名 / 展示名 / 正文任一命中都算），
+	// （quality.LTXMarked：链接文件名 / 展示名 / 正文任一命中都算；
+	// 正文与展示名另有否定闸，「求 LTX」「不是 LTX」判否，链接名不受影响），
 	// 所以界面上看到的角标与订阅挑不挑它是同一个结论。
 	LTX bool `json:"ltx"`
 }

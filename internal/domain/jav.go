@@ -66,7 +66,9 @@ const (
 	//
 	// 与 JavQualityEdited 一样**不进** QUALITY_VALUES（它不是一个可以筛的质量条件），
 	// 但它比 edited 多一个用途：订阅的 ltx_mode 靠它决定挑哪一颗（见 push.go）。
-	// 判据由 quality.LTXMarked 负责（链接自带的文件名 / 展示名 / 评论正文任一命中）。
+	// 判据由 quality.LTXMarked 负责（链接自带的文件名 / 展示名 / 评论正文任一命中）；
+	// 正文与展示名那两处还有一道否定闸（「求 LTX」「不是 LTX」判否），
+	// 链接自带的文件名不受它影响。
 	JavQualityLTX = "ltx"
 )
 
