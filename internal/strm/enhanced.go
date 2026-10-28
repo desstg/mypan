@@ -22,6 +22,42 @@ type unresolvedEnhancedDir struct {
 	examples  []string
 }
 
+// dirPathUnderRoot 报告一个**缓存里**的目录路径是否仍然落在任务根之下。
+//
+// 为什么缓存命中也要核：`relDirsOf` 比对失败时是**静默 continue**（不记失败、
+// 不告警），于是「缓存里的路径全部不在任务根下」会让本轮 seen 集合为空，
+// 清理随之把全部 .strm 当成「远端已不存在」删掉 —— 而手动「全部执行」还会
+// 绕过 1000 个 STRM 的阈值保护，这是真实会丢文件的一条路。
+//
+// 什么时候会这样：用户在 115 网页端改了任务根上的目录名。`strm_remote_dir_cache`
+// 存的是旧路径，而改名事件只有经过 LitePan 的操作才会失效缓存
+// （见 dir_cache_mutation.go），网页端改的它看不见。
+//
+// 这里只做**前缀**判断，不解析完整路径：既然 pid→path 的整条链在缓存里都齐，
+// 那么某个子目录的路径不落在任务根下，说明它真正被移到了任务根之外，
+// 或者整批缓存已经和网盘对不上。两种情形都不该继续按旧路径写出 STRM。
+//
+// 注意 pid 为 "0"（根）那条不受影响：它在 resolveDirPaths 开头直接映射成 ""。
+func dirPathUnderRoot(dirPath string, rootSegs []string) bool {
+	if len(rootSegs) == 0 {
+		return true // 任务根就是网盘根，任何路径都在范围内
+	}
+	p := strings.Trim(strings.ReplaceAll(strings.TrimSpace(dirPath), "\\", "/"), "/")
+	if p == "" {
+		return false // 空路径代表网盘根，不在非空的任务根之下
+	}
+	segs := splitRemotePath(p)
+	if len(segs) < len(rootSegs) {
+		return false
+	}
+	for i := range rootSegs {
+		if !strings.EqualFold(segs[i], rootSegs[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func useEnhancedScan(ctx context.Context, task *domain.StrmTask, deps ScanDeps, runMode string) (bool, error) {
 	if !deps.Settings.Tool115TreeEnabled {
 		return false, nil
@@ -56,11 +92,17 @@ func scanEnhancedTask(
 		log = slog.Default()
 	}
 
+	// 进度上报：这条路径**没有逐目录 List** 可以蹭 `walkScope` 里的那几拍，
+	// 不补的话整轮扫描期间前端一直显示「0 目录 / 0 文件」，看起来像卡死。
+	reportScanProgress(deps.OnProgress, ScanPhaseScan, 0, 0, "拉取网盘清单")
 	entries, err := deps.Files.ListAllFiles(ctx, task.AccountID, task.ParentID)
 	if err != nil {
 		return result, err
 	}
-	dirPaths, unresolved, err := resolveDirPaths(ctx, deps, task.AccountID, entries)
+	reportScanProgress(deps.OnProgress, ScanPhaseScan, 0, 0,
+		fmt.Sprintf("清单 %d 个文件，解析目录路径", len(entries)))
+	rootSegs := splitRemotePath(task.Path)
+	dirPaths, unresolved, err := resolveDirPaths(ctx, deps, task.AccountID, entries, rootSegs, deps.OnProgress)
 	if err != nil {
 		return result, err
 	}
@@ -91,7 +133,6 @@ func scanEnhancedTask(
 		}
 	}
 
-	rootSegs := splitRemotePath(task.Path)
 	outputFolder := TaskRelDir(task.GroupDir, task.OutputFolder)
 	var candidates []mediaCandidate
 	var metadataItems []metadataItem
@@ -126,6 +167,13 @@ func scanEnhancedTask(
 		if !ok {
 			continue // 远端路径不在任务根范围内，忽略
 		}
+		// 「递归」开关对齐：逐目录递归那条路由 scanScope.recursive 把关
+		// （见 scanner.go 的 walkScope），**非递归任务只处理任务根下的文件**。
+		// 清单模式没有「往不往下走」这个动作，所以只能在每条文件上按相对深度挡一次；
+		// 不挡的话非递归任务会把所有子孙目录的文件都收进来。
+		if !task.Recursive && len(relDirs) > 0 {
+			continue
+		}
 		// 目录级排除：全量清单没有"逐层递归"这个动作，所以要在每条文件上
 		// 回溯它所在的每一层目录，逐层比对 —— 与逐目录递归的那条路同义。
 		// 以前这里压根没看 excludeDirs（参数传进来就没人用），排除词在
@@ -139,6 +187,10 @@ func scanEnhancedTask(
 			candidates = append(candidates, classified.media)
 			dirHasMedia[dirKey(relDirs)] = true
 			markSubtreeMedia(subtreeHasMedia, relDirs)
+			// 与 walkScope 的写法保持一致：每命中一个媒体文件报一次。
+			if deps.OnProgress != nil {
+				reportScanProgress(deps.OnProgress, ScanPhaseScan, 0, 1, dirProgressLabel(relDirs))
+			}
 			continue
 		}
 		if classified.hasMetadata {
@@ -206,7 +258,14 @@ func pruneDirCache(ctx context.Context, deps ScanDeps, task *domain.StrmTask, en
 
 // resolveDirPaths 返回 pid→完整远端路径 映射：
 // 优先查 SQLite 缓存，未命中的调驱动 ResolveDirPath 反查并落库。
-func resolveDirPaths(ctx context.Context, deps ScanDeps, accountID int64, entries []driver.FullListEntry) (map[string]string, map[string]unresolvedEnhancedDir, error) {
+//
+// onProgress 用来上报「解析了多少个目录」——缓存未命中的目录每一个都是一次
+// `/open/folder/get_info`（串行 + 账号级节流），首轮这里是整轮扫描的主要耗时，
+// 没有进度的话前端只能干等。
+//
+// rootSegs 是任务根的路径分段：**缓存命中也要在这里核一次前缀**，理由是安全的，
+// 见 dirPathUnderRoot。
+func resolveDirPaths(ctx context.Context, deps ScanDeps, accountID int64, entries []driver.FullListEntry, rootSegs []string, onProgress ScanProgressReporter) (map[string]string, map[string]unresolvedEnhancedDir, error) {
 	out := make(map[string]string, 64)
 	unresolved := make(map[string]unresolvedEnhancedDir)
 	if deps.DirCache == nil || deps.Files == nil {
@@ -247,13 +306,30 @@ func resolveDirPaths(ctx context.Context, deps ScanDeps, accountID int64, entrie
 		return nil, nil, err
 	}
 	var missing []string
+	// recheck 记下「缓存里在、但前缀对不上」的 pid：复核后若仍不在任务根下，
+	// 必须计入 unresolved（阻断本轮清理），不能当普通「不相关目录」丢掉 ——
+	// 丢掉会让 seen 集合缩小，正是我们要堵的那个删除风险。
+	recheck := make(map[string]struct{})
 	for _, pid := range ids {
 		if p, ok := hit[pid]; ok {
-			out[pid] = p
-		} else {
-			missing = append(missing, pid)
+			// 缓存命中也要核前缀：不核的话，缓存里整批路径都过期（改了任务根
+			// 目录名）时本轮会静默收不到任何候选，清理进而删光本地 STRM。
+			// 前缀失配的走一次反查复核，而不是直接信缓存、也不是直接丢掉 ——
+			// 丢掉同样会缩小 seen 集合，等于把风险从「按旧路径写」换成「按空集合删」。
+			// 反查到真实路径就得到自证；它若确实在任务根之外，下面的
+			// recheck 分支会把它计入 unresolved 并阻断本轮清理。
+			if dirPathUnderRoot(p, rootSegs) {
+				out[pid] = p
+				continue
+			}
+			recheck[pid] = struct{}{}
 		}
+		missing = append(missing, pid)
 	}
+	// 缓存命中一次就算全部搞定，所以这里可以整块报；未命中的则逐个报（下面）。
+	cached := len(ids) - len(missing)
+	reportScanProgress(onProgress, ScanPhaseScan, cached, 0,
+		fmt.Sprintf("目录路径 %d/%d（缓存命中）", cached, len(ids)))
 	if len(missing) == 0 {
 		return out, unresolved, nil
 	}
@@ -269,22 +345,37 @@ func resolveDirPaths(ctx context.Context, deps ScanDeps, accountID int64, entrie
 		fresh = fresh[:0]
 		return nil
 	}
+	// 未命中的目录每个都是一次 get_info（串行 + 节流），逐个报进度，
+	// 前端才看得出在动。已解析数 = 缓存命中 + 本循环已完成的。
+	// 注意「解析失败」的那几个也要计入 —— 否则进度会卡在中途不动。
+	var resolvedThisPass int
 	for _, pid := range missing {
 		p, rerr := resolveDirPathWithRetry(ctx, deps, accountID, pid)
-		if rerr != nil {
-			if isNotFoundError(rerr) {
-				unresolved[pid] = unresolvedEnhancedDir{fileCount: fileCounts[pid], examples: examples[pid]}
-				continue
-			}
+		resolvedThisPass++
+		if rerr != nil && !isNotFoundError(rerr) {
 			if flushErr := flush(); flushErr != nil {
 				return nil, nil, flushErr
 			}
 			return nil, nil, rerr
 		}
-		out[pid] = p
-		fresh = append(fresh, domain.StrmDirCacheEntry{
-			AccountID: accountID, DirID: pid, DirPath: p, LastSeenAt: now,
-		})
+		if rerr != nil {
+			unresolved[pid] = unresolvedEnhancedDir{fileCount: fileCounts[pid], examples: examples[pid]}
+		} else if _, wasCached := recheck[pid]; wasCached && !dirPathUnderRoot(p, rootSegs) {
+			// 缓存里有、复核后确认在任务根之外：这是一条**明确的越界**（目录被
+			// 移走，或整批缓存与网盘对不上），记成 unresolved 以阻断本轮清理，
+			// 同时把新路径落库，下一轮就不必再复核。
+			unresolved[pid] = unresolvedEnhancedDir{fileCount: fileCounts[pid], examples: examples[pid]}
+			fresh = append(fresh, domain.StrmDirCacheEntry{
+				AccountID: accountID, DirID: pid, DirPath: p, LastSeenAt: now,
+			})
+		} else {
+			out[pid] = p
+			fresh = append(fresh, domain.StrmDirCacheEntry{
+				AccountID: accountID, DirID: pid, DirPath: p, LastSeenAt: now,
+			})
+		}
+		reportScanProgress(onProgress, ScanPhaseScan, 1, 0,
+			fmt.Sprintf("目录路径 %d/%d", cached+resolvedThisPass, len(ids)))
 		if len(fresh) >= enhancedDirCacheBatchSize {
 			if err := flush(); err != nil {
 				return nil, nil, err

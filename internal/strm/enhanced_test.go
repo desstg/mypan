@@ -325,6 +325,7 @@ func TestEnhancedScanUsedForBranchTaskFullRun(t *testing.T) {
 		AccountID:          1,
 		ParentID:           "lib",
 		Path:               "/库",
+		Recursive:          true,
 		BranchCheckEnabled: true,
 		ScanMode:           domain.StrmScanModeIncrementalUpdate,
 		Extensions:         "mkv",
@@ -449,6 +450,7 @@ func TestEnhancedScanSkipsMissingDirectoryAndBlocksCleanup(t *testing.T) {
 		AccountID:    1,
 		ParentID:     "lib",
 		Path:         "/库",
+		Recursive:    true,
 		ScanMode:     domain.StrmScanModeIncrementalUpdate,
 		Extensions:   "mkv",
 		OutputFolder: "任务",
@@ -502,7 +504,7 @@ func TestEnhancedScanPersistsResolvedMappingsBeforeFatalError(t *testing.T) {
 	}
 	files := file.NewService(driverexec.New(enhancedTestProvider{drv: drv}, nil), nil, nil, nil, nil, nil)
 	cache := newMemDirCache()
-	_, _, err := resolveDirPaths(context.Background(), ScanDeps{Files: files, DirCache: cache}, 1, drv.entries)
+	_, _, err := resolveDirPaths(context.Background(), ScanDeps{Files: files, DirCache: cache}, 1, drv.entries, splitRemotePath("/库"), nil)
 	if err == nil {
 		t.Fatal("非目录不存在错误应中断本次扫描")
 	}

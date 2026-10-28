@@ -129,7 +129,7 @@ async function clearCache() {
         driver="115Open · STRM 全量清单扫描"
         logo-src="/logos/115.png"
         logo-alt="115"
-        :tags="[{ label: '实验性', variant: 'warn' }]"
+        :tags="[{ label: '推荐' }]"
         :stat-value="status.cache_count.toLocaleString('zh-CN')"
         stat-label="条路径映射关系"
       >
@@ -156,6 +156,7 @@ async function clearCache() {
           </button>
         </template>
         使用全量清单扫描方式，减少逐层目录请求，减少网盘风控几率，还可加速 STRM 生成。
+        <strong>首轮需要建目录路径映射缓存，耗时与原来相当；第二轮起才会明显变快。</strong>
         <template #actions>
           <AppButton size="sm" variant="danger" :disabled="clearing" @click="clearCache">
             {{ clearing ? "清空中…" : "清空映射" }}
