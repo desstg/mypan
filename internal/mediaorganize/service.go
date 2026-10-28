@@ -1035,6 +1035,12 @@ func IsActiveStatus(status string) bool {
 	}
 }
 
+// normalSkipMarkers 是**文案**层面的兜底：执行期才产生的跳过（`action.Reason`）
+// 只有一句人话，没有结构化标记，只能靠这些关键词认。
+//
+// 计划期产生的跳过（`plan.Skipped`）**优先看 `normal` 标记**，见 isNormalPlannedSkip：
+// 靠文案认会随措辞漂移，历史上「侧车永不删除」就是这么漏的 —— 它是设计如此，
+// 文案却不在下面这张表里，于是被算成「需关注」。
 var normalSkipMarkers = []string{"已整理", "已是目标名", "已并入", "文件已自动并入", "目录非空"}
 
 func summarizePlan(plan *Plan, aborted bool) map[string]any {
@@ -1069,7 +1075,7 @@ func summarizePlan(plan *Plan, aborted bool) map[string]any {
 		}
 	}
 	for _, item := range plan.Skipped {
-		if isNormalSkip("", stringFromAny(item["reason"])) {
+		if isNormalPlannedSkip(item) {
 			normalSkipped++
 		}
 	}
@@ -1137,6 +1143,20 @@ func isNormalSkip(errText, reason string) bool {
 		}
 	}
 	return false
+}
+
+// isNormalPlannedSkip 判定一条**计划期**跳过（plan.Skipped 的元素）是否属于
+// 「按设计就该保持原样」，从而不该计入风险比例的分子。
+//
+// 先看结构化的 `normal: true` 标记 —— 规划器知道自己是按设计保留（侧车永不删、
+// 命中「不删除的文件类型」），就不该由上层去猜文案。没有标记的老计划与
+// 本来就没标记的几条（认不出番号、目标根保护等）继续走文案兜底，
+// 那些**确实该算异常**，保持原判。
+func isNormalPlannedSkip(item map[string]any) bool {
+	if v, ok := item["normal"].(bool); ok && v {
+		return true
+	}
+	return isNormalSkip("", stringFromAny(item["reason"]))
 }
 
 func stringFromAny(v any) string {

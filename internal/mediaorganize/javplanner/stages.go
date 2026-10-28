@@ -172,6 +172,12 @@ func (b *builder) stageDeleteSmall() {
 			"name": "",
 			"reason": "小文件阈值内的 " + strconv.Itoa(keptSidecar) +
 				" 个元数据 json 已保留（侧车永不删除）",
+			// normal 是给上层（自动化规则的风险比例闸）看的机器可读标记：
+			// 侧车保留是**设计如此**，不是异常。以前只靠 reason 文案去猜，
+			// 而这段文案不在 normalSkipMarkers 里，于是按设计保留的文件
+			// 被算成「需关注」，整理只碰到一两部片时小样本比例直接顶爆
+			// （实测 2/3 = 66.67% 超过 30% 的闸，联动第二步被跳过）。
+			"normal": true,
 		})
 	}
 	if keptByFilter > 0 {
@@ -180,6 +186,8 @@ func (b *builder) stageDeleteSmall() {
 			"name": "",
 			"reason": "小文件阈值内的 " + strconv.Itoa(keptByFilter) +
 				" 个文件因命中「不删除的文件类型」而保留",
+			// 同上：用户显式勾了「不删除的文件类型」，保留是设置生效的结果。
+			"normal": true,
 		})
 	}
 }
