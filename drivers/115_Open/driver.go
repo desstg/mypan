@@ -15,9 +15,10 @@ import (
 
 type Driver struct {
 	driver.AuthRefreshControl
-	add       Addition
-	client    *http.Client
-	oauthBase string
+	add          Addition
+	client       *http.Client
+	uploadClient *http.Client
+	oauthBase    string
 
 	intervalGate driver.RequestIntervalGate
 	persist      driver.AuthPersistFunc
@@ -95,6 +96,11 @@ func (d *Driver) Init(ctx context.Context) error {
 	if d.client == nil {
 		d.client = httpx.NewClient(httpx.ClientOptions{Timeout: 30 * time.Second})
 	}
+	// 上传走**另一个**客户端：普通 API 那 30 秒是整段超时，用它传大文件必然
+	// 在某个体积上被切断。上传客户端只限制「等响应头」的时间。
+	if d.uploadClient == nil {
+		d.uploadClient = httpx.NewUploadClient(d.client, 60*time.Second, config.UploadUseHTTP2)
+	}
 	// Cookie 只是附加凭据：没有也不影响初始化，只是分享转存用不了
 	// （见 share.go 的 ShareReceiveCapabilities）。
 	if cookie := strings.TrimSpace(d.currentCookie()); cookie == "" {
@@ -129,6 +135,7 @@ func (d *Driver) Init(ctx context.Context) error {
 
 func (d *Driver) Drop(context.Context) error {
 	httpx.CloseClient(d.client)
+	httpx.CloseClient(d.uploadClient)
 	return nil
 }
 

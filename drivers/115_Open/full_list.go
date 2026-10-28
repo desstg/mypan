@@ -97,27 +97,65 @@ func (d *Driver) ResolveDirPath(ctx context.Context, dirID string) (string, erro
 		return "", err
 	}
 	if info.entryID() == "" {
-		return "", nil
+		// 目录已经被删/不可见。返回 NotFound 而不是 ("", nil)：
+		// 空路径会被上层当成「在根目录」，于是把整份 STRM 写到根上去。
+		return "", domain.Errf(domain.CodeNotFound)
 	}
-	return buildDirPath(info.Paths, info.entryName()), nil
+	path, ok := buildDirPath(info.Paths, info.entryName(), d.rootID())
+	if !ok {
+		// 父链里找不到账号的挂载根：说明这个目录不在本账号的根之下（权限/缓存异常）。
+		// 拼出来的路径会缺前几层，宁可报错也不要写出错位的 STRM。
+		return "", domain.Errorf(domain.CodeDriverError, "115 目录不在账号挂载根下，已停止扫描")
+	}
+	return path, nil
 }
 
 // buildDirPath 把 get_info 的父目录链（不含自身）与目录自身名称拼成完整路径。
-// 父链中 file_id 为 0 的根段跳过；结果不含首尾斜杠。
-func buildDirPath(paths []dirPathEntry, selfName string) string {
+//
+// rootID 用来定位「账号挂载根」这一层：父链里可能有根以外的段（例如移动后的残留），
+// 只有碰到 rootID 之后的段才算属于本账号的相对路径。rootID 为 "0" 时按整条链算
+// （见 foundRoot 的初始化）。返回 ok=false 表示父链里根本没出现挂载根。
+func buildDirPath(paths []dirPathEntry, selfName, rootID string) (string, bool) {
 	segs := make([]string, 0, len(paths)+1)
+	// rootID 为 "0" 表示账号根就是 115 的根，此时整条父链都属于本账号。
+	foundRoot := rootID == "0"
 	for _, p := range paths {
-		if strings.TrimSpace(p.FileID.String()) == "0" {
+		id := strings.TrimSpace(p.FileID.String())
+		if id == rootID {
+			// 遇到挂载根：它自己不算路径段，且**清空**之前收集的段
+			// （那些在根之上，不属于本账号）。
+			foundRoot = true
+			segs = segs[:0]
 			continue
 		}
-		if name := strings.TrimSpace(p.FileName); name != "" {
+		if id == "0" || !foundRoot {
+			continue
+		}
+		if name := pathSegmentName(p.FileName); name != "" {
 			segs = append(segs, name)
 		}
 	}
-	if name := strings.TrimSpace(selfName); name != "" {
+	if !foundRoot {
+		return "", false
+	}
+	if name := pathSegmentName(selfName); name != "" {
 		segs = append(segs, name)
 	}
-	return strings.Join(segs, "/")
+	return strings.Join(segs, "/"), true
+}
+
+// pathSegmentName 把目录名里会被误当成层级的分隔符替换掉。
+//
+// 115 **允许**目录名里出现 "/"。直接拿名字拼路径，一个目录就会被读成好几层：
+// STRM 增强扫描会往这些并不存在的层级里写 .strm，随后又把正确位置的那份当重复删掉。
+// 换成下划线是保真度最高的做法 —— 名字仍然可读，且不会再被当成路径分隔符。
+func pathSegmentName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	name = strings.ReplaceAll(name, "/", "_")
+	return strings.ReplaceAll(name, "\\", "_")
 }
 
 var (

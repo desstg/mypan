@@ -54,6 +54,11 @@ type tmdbImageDownloader interface {
 // ⚠️ 尺寸写死 w500。海报与季海报够用，但**背景图（3840×2160 原图）与剧照不能用它** ——
 // 那些走 artwork.go 的 writeArtworkSize（能指定档位）。
 func (s *Service) writeOptionalArtwork(ctx context.Context, client tmdbImageDownloader, imagePath, outputPath, label string) (bool, error) {
+	// 没有图（TMDB 的 null 会变成 "<nil>"）不是错误，直接跳过 ——
+	// 交给 DownloadImage 只会换来一次「刮削失败」。
+	if blankImagePath(imagePath) {
+		return false, nil
+	}
 	data, err := client.DownloadImage(ctx, imagePath, "w500")
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

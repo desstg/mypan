@@ -63,3 +63,53 @@ func TestWriteOptionalArtworkPreservesCancellation(t *testing.T) {
 		t.Fatalf("任务取消不能被降级为警告，err=%v", err)
 	}
 }
+
+// TMDB 的 poster_path / still_path 为 null 时，anyString 曾经把它变成字面量 "<nil>"，
+// 于是「没有图」被当成「图在 <nil> 这个路径上」去下载，整部作品判「刮削失败」。
+func TestAnyStringMapsJSONNullToEmpty(t *testing.T) {
+	if got := anyString(nil); got != "" {
+		t.Fatalf("anyString(nil) = %q, want 空串", got)
+	}
+	if got := anyString("poster.jpg"); got != "poster.jpg" {
+		t.Fatalf("anyString(string) = %q", got)
+	}
+	if got := anyString(float64(7)); got != "7" {
+		t.Fatalf("anyString(number) = %q", got)
+	}
+}
+
+func TestBlankImagePathRejectsNilLiteral(t *testing.T) {
+	for _, in := range []string{"", "   ", "<nil>"} {
+		if !blankImagePath(in) {
+			t.Fatalf("blankImagePath(%q) = false, want true", in)
+		}
+	}
+	if blankImagePath("/abc.jpg") {
+		t.Fatal("真实路径不应被判为空")
+	}
+}
+
+// 没有图时必须**完全不发请求**：以前这里会带着 "<nil>" 打一次图床，
+// 下载失败又把整部作品拖成「刮削失败」。
+func TestArtworkWritersSkipMissingImagesWithoutDownloading(t *testing.T) {
+	root := t.TempDir()
+	svc := &Service{log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))}
+	counter := &countingImageDownloader{}
+
+	if written, err := svc.writeOptionalArtwork(context.Background(), counter, "<nil>", filepath.Join(root, "a.jpg"), "海报"); err != nil || written {
+		t.Fatalf("writeOptionalArtwork = (%v, %v), want (false, nil)", written, err)
+	}
+	if written, err := svc.writeArtworkSize(context.Background(), counter, "", "w1280", filepath.Join(root, "b.jpg"), "背景图"); err != nil || written {
+		t.Fatalf("writeArtworkSize = (%v, %v), want (false, nil)", written, err)
+	}
+	if counter.calls != 0 {
+		t.Fatalf("没有图时不该发下载请求，实际发了 %d 次", counter.calls)
+	}
+}
+
+type countingImageDownloader struct{ calls int }
+
+func (d *countingImageDownloader) DownloadImage(context.Context, string, string) ([]byte, error) {
+	d.calls++
+	return nil, fmt.Errorf("不该被调用")
+}

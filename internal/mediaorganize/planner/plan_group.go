@@ -24,7 +24,6 @@ func (p *Planner) planGroupWithMatch(
 	title := strings.TrimSpace(key.title)
 	year := key.yearPtr()
 	season := key.seasonPtr()
-	episode := key.episodePtr()
 
 	if p.isAlreadyOrganizedRenameGroup(key, items) {
 		for _, entry := range items {
@@ -244,7 +243,9 @@ func (p *Planner) planGroupWithMatch(
 		ext := rules.FileExtension(entry.item.Name)
 		currentYear := year
 		currentSeason := season
-		currentEpisode := episode
+		// 电影组**不继承组级集数**：以前这里写的是 currentEpisode := episode（组级那个），
+		// 于是一部电影会被命名成「Title (2024) S01E03」。电影就是没有季集，显式置空。
+		var currentEpisode *int
 		if isTV {
 			currentSeason = entry.fileParsed.Season
 			currentEpisode = entry.fileParsed.Episode
@@ -280,6 +281,9 @@ func (p *Planner) planGroupWithMatch(
 					currentSeason = season
 				}
 			}
+		} else {
+			// 电影：季集一律为空。继承组级值会让电影被命名成 SxxExx。
+			currentSeason, currentEpisode = nil, nil
 		}
 
 		var seasonDirRename *moplan.PlanAction

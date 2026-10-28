@@ -9,12 +9,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"litepan/internal/domain"
 	"litepan/internal/driver"
 	"litepan/internal/driver/uploadutil"
 	"litepan/internal/httpx"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -993,6 +995,75 @@ func isOSSUploadMissing(err error) bool {
 		strings.Contains(message, "uploadid") && strings.Contains(message, "not exist")
 }
 
+// ossUploadHTTPClient 返回上传专用的客户端：不设整段超时，只限制等响应头的时间。
+//
+// 回退到 d.client 是为了兼容「还没走 Init 就被调用」的旧路径（测试与跨盘秒传）。
+func (d *Driver) ossUploadHTTPClient() *http.Client {
+	if d.uploadClient != nil {
+		return d.uploadClient
+	}
+	return d.client
+}
+
+// ossUploadAttempts 是单个分片的重试次数上限。
+//
+// 只对**可重试**的错误重试（网络抖动、5xx、429）：鉴权类错误换 token 走的是
+// 另一个分支，4xx 里的 403 桶策略那种重试多少次都一样。
+const ossUploadAttempts = 3
+
+// ossUploadPartWithRetry 在 ossUploadPart 外面包一层重试。
+//
+// 每次重试前**必须重新 Seek**：上一次的请求已经把 *os.File 的读位置推到分片末尾，
+// 不 Seek 就会把后面那段数据当成这一片重发 —— 服务端收下的是错的内容，
+// 而 ETag 校验只看得见「这一片传上去了」。
+func (d *Driver) ossUploadPartWithRetry(ctx context.Context, token ossTokenData, bucket, objectName, uploadID string, partNumber int, f *os.File, partSize, uploadedOffset, totalSize int64, onProgress driver.UploadProgress, totalParts int) (string, error) {
+	var err error
+	for attempt := 1; attempt <= ossUploadAttempts; attempt++ {
+		if _, seekErr := f.Seek(uploadedOffset, io.SeekStart); seekErr != nil {
+			return "", domain.Wrap(domain.CodeDriverError, seekErr)
+		}
+		var etag string
+		etag, err = d.ossUploadPart(ctx, token, bucket, objectName, uploadID, partNumber, f, partSize, uploadedOffset, totalSize, onProgress, totalParts)
+		if err == nil || ctx.Err() != nil || isOSSCredentialError(err) || !isRetryableOSSUploadError(err) {
+			return etag, err
+		}
+		if attempt < ossUploadAttempts {
+			timer := time.NewTimer(time.Duration(attempt) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return "", ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return "", err
+}
+
+// isRetryableOSSUploadError 判定一次分片失败值不值得重发。
+//
+// 刻意**不含** 4xx 里的鉴权/策略类（403）：那类错误重发一百次也是同一个结果，
+// 只会把一次失败拖成三次失败。5xx 与网络层错误才是「这次不走运」。
+func isRetryableOSSUploadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"unexpected eof", "connection reset", "broken pipe",
+		"http 429", "http 500", "http 502", "http 503", "http 504",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *Driver) ossDo(ctx context.Context, method, rawURL string, headers http.Header, body io.Reader) (*http.Response, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
 	if err != nil {
@@ -1041,7 +1112,7 @@ func (d *Driver) ossSinglePartUpload(ctx context.Context, localPath string, file
 	}
 	req.Header.Set("User-Agent", ossUserAgent)
 	req.ContentLength = fileSize
-	resp, err := d.client.Do(req)
+	resp, err := d.ossUploadHTTPClient().Do(req)
 	if err != nil {
 		return nil, domain.Wrap(domain.CodeDriverError, err)
 	}
@@ -1155,7 +1226,7 @@ func (d *Driver) ossUploadPart(ctx context.Context, token ossTokenData, bucket, 
 	}
 	req.Header.Set("User-Agent", ossUserAgent)
 	req.ContentLength = partSize
-	resp, err := d.client.Do(req)
+	resp, err := d.ossUploadHTTPClient().Do(req)
 	if err != nil {
 		return "", domain.Wrap(domain.CodeDriverError, err)
 	}
@@ -1305,20 +1376,16 @@ func (d *Driver) ossMultipartUpload(ctx context.Context, localPath string, fileS
 			partNumber++
 			continue
 		}
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return nil, domain.Wrap(domain.CodeDriverError, err)
-		}
 		token, err = d.ensureFreshOSSToken(ctx, token, false)
 		if err != nil {
 			return nil, err
 		}
-		etag, err := d.ossUploadPart(ctx, token, bucket, objectName, uploadID, partNumber, f, currentPartSize, offset, fileSize, onProgress, totalParts)
+		// Seek 交给 ossUploadPartWithRetry 自己做：它每次重试前都要重新定位。
+		etag, err := d.ossUploadPartWithRetry(ctx, token, bucket, objectName, uploadID, partNumber, f, currentPartSize, offset, fileSize, onProgress, totalParts)
 		if isOSSCredentialError(err) {
 			token, err = d.ensureFreshOSSToken(ctx, token, true)
 			if err == nil {
-				if _, err = f.Seek(offset, io.SeekStart); err == nil {
-					etag, err = d.ossUploadPart(ctx, token, bucket, objectName, uploadID, partNumber, f, currentPartSize, offset, fileSize, onProgress, totalParts)
-				}
+				etag, err = d.ossUploadPartWithRetry(ctx, token, bucket, objectName, uploadID, partNumber, f, currentPartSize, offset, fileSize, onProgress, totalParts)
 			}
 		}
 		if err != nil {

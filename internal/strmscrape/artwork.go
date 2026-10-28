@@ -99,6 +99,11 @@ func actorThumbName(nfoPath, actorsDir string, id int) string {
 // （TMDB 图库偶尔会缺一张，那不该让整部作品变成「刮削失败」），但取消与本地写入错误
 // 仍然往上报。区别只在这个函数能指定尺寸 —— 背景图与剧照不能用海报那个 w500。
 func (s *Service) writeArtworkSize(ctx context.Context, client tmdbImageDownloader, imagePath, size, outputPath, label string) (bool, error) {
+	// 与 writeOptionalArtwork 同一条：没有图不是错误。调用方大多已经判过 != ""，
+	// 但那挡不住 "<nil>" 这种脏值（见 util.go 的 blankImagePath）。
+	if blankImagePath(imagePath) {
+		return false, nil
+	}
 	data, err := client.DownloadImage(ctx, imagePath, size)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

@@ -37,6 +37,11 @@ type Config struct {
 	ProvideHashes          []string      // 跨盘秒传：源盘可提供的指纹类型（sha1/md5）
 	RapidUploadHashes      []string      // 跨盘秒传：目标盘支持的指纹秒传类型
 	UploadConflictPolicies []string      // 跨盘秒传/上传：前端可选冲突策略
+	// UploadUseHTTP2 让驱动声明「我的上传通道要 HTTP/2」。
+	//
+	// 默认 false：大文件上传走 HTTP/1.1（见 httpx.NewUploadClient 的说明）。
+	// 只有实测过「h1.1 反而更慢/更易断」的驱动才打开这个开关。
+	UploadUseHTTP2 bool
 	// QRDevices 是扫码登录时可选设备来源；空表示扫码界面不提供切换。
 	QRDevices []FieldOption
 	// QRDeviceField 是 Addition 中保存设备来源的 JSON 字段名，与 QRDevices 配套。

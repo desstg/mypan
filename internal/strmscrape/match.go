@@ -298,7 +298,11 @@ func (s *Service) writeMatchedOpts(ctx context.Context, client *tmdb.Client, g w
 	root := rootOf(g)
 
 	// ① 图（背景图 / 剧照 / 演员头像），海报保持既有那一段不动。
-	if (overwrite || !fileExists(poster)) && strings.TrimSpace(info.PosterPath) != "" {
+	//
+	// 唯一的例外是「其实没有海报」：TMDB 返回 null 时 anyString 会给出字面量 "<nil>"，
+	// 以前会拿它去下载 → 整部作品判「刮削失败」。这里只挡这一种，真正的下载失败
+	// 仍然上报（海报是这部作品的门面，坏了该看得见）。
+	if (overwrite || !fileExists(poster)) && !blankImagePath(info.PosterPath) {
 		data, err := client.DownloadImage(ctx, info.PosterPath, "w500")
 		if err != nil {
 			return 0, err
