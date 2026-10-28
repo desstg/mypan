@@ -1377,6 +1377,17 @@
   color: var(--danger);
 }
 
+/* LTX 修复版胶囊。用琥珀（--warning）而不是复用「破解」的红：一条分享常常两颗
+ * 一起出现（破解 + LTX 模型修复），同色并排会看成一条；而它又比「字幕」这类附属
+ * 标记**重要** —— 直接关系到订阅挑不挑这一颗。
+ *
+ * 与 .jav-badge--res 同一套写法（color-mix + 语义变量），这样三套主题（浅/暗/brutal）
+ * 都自带对应色值，不用为暗色单写一条提亮的覆盖规则。 */
+.jav-badge--ltx {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning);
+}
+
 /* 清晰度胶囊：高清挂 HD、超清挂 UHD，**两者只会出现一颗**（超清优先，
  * 后端 quality.Tags.ResolutionLabel() 已经收敛成单一值，前端不再判优先）。
  *

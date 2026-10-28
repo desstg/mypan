@@ -62,11 +62,11 @@ const (
 	// JavQualityEdited 由 detect_quality_tags 产出，但不在可勾选的 QUALITY_VALUES 里 ——
 	// 它只参与打分时的标记展示，不能作为订阅条件。
 	JavQualityEdited = "edited"
-	// JavQualityLTX 是「资源名里带 LTX 标记」这条事实在候选上的标签名。
+	// JavQualityLTX 是「这颗资源是 LTX 修复版」这条事实在候选上的标签名。
 	//
 	// 与 JavQualityEdited 一样**不进** QUALITY_VALUES（它不是一个可以筛的质量条件），
 	// 但它比 edited 多一个用途：订阅的 ltx_mode 靠它决定挑哪一颗（见 push.go）。
-	// 它只记录「这一颗资源的名字带了 LTX」，判定由 quality.IsLTX 负责。
+	// 判据由 quality.LTXMarked 负责（链接自带的文件名 / 展示名 / 评论正文任一命中）。
 	JavQualityLTX = "ltx"
 )
 
@@ -252,6 +252,12 @@ type JavMagnet struct {
 	FileCount   int
 	HasFiles    bool
 	Source      string
+	// CommentText 是这颗链接所在那条评论的正文（去掉链接之后的部分）。
+	//
+	// **不落库**，只在「本地评论转成磁链形状」那一步（jav.commentMagnets）填上，
+	// 供 LTX 判据看正文用（见 quality.LTXMarked）。存进 jav_magnets 会把几千条
+	// 评论正文复制一份进磁链表，而它只在检查那一瞬间有用。
+	CommentText string
 	FetchedAt   time.Time
 	CreatedAt   time.Time
 }

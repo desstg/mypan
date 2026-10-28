@@ -10,6 +10,7 @@ import (
 
 	"litepan/internal/domain"
 	"litepan/internal/driver"
+	"litepan/internal/jav/commentlink"
 	"litepan/internal/jav/quality"
 	"litepan/internal/mutation"
 	"litepan/internal/settings"
@@ -102,11 +103,18 @@ type sidecarInput struct {
 	// 但它在磁链表上 has_sub=1，界面上的「字幕」角标就是用它算的。
 	// 只按名字猜会写出一份没有 `-C` 的文件名：卡片上写着字幕、文件名里没有，
 	// 而整理出来的名字会被 Emby 当成没有字幕的版本。
-	HasHD    bool
-	HasSub   bool
-	SiteBase string
-	Dest     sidecarDest
-	Now      time.Time
+	HasHD  bool
+	HasSub bool
+	// CommentText 是这颗资源所在那条评论的正文（去掉链接之后的部分），
+	// 只有评论来源才有。写侧车时由 writeSidecar 按链接回本地评论里找出来。
+	//
+	// 为什么要一路带到这里：侧车的 resource.ltx 必须与候选上那颗标签**同一个结论**，
+	// 而判据会看评论正文（见 quality.LTXMarked）。正文没跟着推送记录存
+	// （jav_push_records 不存它），于是只能在写侧车这一拍补读一次。
+	CommentText string
+	SiteBase    string
+	Dest        sidecarDest
+	Now         time.Time
 }
 
 // ————————————————————— JSON 形状 —————————————————————
@@ -179,11 +187,12 @@ type sidecarResourceJSON struct {
 	InfoHash    string `json:"info_hash"`
 	Source      string `json:"source"`
 	FromComment bool   `json:"from_comment"`
-	// LTX 表示这一颗资源的**文件名**里带 LTX 标记（LTX 修复版）。
+	// LTX 表示这一颗资源是 LTX 修复版（链接自带的文件名 / 资源名 / 评论正文任一
+	// 命中，判据见 quality.LTXMarked）。
 	//
-	// 落在 resource 而不是 quality 块：它描述的是「这一颗资源叫什么」，
+	// 落在 resource 而不是 quality 块：它描述的是「这一颗资源是什么」，
 	// 与 source / from_comment 同类；quality 块是 quality.DetectTags 的镜像，
-	// 混进去会让人以为标签判定也认 LTX（而 IsLTX 刻意不参与打分，见 quality.IsLTX）。
+	// 混进去会让人以为标签判定也认 LTX（而 LTX 刻意不参与打分）。
 	//
 	// 读侧（internal/jav/emby）靠它给 nfo 加 `LTX破解` 这个 genre；
 	// 侧车文件名后缀（sidecarFileName 的 Marks）**刻意不带它** —— 那是整理侧
@@ -412,9 +421,9 @@ func buildSidecar(in sidecarInput) ([]byte, string, error) {
 			InfoHash:    strings.TrimSpace(in.InfoHash),
 			Source:      resSource,
 			FromComment: resSource == domain.JavSourceComment,
-			// 判据与 buildCandidate 那条路**同一个函数**（链接自带的文件名优先，
-			// 评论来源不拿正文兜底），免得「候选说是 LTX、侧车说不是」。
-			LTX: quality.LTXMarked(magnet, resName, resSource == domain.JavSourceComment),
+			// 判据与 buildCandidate 那条路**同一个函数**（链接文件名 / 资源名 /
+			// 评论正文三处任一命中都算），免得「候选说是 LTX、侧车说不是」。
+			LTX: quality.LTXMarked(magnet, resName, in.CommentText, resSource == domain.JavSourceComment),
 		},
 		Quality: sidecarQualityJSON{
 			Resolution: tagsOfResource.ResolutionBadge(sizeBytes),
@@ -747,7 +756,10 @@ func (s *Service) writeSidecar(ctx context.Context, rec *domain.JavPushRecord, i
 		InfoHash: infoHash,
 		HasHD:    hasHD,
 		HasSub:   hasSub,
-		SiteBase: s.siteBase(),
+		// 评论来源才回查正文（见 sidecarInput.CommentText）：磁链表那颗没有正文，
+		// 而这一步是每部片多一次本地库读，不能无谓地花在它身上。
+		CommentText: s.commentTextFor(ctx, rec),
+		SiteBase:    s.siteBase(),
 		Dest: sidecarDest{
 			AccountID: event.AccountID,
 			ParentID:  parentID,
@@ -818,6 +830,43 @@ func sidecarFileName(number string, marks quality.Marks) string {
 		return ""
 	}
 	return sanitizeFolderName(name)
+}
+
+// commentTextFor 按推送记录上的链接回本地评论里找它所在那段正文。
+//
+// 只有评论区来源才找（磁链表那颗本来就没有正文）；找不到返回空串 ——
+// 评论会被重新抓取覆盖，推出去的那颗后来从评论里消失是可能的，那时侧车
+// 退化成「只看链接名与资源名」，与这条判据在磁链路上的口径一致。
+//
+// 与 commentMagnets 读的是同一张表、同一个提取函数：两边各写一套正则，
+// 「候选说是 LTX、侧车说不是」迟早会出现。
+//
+// **多条评论贴同一颗链接时正文要并起来**，与 commentMagnets 的 joinCommentBodies
+// 同一个口径：最新那条常常只写「楼下的，我发上来了」，LTX 写在上一条里。
+// 这里只返回第一句就会让侧车的 resource.ltx 与候选上的 LTX 角标对不上。
+func (s *Service) commentTextFor(ctx context.Context, rec *domain.JavPushRecord) string {
+	if rec == nil || rec.Source != domain.JavSourceComment || s.reviews == nil {
+		return ""
+	}
+	movieID := strings.TrimSpace(rec.MovieID)
+	uri := strings.TrimSpace(rec.Magnet)
+	if movieID == "" || uri == "" {
+		return ""
+	}
+	reviews, err := s.reviews.ListByMovieAll(ctx, movieID)
+	if err != nil {
+		s.logWarn("jav sidecar load reviews failed", "movie", movieID, "record", rec.ID, "err", err)
+		return ""
+	}
+	bodies := ""
+	for _, r := range reviews {
+		for _, link := range commentlink.Extract(r.Content) {
+			if strings.TrimSpace(link.URI) == uri {
+				bodies = joinCommentBodies(bodies, link.Comment)
+			}
+		}
+	}
+	return bodies
 }
 
 // magnetUpstreamFlags 取这颗资源在磁链表上的上游角标（高清 / 字幕）。

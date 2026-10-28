@@ -218,6 +218,9 @@ watch(
             <span class="jav-us__tags">
               <span v-if="l.resolution_badge" class="jav-badge jav-badge--res">{{ l.resolution_badge }}</span>
               <span v-if="l.uncensored" class="jav-badge jav-badge--break">破解</span>
+              <!-- LTX 修复版。与详情页「评论区分享」那一档同一个判定（服务端给），
+                   两个地方摆的是同一种东西，角标不能一处有一处没有。 -->
+              <span v-if="l.ltx" class="jav-badge jav-badge--ltx" title="LTX 修复版">LTX</span>
               <span v-if="l.subtitle" class="jav-badge jav-badge--on">字幕</span>
             </span>
             <span class="jav-us__acts">

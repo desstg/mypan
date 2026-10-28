@@ -1323,6 +1323,9 @@ onUnmounted(() => {
                   {{ sh.resolution_badge }}
                 </span>
                 <span v-if="sh.uncensored" class="jav-badge jav-badge--break">破解</span>
+                <!-- LTX 修复版。与「破解」并排，因为分享者标的正是「破解 + LTX 模型修复」
+                     这件事；判据由服务端给（与订阅挑选同一个函数），前端不重算。 -->
+                <span v-if="sh.ltx" class="jav-badge jav-badge--ltx" title="LTX 修复版">LTX</span>
                 <span v-if="sh.subtitle" class="jav-badge jav-badge--on">字幕</span>
 
                 <div class="jav-magnet__actions">

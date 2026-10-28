@@ -42,6 +42,10 @@ type CommentShareView struct {
 	ResolutionBadge string `json:"resolution_badge"`
 	Uncensored      bool   `json:"uncensored"`
 	Subtitle        bool   `json:"subtitle"`
+	// LTX 表示这一条是 LTX 修复版。判据与自动挑选那一路**同一个函数**
+	// （quality.LTXMarked：链接文件名 / 展示名 / 正文任一命中都算），
+	// 所以界面上看到的角标与订阅挑不挑它是同一个结论。
+	LTX bool `json:"ltx"`
 }
 
 // reviewPagesToIngest 是「评论区分享」第一次打开时往上游翻几页评论。
@@ -137,6 +141,9 @@ func toCommentShareView(link commentlink.Link, r *domain.JavReview) CommentShare
 		ResolutionBadge: tags.ResolutionBadge(link.SizeBytes),
 		Uncensored:      tags.Uncensored,
 		Subtitle:        tags.Subtitle,
+		// 与 check.go 的 buildCandidate 同一个函数、同样的入参形状：评论来源，
+		// 所以正文也会被看（用户 2026-10-27 改口）。
+		LTX: quality.LTXMarked(link.URI, link.Name, link.Comment, true),
 	}
 }
 
@@ -487,20 +494,24 @@ func (s *Service) commentMagnets(ctx context.Context, mv *domain.JavMovie) []*do
 		return nil
 	}
 	out := make([]*domain.JavMagnet, 0, 4)
-	seen := map[string]struct{}{} // 同一条链接可能被两个人在两条评论里贴过
+	// 同一条链接可能被两个人在两条评论里贴过。按链接去重，但**正文要并起来**：
+	// 最新那条常常只写「楼下的，我发上来了」，而 LTX 标记写在上一条里
+	// （真库实测有 6 组是这种形态）。只留最新那条的正文，就会把
+	// 「这个人标了 LTX」这个事实整条丢掉。
+	index := map[string]*domain.JavMagnet{}
 	for _, r := range reviews {
 		for _, link := range commentlink.Extract(r.Content) {
 			// 与投递侧同一个闸门：认不出的协议别塞进池子（pusher.pushMagnet 里那道）。
 			if strings.TrimSpace(link.URI) == "" || uriScheme(link.URI) == "" {
 				continue
 			}
-			if _, dup := seen[link.URI]; dup {
+			if prev, dup := index[link.URI]; dup {
+				prev.CommentText = joinCommentBodies(prev.CommentText, link.Comment)
 				continue
 			}
-			seen[link.URI] = struct{}{}
 
 			btih := quality.ExtractBtih(link.URI)
-			out = append(out, &domain.JavMagnet{
+			mg := &domain.JavMagnet{
 				Fingerprint: quality.MagnetFingerprint(btih, link.URI, link.Name),
 				Btih:        btih,
 				MovieID:     mv.ID,
@@ -511,14 +522,39 @@ func (s *Service) commentMagnets(ctx context.Context, mv *domain.JavMovie) []*do
 				HasSize:     link.HasSize,
 				Magnet:      link.URI,
 				Source:      domain.JavSourceComment,
+				// 评论正文（去掉链接之后的部分）只是**路过**：LTX 判据要看它
+				// （分享者常把「最新 LTX 模型」写在正文里、链接名保持原样），
+				// 而磁链表没有正文可存。见 domain.JavMagnet.CommentText。
+				CommentText: link.Comment,
 				// FileCount / HasFiles / HasHD / HasSub / DateText 一律留零值：
 				// 评论链接本来就没有这些信号。
 				//
 				// 体积与名字**不在这里重算** —— commentlink.Extract 已经从
 				// ed2k 的字段 3、磁链的 xl= 参数、以及评论正文里的「5GB」
 				// 三处认过了，重算只会与它不一致。
-			})
+			}
+			index[link.URI] = mg
+			out = append(out, mg)
 		}
 	}
 	return out
+}
+
+// joinCommentBodies 把同一条链接在多条评论里的正文拼成一串。
+//
+// 顺序是 ListByMovieAll 给的（评论时间倒序），所以「最新的那句在最前」。
+// 同一句话被复制粘贴两次（同一个分享者重发）时只留一份 —— 不这么做的理由是
+// 正文会原样进 LTX 判据，重复对判定没有帮助，只是让瞬态字符串白白变长。
+//
+// 产物**只用于判据**（LTXMarked）与侧车那一趟回查，不会进网盘文件名：
+// 名字走 Domain.JavMagnet.Name，那是 commentlink.nameOf 单独算出来的。
+func joinCommentBodies(a, b string) string {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	switch {
+	case a == "":
+		return b
+	case b == "" || strings.Contains(a, b):
+		return a
+	}
+	return a + " " + b
 }

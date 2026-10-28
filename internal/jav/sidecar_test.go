@@ -771,6 +771,80 @@ func TestSidecarNoMagnetRowMeansNoBadge(t *testing.T) {
 	}
 }
 
+// TestWriteSidecarLTXFromCommentBody 侧车的 resource.ltx 要看**评论正文**。
+//
+// 用户 2026-10-27 改口之后，LTX 的判据是三处：链接自带的文件名、资源名、评论正文。
+// 而正文不进推送记录（jav_push_records 没这一列），所以写侧车这一拍必须按链接
+// 回去把正文找出来 —— 少这一步，就会出现「候选弹窗上标着 LTX、海报墙却没有」
+// 这种两边不一致（订阅按候选挑，nfo 按侧车写）。
+func TestWriteSidecarLTXFromCommentBody(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	seedMovie(t, f, "m1", "MRSS-104", "甲", nil)
+
+	// 用户给的那类评论：正文写「最新 LTX 模型」，链接名保持原样。
+	uri := "ed2k://|file|www.98T.la@MRSS-104_restored.mp4|10386185950|" +
+		strings.Repeat("e", 32) + "|/"
+	seedUserReviews(t, f, 7, "甲", &domain.JavReview{ID: 81, MovieID: "m1",
+		Content: "高金自购最新LTX模型敬请取用 " + uri})
+
+	rec := &domain.JavPushRecord{
+		ID: 3, MovieID: "m1", Code: "MRSS-104",
+		Name: "www.98T.la@MRSS-104_restored.mp4", SizeText: "9.7 GB",
+		Magnet: uri, Source: domain.JavSourceComment,
+	}
+	folders := &stubFolders{}
+	f.svc.folders = folders
+	if err := f.svc.writeSidecar(ctx, rec, "", offlineCompletedEvent{
+		AccountID: 4, TargetParentID: "p1",
+	}); err != nil {
+		t.Fatalf("writeSidecar: %v", err)
+	}
+	if len(folders.uploads) != 1 {
+		t.Fatalf("应当上传一次，got %d", len(folders.uploads))
+	}
+	doc := decodeSidecar(t, folders.uploaded[folders.uploads[0].FileName])
+	res := doc["resource"].(map[string]any)
+	if res["ltx"] != true {
+		t.Errorf("正文里写了 LTX，resource.ltx 应当为 true，got %v", res["ltx"])
+	}
+	// 但**文件名后缀不能跟着变**：Marks 刻意不带 LTX（那是整理侧的命名契约）。
+	// 名字里的 `restored` 本来就带 -U（破解），这里只钉「LTX 没混进后缀」。
+	if got := folders.uploads[0].FileName; strings.Contains(strings.ToUpper(got), "LTX") {
+		t.Errorf("侧车文件名不该因为 LTX 多一个标记，got %q", got)
+	}
+}
+
+// TestWriteSidecarLTXNotForMagnetSource 磁链表来源没有评论正文可查，
+// 正文为空 → 只看链接名与资源名。这条守的是「回查只对评论来源花一次库读」。
+func TestWriteSidecarLTXNotForMagnetSource(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	seedMovie(t, f, "m1", "MRSS-104", "甲", nil)
+
+	uri := "magnet:?xt=urn:btih:" + strings.Repeat("f", 40)
+	// 同一条链接被贴进评论、正文也写了 LTX —— 但记录说的是磁链表来的，就不该看它。
+	seedUserReviews(t, f, 7, "甲", &domain.JavReview{ID: 82, MovieID: "m1",
+		Content: "最新LTX模型 " + uri})
+
+	rec := &domain.JavPushRecord{
+		ID: 4, MovieID: "m1", Code: "MRSS-104",
+		Name: "MRSS-104 1080p", SizeText: "5.5 GB",
+		Magnet: uri, // Source 留空 = 磁链表来源（见 domain.JavPushRecord.Source）
+	}
+	folders := &stubFolders{}
+	f.svc.folders = folders
+	if err := f.svc.writeSidecar(ctx, rec, "", offlineCompletedEvent{
+		AccountID: 4, TargetParentID: "p1",
+	}); err != nil {
+		t.Fatalf("writeSidecar: %v", err)
+	}
+	doc := decodeSidecar(t, folders.uploaded[folders.uploads[0].FileName])
+	if res := doc["resource"].(map[string]any); res["ltx"] != false {
+		t.Errorf("磁链来源不该去评论里找正文，resource.ltx 应当为 false，got %v", res["ltx"])
+	}
+}
+
 // TestWriteSidecarFileIDEqualsParent 单文件任务：115 返回的 file_id 就是目标目录自己。
 //
 // 实测 ABF-179：`file_id` 与 `target_parent_id` 是同一个值（都是 3414031719816154922），

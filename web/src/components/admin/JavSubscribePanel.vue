@@ -778,7 +778,8 @@ const modeValue = computed({
  *
  * 前提两条，与后端 `quality.normalizeLTXMode` 逐条对应：
  *   1. 勾了「破解」质量 —— LTX 是破解的旁支，勾了破解才谈得上挑哪一种；
- *   2. 开了「评论区链接」—— LTX 标记来自分享链接自带的文件名，不开评论区就无源。
+ *   2. 开了「评论区链接」—— LTX 标记只可能来自分享（链接自带文件名或评论正文），
+ *      不开评论区就无源。
  *
  * 两处各写一份是有意的：前端管**能不能点**，后端管**存不存得住**。
  * 后端那条还会把不满足前提的值归一成空串，所以老前端 / 脚本提交也不会存进脏值。
@@ -1809,7 +1810,9 @@ onMounted(() => {
               其余条件照常 —— 所以它会让这条订阅收进来的资源变多。
             </div>
             <div v-if="ltxAvailable" class="jav-hint">
-              LTX 是分享者在链接的文件名上标的修复版标记（<code>xxx_LTX.mp4</code>），两项只能选一个。
+              LTX 是分享者标的修复版标记：链接自带的文件名（<code>xxx_LTX.mp4</code>），
+              或者评论正文里写了「LTX 模型」都算 —— 实测大量分享者只在正文里标。
+              两项只能选一个。
               <b>LTX 优先</b>：有 LTX 就挑它，没有就按原来的规则挑；
               <b>仅 LTX</b>：只推 LTX，没有就一直等着 —— 这不算失败，也不会发失败通知。
               两项都不选 = 按原来的规则挑，不特别照顾 LTX。
@@ -1904,8 +1907,9 @@ onMounted(() => {
                     {{ c.resolution_badge }}
                   </span>
                   <span v-if="c.uncensored" class="jav-badge jav-badge--break">破解</span>
-                  <!-- LTX 角标：与「破解」挨着，因为「为什么这颗被挑中」往往就这两个词。 -->
-                  <span v-if="c.ltx" class="jav-badge jav-badge--break" title="LTX 修复版">LTX</span>
+                  <!-- LTX 角标：与「破解」挨着，因为「为什么这颗被挑中」往往就这两个词。
+                       但**颜色要分开**（琥珀 vs 红）：两颗常常同时出现，同色并排会看成一条。 -->
+                  <span v-if="c.ltx" class="jav-badge jav-badge--ltx" title="LTX 修复版">LTX</span>
                   <span v-if="c.subtitle" class="jav-badge jav-badge--on">字幕</span>
                   <span v-if="c.push_ok" class="jav-badge jav-badge--on">合格</span>
                   <span v-if="c.predownload" class="jav-badge">待确认</span>

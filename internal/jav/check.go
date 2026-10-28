@@ -62,8 +62,9 @@ type CandidateView struct {
 	// 候选弹窗上标一下 —— 那个弹窗回答的正是「为什么挑了这颗」，
 	// 而「它是评论里来的、条件被放宽过」是这个答案的一半。
 	FromComment bool `json:"from_comment"`
-	// LTX 表示这颗资源的名字里带 LTX 标记（LTX 修复版）。
+	// LTX 表示这颗资源是 LTX 修复版。
 	// 与 Uncensored / Subtitle 一样是「这颗资源是什么」的角标，不参与打分。
+	// 判据见 quality.LTXMarked：链接自带的文件名、展示名、或评论正文任一命中。
 	LTX bool `json:"ltx"`
 }
 
@@ -357,11 +358,13 @@ func (s *Service) buildCandidate(
 		{tags.HD, domain.JavQualityHD},
 		{tags.Subtitle, domain.JavQualitySubtitle},
 		{tags.Edited, domain.JavQualityEdited},
-		// LTX 的判据是**链接自带的文件名**（磁链 dn= / ed2k 第 3 个字段），
-		// 不是 mg.Name —— 后者在评论链接认不出文件名时会退成评论正文，
-		// 正文里的「LTX」是分享者的评语。见 quality.LTXMarked 的说明。
+		// LTX 的判据见 quality.LTXMarked：链接自带的文件名（磁链 dn= / ed2k 第 3 个
+		// 字段）、展示名、以及**评论正文**（只对评论来源成立）。正文也算是因为实测
+		// 大量分享者只在正文写「最新 LTX 模型」、链接名保持原样（用户 2026-10-27
+		// 改口，且明确不加开关）。mg.CommentText 由 commentMagnets 一路上填过来，
+		// 磁链表那条路是空串。
 		// 它不参与打分，只在挑选那一步被 ltx_mode 读（见 push.go 的 pickCandidate）。
-		{quality.LTXMarked(mg.Magnet, mg.Name, resSource == domain.JavSourceComment), domain.JavQualityLTX},
+		{quality.LTXMarked(mg.Magnet, mg.Name, mg.CommentText, resSource == domain.JavSourceComment), domain.JavQualityLTX},
 	} {
 		if t.on {
 			tagList = append(tagList, t.name)
@@ -424,10 +427,11 @@ func containsTag(tags []string, want string) bool {
 
 // isLTXCandidate 报告这条候选是不是 LTX 修复版。
 //
-// 判据走候选表里的标签名（检查那一刻由 quality.IsLTX 写下的），不拿名字重算 ——
+// 判据走候选表里的标签名（检查那一刻由 quality.LTXMarked 写下的），不拿名字重算 ——
 // 与 tagsOf 那条「名称 → 标签只有一份事实来源」相反，这里的标签本来就是从名字
 // 算出来的**一个事实**，不是可以从名字重新推导的质量档位（它不影响打分）。
-// 重算还多一个坏处：候选的 MagnetName 可能被后续的清洗改过，而标签是当时那份的结论。
+// 重算还多两个坏处：候选的 MagnetName 可能被后续的清洗改过；而**评论正文根本没被存进
+// 候选表**（见 domain.JavMagnet.CommentText），重算会漏掉「只在正文里标 LTX」那些。
 func isLTXCandidate(c *domain.JavCandidate) bool {
 	return c != nil && containsTag(c.QualityTags, domain.JavQualityLTX)
 }

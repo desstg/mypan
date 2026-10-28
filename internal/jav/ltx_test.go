@@ -17,7 +17,7 @@ import (
 //   - prefer  有 LTX 就挑 LTX，没有就退回原来的挑法；
 //   - only    只推 LTX；一颗都没有时**这一轮什么都不推**（Idle，不是失败）。
 //
-// LTX 的判据是「链接自带的文件名里带 LTX」（见 quality.LTXMarked），
+// LTX 的判据是「链接自带的文件名、展示名、或评论正文里带 LTX」（见 quality.LTXMarked），
 // 不参与打分 —— 所以下面每条用例都刻意让 LTX 那颗**分数更低**，
 // 好证明「挑中它」是策略起的作用、不是排序碰巧。
 
@@ -237,8 +237,56 @@ func TestLTXSubscribeMovieOnlyIsIdle(t *testing.T) {
 	}
 }
 
-// TestLTXMarkedOnCommentCandidate 「带 LTX」这个事实落在**链接自带的文件名**上：
-// 磁链的 dn= 里有 LTX 才算；只写在评论正文里的不算（用户 2026-10-27 的决定）。
+// TestLTXSharedLinkBodyUnion 同一条链接被两条评论贴过时，正文要**并起来**再判。
+//
+// 真库里 6 组是这种形态：最新那条只写「楼下的，我发上来了」，LTX 写在上一条里。
+// 只留最新那条的正文，就等于把「这个人标了 LTX」整条丢掉 —— 而 `仅 LTX` 会因此
+// 静默不推。
+func TestLTXSharedLinkBodyUnion(t *testing.T) {
+	f, off := fixtureWithPush(t)
+	ctx := context.Background()
+
+	seedMovie(t, f, "m1", "SSIS-001", "甲", nil)
+	ed2k := "ed2k://|file|www.98T.la@SSIS-001_restored.mp4|9209816113|" +
+		strings.Repeat("e", 32) + "|/"
+	seedUserReviews(t, f, 7, "甲",
+		// 旧评论：正文写了 LTX。
+		&domain.JavReview{ID: 81, MovieID: "m1", CreatedAt: "2024-02-01",
+			Content: "重金自购 新版 LTX " + ed2k},
+		// 新评论：同一条链接，正文一个字都没提 LTX。
+		&domain.JavReview{ID: 82, MovieID: "m1", CreatedAt: "2024-03-01",
+			Content: "楼下的，我发上来了 " + ed2k},
+	)
+
+	view := seedSubWithCandidate(t, f, ltxSub(domain.JavLTXModeOnly))
+
+	cands, _, err := f.st.JavCandidates.List(ctx, domain.JavCandidateFilter{
+		SubscriptionID: view.ID, Limit: 100,
+	})
+	if err != nil {
+		t.Fatalf("list candidates: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("同一条链接应当只落成一条候选，got %d", len(cands))
+	}
+	if !hasTagOf(cands[0], domain.JavQualityLTX) {
+		t.Errorf("旧评论正文里的 LTX 不该因为新评论没写就丢掉，tags=%v", cands[0].QualityTags)
+	}
+
+	res, err := f.svc.AutoPush(ctx, view.ID, false)
+	if err != nil {
+		t.Fatalf("AutoPush: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("应当推出去，got %q", res.Message)
+	}
+	if len(off.calls) != 1 || !strings.Contains(off.calls[0].URLs[0], "ed2k://") {
+		t.Errorf("应当推那颗 ed2k，got %v", off.calls)
+	}
+}
+
+// TestLTXMarkedOnCommentCandidate 「带 LTX」这个事实可以落在三处：链接自带的
+// 文件名、展示名、以及**评论正文**（2026-10-27 用户改口：正文里的也算，不要开关）。
 func TestLTXMarkedOnCommentCandidate(t *testing.T) {
 	f, _ := fixtureWithPush(t)
 	ctx := context.Background()
@@ -248,9 +296,12 @@ func TestLTXMarkedOnCommentCandidate(t *testing.T) {
 		// 链接名里带 LTX → 算。
 		&domain.JavReview{ID: 61, MovieID: "m1",
 			Content: "magnet:?xt=urn:btih:" + strings.Repeat("a", 40) + "&dn=SSIS-001%20LTX_restored.mp4"},
-		// 链接名里没有、只有正文写了 LTX → 不算。
+		// 链接名里没有、正文写了 LTX → 也算（这条就是改口之后的行为）。
 		&domain.JavReview{ID: 62, MovieID: "m1",
 			Content: "这个是 LTX 修复版 magnet:?xt=urn:btih:" + strings.Repeat("b", 40) + "&dn=SSIS-001.mp4"},
+		// 两处都没有 → 不算。
+		&domain.JavReview{ID: 63, MovieID: "m1",
+			Content: "普通版 magnet:?xt=urn:btih:" + strings.Repeat("c", 40) + "&dn=SSIS-001.mp4"},
 	)
 
 	view := seedSubWithCandidate(t, f, ltxSub(domain.JavLTXModePrefer))
@@ -261,20 +312,51 @@ func TestLTXMarkedOnCommentCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list candidates: %v", err)
 	}
-	if len(cands) != 2 {
-		t.Fatalf("两条评论应当各出一条候选，got %d", len(cands))
+	if len(cands) != 3 {
+		t.Fatalf("三条评论应当各出一条候选，got %d", len(cands))
 	}
 	for _, c := range cands {
 		got := hasTagOf(c, domain.JavQualityLTX)
-		want := strings.Contains(c.MagnetURI, strings.Repeat("a", 40))
+		// 只有最后一颗（btih 全 c）两处都没写 LTX。
+		want := !strings.Contains(c.MagnetURI, strings.Repeat("c", 40))
 		if got != want {
-			t.Errorf("候选 %q 的 LTX 标记 = %v，期望 %v（只看链接自带的文件名）",
+			t.Errorf("候选 %q 的 LTX 标记 = %v，期望 %v（链接名 / 展示名 / 正文任一命中都算）",
 				c.MagnetName, got, want)
 		}
 		// 它**不参与打分**：三元组的长度与内容都不该因为 LTX 变。
 		if len(c.ResourceScore) != 3 {
 			t.Errorf("ResourceScore 应当仍是三元组，got %v", c.ResourceScore)
 		}
+	}
+}
+
+// TestLTXBodyOnlyIsPicked 正文里写了 LTX 的片子，在「仅 LTX」下要真的被推出去。
+//
+// 这是改口之后的端到端守门：候选打标签、挑选、推送三处都得认这个结论，
+// 而正文只在这条路上存在（jav_push_records 不存正文）。
+func TestLTXBodyOnlyIsPicked(t *testing.T) {
+	f, off := fixtureWithPush(t)
+	ctx := context.Background()
+
+	seedMovie(t, f, "m1", "SSIS-001", "甲", []javbus.Magnet{
+		magnet(strings.Repeat("a", 40), "SSIS-001 2160p 破解 8GB", "8GB"),
+	})
+	// 用户 2026-10-27 给的那类评论：正文写「最新 LTX 模型」，链接名保持原样。
+	seedUserReviews(t, f, 7, "甲", &domain.JavReview{ID: 71, MovieID: "m1",
+		Content: "高金自购最新LTX模型敬请取用 ed2k://|file|www.98T.la@SSIS-001_restored.mp4|10386185950|" +
+			strings.Repeat("d", 32) + "|/"})
+
+	view := seedSubWithCandidate(t, f, ltxSub(domain.JavLTXModeOnly))
+
+	res, err := f.svc.AutoPush(ctx, view.ID, false)
+	if err != nil {
+		t.Fatalf("AutoPush: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("正文标了 LTX 的片子应当被推出去，got %q", res.Message)
+	}
+	if len(off.calls) != 1 || !strings.Contains(off.calls[0].URLs[0], "ed2k://") {
+		t.Errorf("应当推那颗 ed2k（不是磁链表那颗普通版），got %v", off.calls)
 	}
 }
 

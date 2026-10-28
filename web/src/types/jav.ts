@@ -97,6 +97,14 @@ export interface JavCommentShare {
   resolution_badge: string;
   uncensored: boolean;
   subtitle: boolean;
+  /**
+   * 这一条是 **LTX 修复版**。
+   *
+   * 判据是服务端 `quality.LTXMarked`：链接自带的文件名（磁链 `dn=` / ed2k 第 3 段）、
+   * 展示名、以及**评论正文**任一出现独立的 `ltx` 都算。与自动挑选那颗候选
+   * 用的是同一个函数，所以「界面上标着 LTX」与「订阅会挑它」永远一致。
+   */
+  ltx: boolean;
 }
 
 /**
@@ -286,6 +294,8 @@ export interface JavSubscription {
    * 与 `include_comment_links` 正交，但**有前提**：必须同时勾了「破解」质量
    * 且开着评论区链接，后端才认（quality.normalizeLTXMode 会把不满足前提的归成 `""`）。
    *
+   * 什么是 LTX、怎么判，见 `JavCommentShare.ltx` 的注释（判据只有一份，没有开关）。
+   *
    * 三态字符串而不是两个 bool：「二选一 + 都不选」本身就是三态。
    */
   ltx_mode: string;
@@ -377,10 +387,12 @@ export interface JavCandidate {
   /** 这颗资源来自**影片评论区的用户分享**，而不是 JAVBUS 磁链表。 */
   from_comment: boolean;
   /**
-   * 这颗资源是 **LTX 修复版**（链接自带的文件名里带 LTX 标记）。
+   * 这颗资源是 **LTX 修复版**。
    *
-   * 判定只看链接里的文件名（磁链 `dn=` / ed2k 的文件名），不看评论正文。
-   * 不参与打分，只决定「LTX 优先 / 仅 LTX」这两条策略挑不挑它。
+   * 判据是服务端 `quality.LTXMarked`：链接自带的文件名（磁链 `dn=` / ed2k 第 3 段）、
+   * 展示名、以及**评论正文**（仅评论来源）任一出现独立的 `ltx` 都算。正文也算是因为
+   * 大量分享者只在正文写「最新 LTX 模型」、链接名保持原样（用户 2026-10-27 改口，
+   * 且明确不加开关）。不参与打分，只决定「LTX 优先 / 仅 LTX」这两条策略挑不挑它。
    */
   ltx: boolean;
 }

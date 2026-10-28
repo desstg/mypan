@@ -80,6 +80,39 @@ func TestCommentSharesExtractsSharerAndSorts(t *testing.T) {
 	}
 }
 
+// TestCommentSharesLTXFromBody 评论区那一档的 LTX 角标与订阅挑选**同一个判据**：
+// 链接名没写、正文写了，角标也要亮。
+//
+// 好处是这两个地方不会各说各话 —— 用户看到的角标就是「订阅会不会挑它」的答案。
+func TestCommentSharesLTXFromBody(t *testing.T) {
+	f := newCatalogFixture(t)
+	ctx := context.Background()
+	seedMovieForShares(t, f)
+
+	f.db.reviewResult = javdb.ReviewsResp{Total: 2, Reviews: []javdb.Review{
+		// ed2k 名里没有 ltx，正文里写了 → 算。
+		{ID: 1, UserID: 77, Username: "分享君", CreatedAt: "2024-05-01",
+			Content: "最新LTX模型敬请取用 ed2k://|file|SSIS-001_restored.mp4|1|H|/"},
+		// 两处都没写 → 不算。
+		{ID: 2, UserID: 88, Username: "路人", CreatedAt: "2024-06-01",
+			Content: "普通版 ed2k://|file|SSIS-002.mp4|2|H|/"},
+	}}
+
+	got, err := f.svc.CommentShares(ctx, "m1", false)
+	if err != nil {
+		t.Fatalf("CommentShares: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("应当提取出 2 条，got %d", len(got))
+	}
+	for _, v := range got {
+		want := strings.Contains(v.Name, "SSIS-001")
+		if v.LTX != want {
+			t.Errorf("%q 的 LTX 角标 = %v，期望 %v（判据与订阅挑选同一个函数）", v.Name, v.LTX, want)
+		}
+	}
+}
+
 // TestCommentSharesNoReviews 一条评论都没有时是空列表，不是错误。
 func TestCommentSharesNoReviews(t *testing.T) {
 	f := newCatalogFixture(t)
