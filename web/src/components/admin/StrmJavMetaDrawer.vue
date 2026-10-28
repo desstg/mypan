@@ -69,7 +69,12 @@ const wmSub = ref(false);
 // 但界面上不再展示。原因是它对国产片会显示成「有码」（JAVDB 把国产片一律标
 // type=0），看着费解 —— 与其解释不如不显示。
 const wmCensoredMark = ref<"none" | "leak">("none");
-const wmUncensor = ref<"umr" | "">("");
+// 右下角那一组：**破解(umr) 与 LTX 互斥**，因为它们贴同一个角（见后端
+// watermark.go 的锚点表）。三选一：破解 / LTX / 无。
+//
+// 「既是破解又是 LTX」时的落点是 **LTX**：`ltx.png` 那张图画的字就是「LTX破解」，
+// 破解那层信息它自己已经带了（用户 2026-10-28 定）。
+const wmUncensor = ref<"umr" | "ltx" | "">("");
 const wmRes = ref<"4k" | "8k" | "">("");
 
 /**
@@ -84,7 +89,8 @@ function watermarkIDs(): string[] {
   const ids: string[] = [];
   if (wmSub.value) ids.push("sub");
   if (wmCensoredMark.value === "leak") ids.push("leak");
-  if (wmUncensor.value === "umr") ids.push("umr");
+  // 右下角只有一个位置：LTX 与「破解」互斥，单选控件保证不会同时成立。
+  if (wmUncensor.value) ids.push(wmUncensor.value);
   if (wmRes.value) ids.push(wmRes.value);
   return ids;
 }
@@ -94,11 +100,15 @@ function watermarkIDs(): string[] {
  *
  * `preset` 里不会再有 `leak`（后端自动那条路已经不贴它了），所以
  * `wmCensoredMark` 永远从 `none` 起步 —— 用户不点就永远不贴。
+ *
+ * 「破解」那组要认两个来源：后端给 `ltx` 时选 LTX，给 `umr` 时选破解。
+ * 两者同时出现是不可能的（后端也按互斥算），真出现了以 LTX 为准 ——
+ * 与后端那个「LTX 赢」的分支同一条。
  */
 function applyWatermarkPreset(preset: string[] | undefined) {
   const list = preset ?? [];
   wmSub.value = list.includes("sub");
-  wmUncensor.value = list.includes("umr") ? "umr" : "";
+  wmUncensor.value = list.includes("ltx") ? "ltx" : list.includes("umr") ? "umr" : "";
   wmRes.value = list.includes("8k") ? "8k" : list.includes("4k") ? "4k" : "";
   // 手贴那条路仍然留着：预置里万一出现 leak（老版本后端、或用户手改过），
   // 就把它勾上；正常情况下它是 none。
@@ -381,6 +391,7 @@ async function rebuild() {
             </div>
             <div class="jav-wm__row">
               <label><input v-model="wmUncensor" type="radio" value="umr" /> 破解</label>
+              <label><input v-model="wmUncensor" type="radio" value="ltx" /> LTX</label>
               <label><input v-model="wmUncensor" type="radio" value="" /> 无</label>
             </div>
             <div class="jav-wm__row">
@@ -390,6 +401,8 @@ async function rebuild() {
             </div>
             <div class="jav-edit__hint">
               8K 推不出来（上游把 8k 归进 4K 那一档），只能手选。
+              「破解」与「LTX」贴同一个角，只能二选一 —— LTX 那张图标本身写的
+              就是「LTX破解」，已经带了破解的信息。
             </div>
           </div>
         </section>

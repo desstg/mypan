@@ -238,8 +238,9 @@ func (h *Handler) saveJavWallPoster(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		javWallRef
 		Rect emby.CropRect `json:"rect"`
-		// Watermarks 是编辑页上勾的水印 id（4k/8k/leak/sub/umr 的子集，空 = 不贴）。
-		// 多条不影响：水印各自贴各自的角，同一个角只会有一个是"选中的那个"。
+		// Watermarks 是编辑页上勾的水印 id（4k/8k/leak/sub/umr/ltx 的子集，空 = 不贴）。
+		// 多条不影响：水印各自贴各自的角，同一个角只会有一个是"选中的那个"
+		// （umr 与 ltx 共用右下角，前端那组单选保证不会同时传）。
 		Watermarks []string `json:"watermarks"`
 	}
 	if err := decodeJSON(r, &body); err != nil {

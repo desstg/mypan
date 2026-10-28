@@ -2434,7 +2434,16 @@ func WatermarkIDsForSidecar(doc *emby.SidecarDoc) []string { return watermarkIDs
 //
 // 判据（与编辑页的自动预置**同一套**，见 StrmJavMetaDrawer 的 applyWatermarkPreset）：
 //
-//	破解 → umr        4K → 4k        中字 → sub
+//	破解 → umr        4K → 4k        中字 → sub        LTX → ltx
+//
+// **LTX 与 umr 顶同一个角（右下），所以两者互斥、LTX 赢**（用户 2026-10-28 定的）：
+//
+//	中字 + LTX              → sub, ltx
+//	破解 + LTX              → ltx          （不要再加 umr）
+//	中字 + 破解 + LTX       → sub, ltx
+//
+// 理由：`ltx.png` 那张图画的字就是「LTX破解」，破解这层信息它自己已经带了；
+// 再贴一张 umr 只会盖在同一块地方。**4K 不受影响**（它在左下，另一个角）。
 //
 // **自动这条路不贴 leak（「无码流出」）**。原来是无码/欧美/FC2 一律贴，
 // 2026-10-04 用户要求去掉：「有点多余」—— 无码片每张海报都挂一个「无码流出」
@@ -2455,7 +2464,10 @@ func watermarkIDsForSidecar(doc *emby.SidecarDoc) []string {
 	if doc.HasCNSub || doc.Quality.Subtitle {
 		ids = append(ids, "sub")
 	}
-	if doc.Quality.Uncensored {
+	// 右下那个角：LTX 优先于「破解」（两者同一角，见上）。
+	if doc.Resource.LTX {
+		ids = append(ids, "ltx")
+	} else if doc.Quality.Uncensored {
 		ids = append(ids, "umr")
 	}
 	if doc.Quality.FourK {

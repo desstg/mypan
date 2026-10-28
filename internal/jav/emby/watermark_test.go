@@ -162,3 +162,39 @@ func TestLoadWatermarks(t *testing.T) {
 		t.Errorf("用户目录缺文件时应当落回内置：%v", err)
 	}
 }
+
+// TestLTXWatermarkBuiltInAndAnchored 钉住两件事：
+//
+//  1. `ltx` 是认得的水印名，内置那套里有图（不然用户目录没换也贴不上）；
+//  2. 它和 `umr` **贴同一个角**（右下）—— 这正是「破解 + LTX 只贴 LTX」的
+//     物理原因，两者若不在同一个角，那条互斥规则就没有依据了。
+func TestLTXWatermarkBuiltInAndAnchored(t *testing.T) {
+	anchor, ok := WatermarkAnchor("ltx")
+	if !ok {
+		t.Fatal("ltx 应当是认得的水印名")
+	}
+	umr, _ := WatermarkAnchor("umr")
+	if anchor != umr {
+		t.Fatalf("ltx 与 umr 应当贴同一个角，实际 %s vs %s", anchor, umr)
+	}
+	if anchor != AnchorBottomRight {
+		t.Fatalf("右下角那个位置应当给 umr/ltx，实际 %s", anchor)
+	}
+	marks, err := LoadWatermarks("", []string{"ltx"})
+	if err != nil {
+		t.Fatalf("内置的 ltx.png 应当能装上：%v", err)
+	}
+	if len(marks) != 1 || len(marks[0].Image) == 0 {
+		t.Fatalf("ltx 图标字节为空：%+v", marks)
+	}
+	// WatermarkNames 是界面那一排选项的来源，漏了它用户就选不到。
+	found := false
+	for _, n := range WatermarkNames {
+		if n == "ltx" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("WatermarkNames 里应当有 ltx，实际 %v", WatermarkNames)
+	}
+}

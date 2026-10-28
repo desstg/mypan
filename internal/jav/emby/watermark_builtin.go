@@ -31,6 +31,9 @@ var defaultSub []byte
 //go:embed watermarks/umr.png
 var defaultUmr []byte
 
+//go:embed watermarks/ltx.png
+var defaultLTX []byte
+
 // builtinWatermarks 是内置那套（键 = 水印 id）。
 func builtinWatermarks() map[string][]byte {
 	return map[string][]byte{
@@ -39,6 +42,7 @@ func builtinWatermarks() map[string][]byte {
 		"leak": defaultLeak,
 		"sub":  defaultSub,
 		"umr":  defaultUmr,
+		"ltx":  defaultLTX,
 	}
 }
 

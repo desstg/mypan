@@ -371,8 +371,8 @@ const (
 	KeyJavWatermarkScale   = "jav_watermark_scale"
 	KeyJavWatermarkMargin  = "jav_watermark_margin"
 	// KeyJavWatermarkDir 是**用户自己那套图标**放哪（空 = 用内置的）。
-	// 目录里的文件必须与内置同名（4k/8k/leak/sub/umr + .png），缺的落回内置 ——
-	// 这样换其中一张不必凑齐五个。
+	// 目录里的文件必须与内置同名（4k/8k/leak/sub/umr/ltx + .png），缺的落回内置 ——
+	// 这样换其中一张不必凑齐六个。
 	KeyJavWatermarkDir = "jav_watermark_dir"
 
 	// 推送默认目标。订阅自身留空时回落到这里。

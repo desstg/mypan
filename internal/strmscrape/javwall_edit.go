@@ -44,7 +44,8 @@ type JavWallItemDetail struct {
 // JavWallWatermarkState 是编辑页水印那一块需要的全部数据。
 type JavWallWatermarkState struct {
 	// Preset 是按影片属性自动预置的勾选（编辑页打开时用它初始化；用户可改）。
-	// 键与图标名一致：sub / leak / umr / 4k / 8k。
+	// 键与图标名一致：sub / leak / umr / ltx / 4k / 8k。
+	// 其中 umr 与 ltx 互斥（同一个角），见 strm 的 watermarkIDsForSidecar。
 	Preset []string `json:"preset"`
 	// Scale / Margin 是百分数（18 / 6）—— 编辑页显示当前偏好，保存时原样带回来。
 	Scale  int `json:"scale"`

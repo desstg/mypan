@@ -644,7 +644,9 @@ defineExpose(
               <SettingsHelpTooltip title="海报水印说明">
                 <p>
                   开启后，**重刮**与**扫描生成海报**时会按影片属性自动贴水印
-                  （4K / 破解 / 中字 / 无码流出），四个角各一个。
+                  （4K / 破解 / LTX / 中字），贴在四角。破解与 LTX 贴同一个角
+                  （右下），因此**同时命中时只贴 LTX** —— LTX 那张图标本身写的
+                  就是「LTX破解」。
                 </p>
                 <p>
                   默认<b>关</b> —— 关着时只有你在海报墙的编辑页里手动勾选才会贴
@@ -653,7 +655,8 @@ defineExpose(
                 <p>
                   图标默认用内置那套；想换成自己的，在「番号相关设置」里填图标目录，
                   文件名要与内置同名（<code>4k</code> / <code>8k</code> /
-                  <code>leak</code> / <code>sub</code> / <code>umr</code>）。
+                  <code>leak</code> / <code>sub</code> / <code>umr</code> /
+                  <code>ltx</code>）。
                   大小与边距也在那里调。
                 </p>
               </SettingsHelpTooltip>

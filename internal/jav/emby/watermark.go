@@ -18,7 +18,11 @@ import (
 // 位置是固定的四角（用户定的）：
 //
 //	4k.png   左下      8k.png  左下（与 4K 互斥，同一位置）
-//	leak.png 右上      sub.png 左上        umr.png 右下
+//	leak.png 右上      sub.png 左上        umr.png / ltx.png 右下
+//
+// **umr 与 ltx 抢同一个角（右下）**，这是有意的：`ltx.png` 那张图本身画的就是
+// 「LTX破解」，它已经涵盖了 umr 的全部信息，两张一起贴只会叠成一团。
+// 所以「既是破解又是 LTX」时只贴 ltx —— 见 strm 里的 watermarkIDsForSidecar。
 
 // Anchor 是水印贴在海报的哪个角。
 type Anchor string
@@ -63,10 +67,11 @@ var defaultWatermarkAnchors = map[string]Anchor{
 	"leak": AnchorTopRight,
 	"sub":  AnchorTopLeft,
 	"umr":  AnchorBottomRight,
+	"ltx":  AnchorBottomRight,
 }
 
 // WatermarkNames 是认得的图标名（= 文件名去掉 .png）。顺序即界面上那一排的顺序。
-var WatermarkNames = []string{"sub", "leak", "umr", "4k", "8k"}
+var WatermarkNames = []string{"sub", "leak", "umr", "ltx", "4k", "8k"}
 
 // WatermarkAnchor 返回某个图标固定贴哪个角；不认识的名字返回空。
 func WatermarkAnchor(name string) (Anchor, bool) {

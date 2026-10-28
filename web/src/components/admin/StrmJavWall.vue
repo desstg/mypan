@@ -1653,6 +1653,8 @@ defineExpose({
                否则长番号会把胶囊挤出卡片。 -->
           <div class="jav-wall__number" :title="item.number">
             <span class="jav-wall__number-text">{{ item.number }}</span>
+            <!-- LTX 胶囊**靠卡片最右边**（用户 2026-10-28 要求）：番号本体吃掉
+                 剩余宽度并自己省略，胶囊用 `margin-left: auto` 顶到行尾。 -->
             <span v-if="item.ltx" class="jav-wall__ltx" title="LTX 修复版">LTX</span>
           </div>
           <div class="jav-wall__title" :title="item.title">{{ item.title }}</div>
@@ -1781,6 +1783,9 @@ defineExpose({
    一眼就能把「这部是 LTX 版」与番号读成一句话。 */
 .jav-wall__ltx {
   flex: none;
+  /* 顶到番号行的最右边（用户 2026-10-28 要求）：番号占满左边，胶囊贴着卡片右缘，
+     与下一行的标题/副标题右端对齐。 */
+  margin-left: auto;
   padding: 0 4px;
   border-radius: 4px;
   font-size: 10px;

@@ -751,7 +751,7 @@ func TestFillNFOPlotIfMissing(t *testing.T) {
 
 // TestAutoWatermarkIDsFromSidecar 自动那条路该贴哪几个水印 —— 按侧车属性算。
 //
-// 判据（中字贴 sub、破解贴 umr、4K 贴 4k）。
+// 判据（中字贴 sub、破解贴 umr、4K 贴 4k、LTX 贴 ltx）。
 //
 // **leak（「无码流出」）2026-10-04 起自动不贴**：用户说无码片每张海报都挂一个
 // 「无码流出」有点多余，那个信息标题/标签里本来就有。编辑页仍然可以手贴。
@@ -776,6 +776,18 @@ func TestAutoWatermarkIDsFromSidecar(t *testing.T) {
 		{"无码 + 破解 + 4K（仍无 leak）",
 			&emby.SidecarDoc{Type: "1", Quality: emby.SidecarQuality{Uncensored: true, FourK: true}},
 			"umr,4k"},
+		// —— LTX 那条：与 umr 顶同一个角，所以互斥、LTX 赢（2026-10-28 用户定的）——
+		{"LTX + 中字", &emby.SidecarDoc{Type: "0", HasCNSub: true, Resource: emby.SidecarResource{LTX: true}},
+			"sub,ltx"},
+		{"LTX + 破解（只要 ltx，不要 umr）",
+			&emby.SidecarDoc{Type: "0", Resource: emby.SidecarResource{LTX: true}, Quality: emby.SidecarQuality{Uncensored: true}},
+			"ltx"},
+		{"中文 + 破解 + LTX（sub + ltx，无 umr）",
+			&emby.SidecarDoc{Type: "0", HasCNSub: true, Resource: emby.SidecarResource{LTX: true}, Quality: emby.SidecarQuality{Uncensored: true}},
+			"sub,ltx"},
+		{"LTX + 4K（4K 在另一个角，不受影响）",
+			&emby.SidecarDoc{Type: "0", Resource: emby.SidecarResource{LTX: true}, Quality: emby.SidecarQuality{FourK: true}},
+			"ltx,4k"},
 	}
 	for _, c := range cases {
 		got := strings.Join(autoWatermarkIDs(req, c.doc), ",")
@@ -784,6 +796,24 @@ func TestAutoWatermarkIDsFromSidecar(t *testing.T) {
 		}
 		if strings.Contains(got, "leak") {
 			t.Errorf("%s：自动这条路不该贴 leak，got %q", c.label, got)
+		}
+	}
+
+	// 互斥的另一半：LTX 片的 umr 绝不能跟着出现（否则那张「破解」会盖在
+	// 「LTX破解」上面，右下一团）。
+	for _, c := range cases {
+		ids := autoWatermarkIDs(req, c.doc)
+		hasLTX, hasUMR := false, false
+		for _, id := range ids {
+			switch id {
+			case "ltx":
+				hasLTX = true
+			case "umr":
+				hasUMR = true
+			}
+		}
+		if hasLTX && hasUMR {
+			t.Errorf("%s：umr 与 ltx 贴同一个角，不该同时出现，got %v", c.label, ids)
 		}
 	}
 
