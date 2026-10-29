@@ -174,6 +174,116 @@ func TestJavScrapeNumberEmptyWhenUnparseable(t *testing.T) {
 	}
 }
 
+// TestJavScrapeNumberStripsLTXAndJunk 名字里带**分享者标记**时也要取到裸番号。
+//
+// 真机来源（2026-10-29）：用户的片是别的项目下载、再用本项目的 STRM 任务同步进
+// 本地的 —— 没有侧车 json、也没有 nfo，取番号只能走第 ③ 步拆主干。
+// 而 `IPX-680_LTX` 被判成整串番号，拿去搜上游必然搜不到、整部静默计进
+// 「上游没有这一部」（用户报的就是这部刮不了）。
+//
+// 三类标记都要剥：LTX（`_LTX` / `-LTX` / 紧贴数字 `451LTX`）、
+// 破解的另一种写法 `restored`（LTX 版常一起带）、以及水印前缀（`www.98T.la@`）。
+func TestJavScrapeNumberStripsLTXAndJunk(t *testing.T) {
+	cases := map[string]string{
+		"IPX-680_LTX":             "IPX-680",
+		"IPX-680_LTX-U":           "IPX-680",
+		"IPX-680_U_LTX":           "IPX-680",
+		"PPPD-451LTX":             "PPPD-451",
+		"MISM-305_LTX_restored":   "MISM-305",
+		"www.98T.la@MISM-305_LTX": "MISM-305",
+		"MISM-305.restored":       "MISM-305",
+	}
+	for stem, want := range cases {
+		dir := t.TempDir()
+		mustWrite(t, filepath.Join(dir, stem+".strm"), "x")
+		if got := scrapeNumberInDir(t, dir, stem); got != want {
+			t.Errorf("%s → %q，期望 %q", stem, got, want)
+		}
+	}
+}
+
+// TestJavScrapeNumberShrinkKeepsAmbiguousShapes 收敛番号那一步**不能误伤**已有的形态。
+//
+// `shrinkScrapedNumber` 拿 `ExtractCodeWithBrands` 从名字里抽番号，而那条正则的
+// 数字段最多吃 5 位：`1PON-123456` 会被抽成 `PON-12345`（截短且丢掉首字符）。
+// 边界判据（抽出来那段两侧必须是分隔符）挡住它。国产无连字符与欧美点分型抽不出，
+// 也必须整串保留 —— 那两类本来就要整串当番号。
+func TestJavScrapeNumberShrinkKeepsAmbiguousShapes(t *testing.T) {
+	cases := map[string]string{
+		"1PON-123456":     "1PON-123456", // 6 位序号：不能被截成 PON-12345
+		"FC2-PPV-1234567": "FC2-PPV-1234567",
+		"DYXO002":         "DYXO002", // 国产形状：ExtractCode 抽不出
+		"vixen.26.09.19":  "vixen.26.09.19",
+		"ABF-387":         "ABF-387",
+		"091926-001":      "091926-001", // 日期序号型：不能被拆成 091926
+	}
+	for stem, want := range cases {
+		dir := t.TempDir()
+		mustWrite(t, filepath.Join(dir, stem+".strm"), "x")
+		if got := scrapeNumberInDir(t, dir, stem); got != want {
+			t.Errorf("%s → %q，期望 %q", stem, got, want)
+		}
+	}
+}
+
+// TestJavScrapeMarkMarksLTXIntoNewSidecar 新建的侧车里要带 `resource.ltx`。
+//
+// 用户要求（2026-10-29）：「刮削时，海报水印的规则和 strm 有 json 文件时的规则一样」。
+//
+// 水印的判据只有一份 —— `strm.watermarkIDsForSidecar(doc)` **按侧车字段**算
+// （中字→sub、破解→umr、4K→4k、LTX→ltx，且 LTX 与 umr 顶同一个角、LTX 赢）。
+// 所以让两条路一致的做法**不是**在刮削侧另算一套水印，而是把侧车字段写全：
+// 有 `resource.ltx`，同一个函数就会给出 `ltx`，而不是 `umr`。
+func TestJavScrapeMarkMarksLTXIntoNewSidecar(t *testing.T) {
+	for _, stem := range []string{"IPX-680_LTX", "PPPD-451LTX", "MISM-305_LTX_restored"} {
+		if !quality.IsLTX(stem) {
+			t.Fatalf("%q 应当被判成 LTX 版（否则水印贴不上 ltx.png）", stem)
+		}
+	}
+	// 反向：普通名字不能被判成 LTX（否则每部片都挂一张 LTX 水印）。
+	for _, stem := range []string{"IPX-680", "SSIS-444-UC", "IPZZ-909-U"} {
+		if quality.IsLTX(stem) {
+			t.Errorf("%q 不是 LTX 版，不该贴 ltx 水印", stem)
+		}
+	}
+	// 新建侧车写入之后，水印那条判据给出的就是 `ltx`（**不是** umr —— 同一角互斥）。
+	doc := newJavSidecarDoc("IPX-680", map[string]any{"quality.uncensored": true},
+		quality.Marks{Uncensored: true}, "", "")
+	if got, want := strm.WatermarkIDsForSidecar(mustParseSidecar(t, doc)), []string{"umr"}; !equalStrings(got, want) {
+		t.Errorf("普通破解片的水印 = %v，期望 %v", got, want)
+	}
+	setIfEmptyPathAny(doc, "resource.ltx", true)
+	if got, want := strm.WatermarkIDsForSidecar(mustParseSidecar(t, doc)), []string{"ltx"}; !equalStrings(got, want) {
+		t.Errorf("LTX 破解片的水印 = %v，期望 %v（与 strm 有 json 时同一套判据）", got, want)
+	}
+}
+
+// mustParseSidecar 把新建侧车的 doc 走一遍真正的读侧解析（形状不对会当场红）。
+func mustParseSidecar(t *testing.T, doc map[string]any) *emby.SidecarDoc {
+	t.Helper()
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := emby.Parse(raw)
+	if err != nil {
+		t.Fatalf("这份 doc 不是合法侧车：%v", err)
+	}
+	return parsed
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestCollectJavScrapeTargetsWalks 扫盘：分类目录下两层都能收到，平铺判据与生成器一致。
 func TestCollectJavScrapeTargetsWalks(t *testing.T) {
 	root := t.TempDir()
@@ -243,6 +353,75 @@ func TestJavScrapeMarksFromSuffix(t *testing.T) {
 		if got.Uncensored != want.uncensored || got.Subtitle != want.subtitle || got.FourK != want.fourK {
 			t.Errorf("%s → uncensored=%v subtitle=%v fourK=%v，期望 %v/%v/%v",
 				stem, got.Uncensored, got.Subtitle, got.FourK, want.uncensored, want.subtitle, want.fourK)
+		}
+	}
+}
+
+// TestJavScrapeMarksSurviveLTXMark 带 LTX 标记时，那些质量后缀**照样认得出来**。
+//
+// 用户 2026-10-29 当场问的：「有 ltx 后，那些后缀是否还能正常识别」。
+// 第一版答案是「不能」—— `javScrapeMarks` 只拆原样主干，而 `ParseJavFileName`
+// 从**右往左**吃后缀，`_LTX` 挂在尾巴上时它前面那段 `-UC` / `-4K` 一个都吃不到：
+//
+//	IPX-680-UC      → 破解 + 中字      ✓
+//	IPX-680-UC_LTX  → 全假             ✗（改之前）
+//
+// 这批片子的水印会整片丢掉。修法是拆**同一份候选表**（原样 + 剥过 LTX 的），取并集。
+//
+// 覆盖 LTX 的三种贴法：尾巴（`_LTX` / `-LTX` / 紧贴数字 `451LTX`）、
+// **中间**（`IPX-680_LTX-UC`：质量段在 LTX 之后）、以及**下划线形态**
+// （`IPX-680_U_LTX`：`ParseJavFileName` 只吃连字符，得先把末尾标记段的分隔符归一）。
+func TestJavScrapeMarksSurviveLTXMark(t *testing.T) {
+	cases := map[string]struct {
+		uncensored bool
+		subtitle   bool
+		fourK      bool
+	}{
+		// LTX 在尾巴，质量段在它前面
+		"IPX-680_LTX":           {false, false, false},
+		"IPX-680-LTX":           {false, false, false},
+		"IPX-680-UC_LTX":        {true, true, false},
+		"IPX-680-C_LTX":         {false, true, false},
+		"IPX-680-4K_LTX":        {false, false, true},
+		"IPX-680-UC-4K_LTX":     {true, true, true},
+		"MISM-305_LTX_restored": {false, false, false}, // restored 不是标准后缀，不认
+		// LTX 在中间，质量段在它后面
+		"IPX-680_LTX-U":      {true, false, false},
+		"IPX-680_LTX-UC":     {true, true, false},
+		"IPX-680_LTX-C":      {false, true, false},
+		"IPX-680_LTX-4K":     {false, false, true},
+		"IPX-680_LTX-4K-cd1": {false, false, true},
+		// 下划线形态（分隔符归一化那一步治的）
+		"IPX-680_U_LTX":    {true, false, false},
+		"IPX-680_UC_LTX":   {true, true, false},
+		"IPX-680_4K_LTX":   {false, false, true},
+		"IPX-680_U_4K_LTX": {true, false, true},
+		// 紧贴数字的 LTX（分享者常见贴法）
+		"PPPD-451LTX": {false, false, false},
+	}
+	for stem, want := range cases {
+		got := javScrapeMarks(stem)
+		if got.Uncensored != want.uncensored || got.Subtitle != want.subtitle || got.FourK != want.fourK {
+			t.Errorf("%s → uncensored=%v subtitle=%v fourK=%v，期望 %v/%v/%v（有 LTX 时后缀必须照样认）",
+				stem, got.Uncensored, got.Subtitle, got.FourK, want.uncensored, want.subtitle, want.fourK)
+		}
+	}
+}
+
+// TestJavScrapeMarksDoesNotInventTokens 归一化那一步**不能把普通词读成标记**。
+//
+// `normalizeTrailingMarkSeps` 只从右往左连吃「本来就能当标记的 token」，遇到第一个
+// 不是标记的段就停 —— 番号本体与片名一个字都不动。这里钉住那几条边界：
+// 下划线段全不是标记时原样返回；`XLTX` 这种连写不算 LTX（`reLTX` 的两端边界只挡字母）。
+func TestJavScrapeMarksDoesNotInventTokens(t *testing.T) {
+	for _, stem := range []string{
+		"MY_FAVORITE_VIDEO", // 末尾 VIDEO 不是标记
+		"DYXO_002",          // 国产形状：末尾是数字段
+		"FC2_PPV_1234567",   // 多段番号
+		"IPX-680_U_XLTX",    // XLTX 是连写，不是 LTX → 不剥、也不该从 _U 里读出标记
+	} {
+		if got := javScrapeMarks(stem); got != (quality.Marks{}) {
+			t.Errorf("%s → %+v，期望一个标记都没有（别凭空造标记）", stem, got)
 		}
 	}
 }

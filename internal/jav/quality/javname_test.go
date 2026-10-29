@@ -183,3 +183,48 @@ func TestParseJavFileNameKeepsNumberTail(t *testing.T) {
 		t.Errorf("拆成了 %q %+v", number, marks)
 	}
 }
+
+// TestStripLTXMark 钉住「剥掉分享者贴的 LTX 标记」这条判据。
+//
+// 它只服务于**拿主名反查番号**那一步（见 strmscrape.javScrapeNumber 第 ③ 步），
+// 所以 `ParseJavFileName` 一个字都没改 —— 这条测试也顺手盯住那件事：
+// 剥完之后剩下的 `-U` 之类仍要由 `ParseJavFileName` 吃。
+func TestStripLTXMark(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		hit  bool
+	}{
+		{"IPX-680_LTX", "IPX-680", true},
+		{"IPX-680_LTX-U", "IPX-680-U", true},
+		{"IPX-680_U_LTX", "IPX-680_U", true},
+		{"PPPD-451LTX", "PPPD-451", true},
+		{"MISM-305_LTX_restored", "MISM-305-restored", true},
+		{"www.98T.la@MISM-305_LTX", "www.98T.la@MISM-305", true},
+		// 没有这个标记：原样返回、且告诉调用方「没动过」——调用方据此只试一轮。
+		{"IPX-680", "IPX-680", false},
+		{"XLTX-001", "XLTX-001", false}, // 连写的 xltx 不是独立 token
+		// 整串就是标记：不能剥成空串（那会让调用方以为「拆完了什么都不剩」）。
+		{"LTX", "LTX", false},
+	}
+	for _, c := range cases {
+		got, hit := StripLTXMark(c.in)
+		if got != c.want || hit != c.hit {
+			t.Errorf("StripLTXMark(%q) = (%q, %v)，期望 (%q, %v)", c.in, got, hit, c.want, c.hit)
+		}
+	}
+	// 剥完之后仍能被 ParseJavFileName 接上（两段契约的接缝）。
+	if number, marks, ok := ParseJavFileName(mustStrip(t, "IPX-680_LTX-U")); !ok ||
+		number != "IPX-680" || !marks.Uncensored {
+		t.Errorf("剥完再拆 = (%q, %+v, %v)，期望 (IPX-680, {Uncensored:true}, true)", number, marks, ok)
+	}
+}
+
+func mustStrip(t *testing.T, stem string) string {
+	t.Helper()
+	out, hit := StripLTXMark(stem)
+	if !hit {
+		t.Fatalf("%q 里应当有 LTX 标记", stem)
+	}
+	return out
+}

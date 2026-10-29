@@ -893,12 +893,105 @@ func javScrapeNumber(absDir string, files map[string]os.DirEntry, names emby.Nam
 	//      - 欧美点分日期型（`vixen.26.09.19`）—— HasCode **刻意**不含它。
 	//    同一个项目里 `javplanner.parseSidecarName` 早就用上那两条加法了，
 	//    这里是漏同步 —— 两处从此共用 `javrules.IsRecognizableNumber`。
-	if n, _, ok := quality.ParseJavFileName(stem); ok {
-		if n = strings.TrimSpace(n); n != "" && javrules.IsRecognizableNumber(n, brands) {
+	//
+	//    ⚠️⚠️⚠️ 那道闸**要先收敛再判**（2026-10-29）：`IsRecognizableNumber` 是
+	//    **包含**式匹配（名字里有一段像番号就算真），拿整串去搜上游必然搜不到。
+	//    顺序反过来（先判后收）会让 `www.98T.la@MISM-305` 这类带水印前缀的名字
+	//    在原样那一步就被判否、剥过的那份也带着水印，两轮全废。见 shrinkScrapedNumber。
+	for _, cand := range javScrapeNumberCandidates(stem) {
+		n, _, ok := quality.ParseJavFileName(cand)
+		if !ok {
+			continue
+		}
+		if n = strings.TrimSpace(n); n == "" {
+			continue
+		}
+		n = shrinkScrapedNumber(n, brands)
+		if javrules.IsRecognizableNumber(n, brands) {
 			return stripScrapeStation(n, tokens)
 		}
 	}
 	return ""
+}
+
+// shrinkScrapedNumber 把「含番号的名字」收敛成**番号本体**（`MISM-305-restored` → `MISM-305`）。
+//
+// # 为什么必须再收一道（2026-10-29，`IPX-680_LTX` 刮不了这条链的根）
+//
+// `javrules.IsRecognizableNumber` 回答的是「这个名字能**不能当番号用**」——
+// 它的三条判据（`HasCode` / 国产形状 / 点分型）全都是**包含**式匹配：名字里
+// 只要有一段像番号就算真。这对「认侧车」是对的（`SSIS-001-UC-4K.json` 整串
+// 就该被认成侧车），但对「拿什么去搜上游」是错的 —— 上游要的是**裸番号**，
+// `IPX-680_LTX` / `MISM-305-restored` / `IPX-680_U` 拿去搜一律搜不到，于是
+// 整部片被静默记进「上游没有这一部」。
+//
+// 收敛本身用 `javrules.ExtractCodeWithBrands`（那个项目里唯一权威的「从名字里
+// 抽出番号本体」），但**必须加边界判据**，不能无条件采用：
+//
+//	MISM-305-restored  → 抽出 MISM-305，右侧断在 `-` 上                  → 采用
+//	IPX-680_U          → 同上，断在 `_` 上                              → 采用
+//	www.98T.la@MISM-305_LTX → 抽出 MISM-305，左侧断在 `@`（水印前缀）     → 采用
+//	1PON-123456        → 抽出 `PON-12345`（`\d{2,5}` 截短了），
+//	                     两侧都断在数字上                                → 不采用
+//
+// 最后一条是真踩过的坑：`reCodeExtract` 的数字段最多吃 5 位，遇到 `1PON-123456`
+// 这种 6 位序号会**截短**。边界判据把它挡住了 —— 抽出来的那段两侧（若有）必须是
+// 分隔符，不能是从数字/字母中间截出来的。
+//
+// 抽不出（国产无连字符 `DYXO002`、欧美点分型 `vixen.26.09.19`、用户新厂牌）时
+// **原样返回**：那两类本来就要整串当番号，`ExtractCode` 帮不上忙。
+func shrinkScrapedNumber(n string, brands []string) string {
+	code := javrules.ExtractCodeWithBrands(n, brands)
+	if code == "" || code == n {
+		return n
+	}
+	// 抽出来的那段必须在 n 里**断在分隔符上**才采用（两侧各判一次）：
+	//   - 左侧：`www.98T.la@MISM-305_LTX` 抽出 `MISM-305`，前面是 `@` —— 水印前缀，放行；
+	//   - 右侧：`MISM-305-restored` 抽出 `MISM-305`，后面是 `-` —— 放行；
+	//     而 `1PON-123456` 抽出的是截短的 `PON-12345`（`\d{2,5}` 只吃 5 位），
+	//     左侧断在 `1` 上、右侧断在 `6` 上，两侧都不成立 → 原样返回。
+	idx := strings.Index(n, code)
+	if idx < 0 {
+		return n
+	}
+	if idx > 0 && !strings.ContainsAny(n[idx-1:idx], "-_.@ ") {
+		return n
+	}
+	if rest := n[idx+len(code):]; rest != "" && !strings.ContainsAny(rest[:1], "-_.@ ") {
+		return n
+	}
+	return code
+}
+
+// javScrapeNumberCandidates 给第 ③ 步排「拿哪个主名去拆番号」。
+//
+// **剥过 LTX 标记的那份排第一**（见 quality.StripLTXMark），原样那份兜底。
+//
+// # 为什么需要它（2026-10-29 真机，`IPX-680_LTX` 刮不了）
+//
+// 用户的片常常是**别的项目下载、再由本项目的 STRM 任务同步进本地**的 ——
+// 没有侧车 json、也没有 nfo，取番号只能走第 ③ 步拆主干。而分享者在名字里
+// 贴的 `_LTX` 不在 `BuildJavFileName` 那套后缀里，`ParseJavFileName` 会把它
+// 当成番号的一部分：`IPX-680_LTX` → 拿 `IPX-680_LTX` 去搜上游必然搜不到，
+// 整部片被静默记进「上游没有这一部」。
+//
+// # 为什么剥过的那份必须排第一（而不是原样排第一）
+//
+// 第一版按「原样优先，认不出再剥」写，真机一测就废：`IsRecognizableNumber`
+// **对 `IPX-680_LTX` 是成立的**（`HasCode` 的 `[A-Za-z]{2,6}-[A-Za-z]?\d{2,5}`
+// 在 `IPX-680` 那一段就命中了，尾巴上多个 `_LTX` 不影响它），于是原样那条
+// **永远**先返回，剥过的那条一次都轮不到 —— 整个修复等于没做。
+//
+// 所以判据改成「名字里**有** LTX 标记」就优先用剥过的那份。代价是「番号本体
+// 恰好含 ltx 三连写」的名字会被误剥，而那种番号在 JAVDB 上不存在。
+//
+// 名字里没有 LTX 标记时只返回原样那一份 —— 行为与加这个功能之前逐字相同。
+func javScrapeNumberCandidates(stem string) []string {
+	stripped, ok := quality.StripLTXMark(stem)
+	if !ok || stripped == stem {
+		return []string{stem}
+	}
+	return []string{stripped, stem}
 }
 
 // stripScrapeStation 把番号尾部粘着的**站名**剥掉（`091926-001-carib` → `091926-001`）。
@@ -1027,6 +1120,17 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 	// 判据用 **quality.ParseJavFileName**（与写侧 BuildJavFileName 同源）——
 	// 不自己写正则：后缀那套规则两处各写一套迟早会分家。
 	marks := javScrapeMarks(t.stem)
+	// LTX 这一条**单独判**（2026-10-29，用户要求「海报水印的规则和 strm 有 json 时一样」）。
+	//
+	// 水印的判据只有一份：`strm.watermarkIDsForSidecar(doc)` 按**侧车字段**算
+	// （中字→sub、破解→umr、4K→4k、LTX→ltx，且 LTX 与 umr 同角互斥、LTX 赢）。
+	// 所以这一条不能另写一套水印规则，要做的是**把侧车的 resource.ltx 写全** ——
+	// 有了它，新建的侧车与「本来就有 json」的那批走的是同一个函数、同一张图
+	// （`ltx.png` 画的字就是「LTX破解」，带不带 umr 由那个函数自己决定）。
+	//
+	// 判据用 quality.IsLTX（分享者贴的 `_LTX` / `-LTX` / `451LTX` 都认），
+	// **不是** ParseJavFileName —— LTX 刻意不在那套后缀里（见 StripLTXMark 的说明）。
+	ltx := quality.IsLTX(t.stem)
 
 	jsonPath := filepath.Join(t.absDir, t.stem+".json")
 	if !fileExists(jsonPath) {
@@ -1047,12 +1151,22 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 		// jav.SidecarTitleByNumber 的注释）。
 		title, originTitle := s.jav.SidecarTitleByNumber(ctx, t.number)
 		doc := newJavSidecarDoc(t.number, fields, marks, title, originTitle)
+		// LTX 标记照写侧落在 `resource.ltx`（见 jav.sidecarResourceJSON.LTX 的说明）：
+		// 读侧（internal/jav/emby）靠它给 nfo 加 `LTX破解` genre，水印靠它贴 ltx.png。
+		// **只补空**，与 doc 里其余字段同一条判据。
+		if ltx {
+			setIfEmptyPathAny(doc, "resource.ltx", true)
+		}
+		// 三个返回值是 (scraped, notFound, failed) —— **第二个是 notFound，不是
+		// 「找到了」**。这里走的是「上游拿到了这一部」那条路，所以它必须是 false。
+		// （2026-10-29 真机：六个 `_LTX` 片全补到了，结果里却同时报
+		// `scraped:6, not_found:6` —— 就是这三处把 `true` 当「找到了」传了。）
 		if err := writeJSONFile(jsonPath, doc); err != nil {
-			return false, true, true
+			return false, false, true
 		}
 		// 写完 json 之后用同一条路补 nfo（它有「元素存在就不动」的判据兜着）。
 		if _, err := strm.WriteFieldsIntoFile(jsonPath, fields); err != nil {
-			return false, true, true
+			return false, false, true
 		}
 		// ⚠️ 上面那次回读**必然是「无改动」**：`fields` 里每一个非空的键都已经在
 		// 写盘前由 `setIfEmptyPathAny` 并进 doc 了，所以 `WriteFieldsIntoFile`
@@ -1071,7 +1185,7 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 		// 而 `ApplySidecarTitleZHToFile` 同样按 title 重建一遍 —— 顺序反过来，
 		// 重建出来的那份又会被补缺改一次，形状与「编辑器保存」那条路对不上。
 		s.pushScrapedJavTitle(ctx, t, jsonPath)
-		return true, true, false
+		return true, false, false
 	}
 
 	// 已有侧车：先把缺的质量标记补进去（老侧车里 quality 是空的、而文件名带后缀
@@ -1080,13 +1194,19 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 		// 标记变了：拿新那份 json 再算一次 fields（`WriteFieldsIntoFile` 会自己读，
 		// 所以这里只是把「json 变了」这件事反映给调用方的返回值）。
 	}
+	// LTX 同样补进已有侧车（**只补空**）：老侧车里没有 `resource.ltx`，而水印那条
+	// 判据读的正是它 —— 不补的话，同一个 `_LTX` 名字在「有 json」与「没 json」两条
+	// 路上贴出来的水印不一样，那正是用户要求对齐的东西。
+	if ltx {
+		mergeLTXMarkIntoFile(jsonPath)
+	}
 	changed, err := strm.WriteFieldsIntoFile(jsonPath, fields)
 	if err != nil {
-		return false, true, true
+		return false, false, true
 	}
 	// 同上：标题那一手放最后（这次它重建 nfo，就是这一部的收尾）。
 	s.pushScrapedJavTitle(ctx, t, jsonPath)
-	return changed, true, false
+	return changed, false, false
 }
 
 // pushScrapedJavTitle 把**中文标题**写进这一部刚刮完的侧车（连带重建 nfo 的 `<title>`）。
@@ -1209,6 +1329,33 @@ func (s *Service) localJavRepair(t javScrapeTarget) bool {
 	return true
 }
 
+// mergeLTXMarkIntoFile 把 `resource.ltx = true` 补进一份**已有的**侧车 json。
+//
+// 与 `mergeQualityMarksIntoFile` 同一套规矩：只补空、值没变不写盘、其余字段原样。
+// 分开一个函数只因为它的落点是一个**布尔叶子**（`resource.ltx`），
+// 而通用那条路吃的是点分路径的 map —— 单独写反而更直白，也免得为一行改动
+// 去动那条已经很长的调用链。
+//
+// ⚠️ **只写 true，不写 false**：文件名里没有 LTX 标记时我们**不知道**这一部是不是
+// LTX 版（侧车可能早就记着 true，那是推送那一刻的权威结论）。写 false 等于拿
+// 「文件名没写」去推翻一个已知事实。
+func mergeLTXMarkIntoFile(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return false
+	}
+	setIfEmptyPathAny(doc, "resource.ltx", true)
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil || string(out) == string(raw) {
+		return false
+	}
+	return os.WriteFile(path, out, 0o644) == nil
+}
+
 // newJavSidecarDoc 拼一份**新建**侧车的 json 内容（在线刮削用）。
 //
 // 形状照写侧（`jav.sidecarDoc`）：`schema` + `number` 是 emby.Parse 的两条硬校验，
@@ -1269,11 +1416,109 @@ func newJavSidecarDoc(number string, fields map[string]any, marks quality.Marks,
 // （写一个全 false 的 quality 等于替这部片断言「它不是 4K、没破解、没中字」，
 // 而这条路的判据本来就只有文件名）。
 func javScrapeMarks(stem string) quality.Marks {
-	_, marks, ok := quality.ParseJavFileName(stem)
-	if !ok {
-		return quality.Marks{}
+	// 候选表与取番号那一步**同源**（见 javScrapeNumberCandidates）：剥过 LTX 的排第一、
+	// 原样兜底，两边各拆一次取**并集**。
+	//
+	// # 为什么不能只拆原样（2026-10-29 用户当场问出来的）
+	//
+	// `ParseJavFileName` 只从**右往左**吃后缀，所以 `_LTX` 挂在尾巴上时，它前面的
+	// 质量段一个都吃不到 —— 实测：
+	//
+	//	IPX-680-UC        → 破解 + 中字          ✓
+	//	IPX-680-UC_LTX    → 全假                 ✗
+	//	IPX-680_U_LTX     → 全假（下划线形态本来不吃）✗
+	//	IPX-680_4K_LTX    → 全假                 ✗
+	//
+	// 这批片子的水印会整片丢掉（`sub` / `umr` / `4k` 一个都不贴），而用户要的正是
+	// 「有 LTX 时那些后缀照样认」。剥过的那份（`IPX-680-UC`）拆出来就对了。
+	//
+	// 取并集而不是「剥过的优先」：原样那份仍有一处是剥过那份给不了的 ——
+	// `IPX-680_LTX-C` 剥完是 `IPX-680-C`，两条路都对；但若将来出现把质量段贴在
+	// LTX **之后**的写法，原样那份才吃得到。并集只会多认、不会少认，而**多认的
+	// 那一边永远是同一个文件名里真写着的后缀**，不是猜出来的。
+	var out quality.Marks
+	for _, cand := range javScrapeNumberCandidates(stem) {
+		if _, marks, ok := quality.ParseJavFileName(cand); ok {
+			out.Uncensored = out.Uncensored || marks.Uncensored
+			out.Subtitle = out.Subtitle || marks.Subtitle
+			out.FourK = out.FourK || marks.FourK
+		}
+		// 原样认不出任何标记时，再试一次**把末尾的下划线标记段改成连字符**的形态。
+		//
+		// 这一条治的是另一类真样本：分享者把质量段写成下划线（`IPX-680_U`、
+		// `IPX-680_4K`、`IPX-680_UC_4K`），而 `ParseJavFileName` 只吃 `-U` / `-4K`
+		// 那套**标准命名**的连字符形态。剥掉 `_LTX` 之后正好剩下这种名字
+		// （`IPX-680_U_LTX` → `IPX-680_U`），于是标记整片丢失。
+		//
+		// 只在**一个标记都没认出来**时才走这一步：认出来了说明名字已经是能读的
+		// 形态，再拿改过的串去猜只会引入噪声。而「本来就没标记」（`IPX-680`）
+		// 走这一步也不变 —— 末尾没有标记段就原样返回。
+		if out == (quality.Marks{}) {
+			if fixed := normalizeTrailingMarkSeps(cand); fixed != cand {
+				if _, marks, ok := quality.ParseJavFileName(fixed); ok {
+					out.Uncensored, out.Subtitle, out.FourK = marks.Uncensored, marks.Subtitle, marks.FourK
+				}
+			}
+		}
 	}
-	return marks
+	return out
+}
+
+// isMarkToken 认「可以直接当质量标记段」的 token（下划线形态归一化用）。
+//
+// 与 `BuildJavFileName` 拼出来的那几个后缀**同一份清单**：字母段 U / C / UC、
+// `4K`、分片 `cdN`。刻意不含 `restored` / `uncensored` 这类长写法 ——
+// 那种词出现在名字里时本身就有歧义（可能是片名的一部分），换分隔符并不能让它
+// 变成标准后缀，只会让「同一个名字拆出两个结论」。
+func isMarkToken(tok string) bool {
+	switch strings.ToLower(tok) {
+	case "u", "uc", "c", "4k":
+		return true
+	}
+	lower := strings.ToLower(tok)
+	if !strings.HasPrefix(lower, "cd") {
+		return false
+	}
+	digits := lower[2:]
+	if len(digits) < 1 || len(digits) > 2 {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeTrailingMarkSeps 把**末尾**那几段下划线形态的标记换成连字符形态。
+//
+//	IPX-680_U          → IPX-680-U
+//	IPX-680_4K         → IPX-680-4K
+//	IPX-680_UC_4K      → IPX-680-UC-4K     （段序原样保留，只换分隔符）
+//	IPX-680_U_cd2      → IPX-680-U-cd2
+//
+// 只从**右往左**连续地换，遇到第一个不是标记的段就停：
+//
+//	MY_FAVORITE_VIDEO  → 不变（`VIDEO` 不是标记）
+//	FC2_PPV_1234567    → 不变（`1234567` 不是标记）
+//	DYXO_002           → 不变（`002` 不是标记）
+//
+// 停在那儿是有意的：再往里换就会碰到**番号本体**（番号里带下划线的不是没有），
+// 而番号本体一个字都不该动。
+func normalizeTrailingMarkSeps(stem string) string {
+	parts := strings.Split(stem, "_")
+	if len(parts) < 2 {
+		return stem
+	}
+	i := len(parts) - 1
+	for i > 0 && isMarkToken(parts[i]) {
+		i--
+	}
+	if i == len(parts)-1 {
+		return stem // 末尾没有标记段
+	}
+	return strings.Join(parts[:i+1], "_") + "-" + strings.Join(parts[i+1:], "-")
 }
 
 // marksToJSON 把拆出来的标记转成侧车 `quality` 那块的形状。

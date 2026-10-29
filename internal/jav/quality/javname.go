@@ -1,6 +1,7 @@
 package quality
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -146,6 +147,63 @@ func ParseJavFileName(stem string) (number string, m Marks, ok bool) {
 	}
 	return stem, m, true
 }
+
+// StripLTXMark 从主名里去掉「LTX 修复版」标记，返回去掉后的主名与有没有改动。
+//
+//	IPX-680_LTX              → IPX-680
+//	IPX-680_LTX-U            → IPX-680-U      （后面那个 -U 留给 ParseJavFileName）
+//	PPPD-451LTX              → PPPD-451
+//	MISM-305_LTX_restored    → MISM-305-restored
+//	IPX-680                  → IPX-680        （没这个标记，原样返回）
+//
+// # 为什么需要它（2026-10-29 真机）
+//
+// 用户库里的片子常是**别的项目下载、再用本项目的 STRM 任务同步进本地**的，
+// 名字里带着分享者贴的 `_LTX`。而 `ParseJavFileName` 只吃 `BuildJavFileName`
+// 那一套后缀（`-U` / `-C` / `-UC` / `-4K` / `-cdN`），LTX 不在其中 —— 于是
+// `IPX-680_LTX` 被**原样**当成番号，拿它去搜上游必然搜不到，那一部就被静默
+// 记成「上游没有这一部」（海报墙在线刮削实测：`IPX-680_LTX` 刮不了就是这个）。
+//
+// # 为什么不去动 ParseJavFileName 本身
+//
+// 那个函数是**标准命名的另一半**（写侧 `BuildJavFileName` 拼、整理侧拆回来），
+// 加进 LTX 就等于把侧车与视频的文件名契约一起改了。而 LTX 是**分享者**贴在
+// 下载来的文件上的标记，不是本程序产出的名字 —— 它只该在「拿主名反查番号」
+// 这一步被剥掉（见 strmscrape.javScrapeNumber 第 ③ 步）。
+//
+// 判据复用 `reLTX`：删掉的是**独立成词**的 ltx 三字母（`XLTX` 那种连写不算），
+// 前后紧邻的分隔符一并收走，再把因为删除而并到一起的 `[-_.]{2,}` 折成一个 `-`。
+// 只对「本来就有 LTX 标记」的名字做这些整理，其余名字一个字不动。
+func StripLTXMark(stem string) (string, bool) {
+	if stem == "" || !reLTX.MatchString(stem) {
+		return stem, false
+	}
+	var b strings.Builder
+	b.Grow(len(stem))
+	last := 0
+	for _, m := range reLTX.FindAllStringIndex(stem, -1) {
+		start, end := m[0], m[1]
+		// 边界字符属于分隔符、不属于 ltx 本身（reLTX 的边界类会把它吃进 match），
+		// 直接删整个 match 会连番号两侧的分隔符一起带走（`IPX-680_U-LTX` 之类）。
+		if off := strings.Index(strings.ToLower(stem[start:end]), "ltx"); off >= 0 {
+			start, end = start+off, start+off+3
+		}
+		b.WriteString(stem[last:start])
+		last = end
+	}
+	b.WriteString(stem[last:])
+
+	// 折叠因删除而并到一起的分隔符，再去掉首尾悬空的那几个：
+	// `IPX-680_-U` → `IPX-680-U`、`IPX-680_` → `IPX-680`。
+	out := strings.Trim(reSepRun.ReplaceAllString(b.String(), "-"), "-_. ")
+	if out == "" {
+		return stem, false // 整串就是 LTX（`LTX` 这种名字）：不是番号，别弄成空串
+	}
+	return out, true
+}
+
+// reSepRun 是「连着两个以上的分隔符」，StripLTXMark 删除标记后用它折成一个 `-`。
+var reSepRun = regexp.MustCompile(`[-_.]{2,}`)
 
 // trimTrailingCD 吃掉结尾的 `-cdN`（N 是 1~2 位数字），返回去掉后的串。
 func trimTrailingCD(stem string) (string, bool) {

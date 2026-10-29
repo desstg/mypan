@@ -827,3 +827,119 @@ func TestAutoWatermarkIDsFromSidecar(t *testing.T) {
 		t.Errorf("没有侧车时不该贴，got %v", ids)
 	}
 }
+
+// capturingPosterQueue 记下入队的作业，供「水印贴不贴得上」这类断言用。
+type capturingPosterQueue struct{ jobs []javPosterJob }
+
+func (q *capturingPosterQueue) SchedulePoster(job javPosterJob) { q.jobs = append(q.jobs, job) }
+
+// TestGenerateJavArtifactsLTXSidecarGetsLTXWatermark 端到端串一遍：
+// **侧车里有 `resource.ltx` → 重刮算出来的作业就带 `ltx` 水印**。
+//
+// 用户 2026-10-29 问的两件事都钉在这里：
+//
+//  1. 「用在线刮削生成的 json，再点重刮，应该有 LTX 水印」—— 在线刮削写进侧车的
+//     `resource.ltx` 是**唯一**的判据来源（水印那条 `watermarkIDsForSidecar` 只看侧车
+//     字段），所以这里直接放一份带该字段的侧车，走生成的同一条路；
+//  2. 「重刮」必须**重算**这张海报（`Overwrite` 为真），否则队列的「已存在就跳过」
+//     会让新算出来的水印根本落不了盘 —— 那正是「重刮了但海报没变」的形状。
+//
+// 反面同时钉住：同一份侧车去掉 `resource.ltx` 时**不该**有 ltx（否则每部片都贴一张）。
+func TestGenerateJavArtifactsLTXSidecarGetsLTXWatermark(t *testing.T) {
+	const ltxSidecar = `{
+  "schema": "litepan.jav.sidecar/1",
+  "number": "IPX-680",
+  "type": "0",
+  "has_cnsub": true,
+  "resource": {"ltx": true},
+  "quality": {"uncensored": true, "subtitle": true},
+  "images": {"cover": "https://tp.spfcas.com/rhe951l4q/covers/ve/vezpEn.jpg"}
+}`
+	run := func(t *testing.T, sidecar string) javPosterJob {
+		t.Helper()
+		root, rel := newJavTaskDir(t, "IPX-680_LTX.json")
+		if err := os.WriteFile(filepath.Join(root, "IPX-680_LTX.json"), []byte(sidecar), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		q := &capturingPosterQueue{}
+		// 重刮语义：Overwrite + RefetchImages 都为真（见 RebuildJavArtifactsInRoot）。
+		generateJavArtifacts(context.Background(), javArtifactRequest{
+			Root:             root,
+			StrmFiles:        []string{rel},
+			Overwrite:        true,
+			RefetchImages:    true,
+			Items:            allOn(),
+			Images:           newStubFetcher(),
+			PosterQueue:      q,
+			WatermarkEnabled: true,
+			Log:              testLogger(t),
+		})
+		if len(q.jobs) != 1 {
+			t.Fatalf("应当入队 1 个海报作业，got %d", len(q.jobs))
+		}
+		return q.jobs[0]
+	}
+
+	ltx := run(t, ltxSidecar)
+	if got := strings.Join(ltx.WatermarkIDs, ","); got != "sub,ltx" {
+		t.Errorf("LTX 破解中字片的水印 = %q，期望 sub,ltx（ltx 与 umr 同角，UMR 不能跟出来）", got)
+	}
+	if !ltx.Overwrite {
+		t.Error("重刮的作业必须带 Overwrite，否则已存在的 poster 不会被重算，水印贴不上去")
+	}
+
+	plain := run(t, strings.Replace(ltxSidecar, `"resource": {"ltx": true},`, "", 1))
+	if got := strings.Join(plain.WatermarkIDs, ","); got != "sub,umr" {
+		t.Errorf("没有 LTX 时水印 = %q，期望 sub,umr（普通破解片）", got)
+	}
+}
+
+// TestSchedulePosterStampsLTXWatermark 真正**贴到像素上**：LTX 片裁出来的海报与
+// 不贴水印的那张逐字节不同，且用的是右下角那张 `ltx.png`。
+//
+// 上一条只证明了「作业里带着 ltx」，这一条证明它**落到了图上** —— 那一步是
+// `schedulePoster` 的 PostQueue==nil 分支（`ComposePosterWithMargin`），与队列里
+// 那条路共用同一个 `loadWatermarkMarks`。两条岔路里只要有一条不认 `ltx`，
+// 用户看到的就是「重刮了，海报还是老样子」。
+func TestSchedulePosterStampsLTXWatermark(t *testing.T) {
+	dir := t.TempDir()
+	thumbPath := filepath.Join(dir, "thumb.jpg")
+	if err := os.WriteFile(thumbPath, sampleJPEG(840, 568), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	names := emby.TargetNames("IPX-680_LTX", false)
+	doc := &emby.SidecarDoc{
+		Schema: emby.SupportedSchema, Number: "IPX-680", Type: "0",
+		Resource: emby.SidecarResource{LTX: true},
+	}
+	req := javArtifactRequest{WatermarkEnabled: true, WatermarkScale: 24, WatermarkMargin: 2, Overwrite: true}
+
+	if n := schedulePoster(req, dir, names, localSidecar{doc: doc}, testLogger(t)); n != 1 {
+		t.Fatalf("应当写出 1 张海报，got %d", n)
+	}
+	withMark, err := os.ReadFile(filepath.Join(dir, names.Poster))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 同一张缩略图、同一次裁切，只是关掉水印 —— 两份必须不同，否则说明水印没贴上去
+	// （`len(poster) == 0` 那种失败会静默退出，正好长这样）。
+	if err := os.Remove(filepath.Join(dir, names.Poster)); err != nil {
+		t.Fatal(err)
+	}
+	plain := req
+	plain.WatermarkEnabled = false
+	if n := schedulePoster(plain, dir, names, localSidecar{doc: doc}, testLogger(t)); n != 1 {
+		t.Fatalf("无水印那张应当也写出来，got %d", n)
+	}
+	without, err := os.ReadFile(filepath.Join(dir, names.Poster))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(withMark, without) {
+		t.Error("带 LTX 水印的海报与无水印那张一模一样 —— ltx.png 没被贴上去")
+	}
+	// 水印只会让图**更花**：重新编码后的体积通常变大，但这条不稳，只做「能解开」判据。
+	if _, err := jpeg.Decode(bytes.NewReader(withMark)); err != nil {
+		t.Fatalf("贴完水印的海报解不开：%v", err)
+	}
+}
