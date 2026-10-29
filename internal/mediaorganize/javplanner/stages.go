@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"litepan/internal/jav/quality"
 	"litepan/internal/mediaorganize/javrules"
 	"litepan/internal/mediaorganize/moplan"
 )
@@ -59,6 +60,14 @@ type builder struct {
 	// 每个都扫一遍规则表纯属浪费，而规则在这一轮里不会变。
 	cnBrands []string
 
+	// stationTokens 是站名 token 表（`CARIB` / `1PON` / `HEYZO` …），来自分类规则的
+	// includes（见 javrules.StationTokens）。
+	//
+	// 只给 `numberDirName` 用：没有侧车的目录也要按同样的口径把站名补回番号
+	// （`091926-001-carib` → `091926-001-CARIB`），否则同一个作品在「有侧车」与
+	// 「没侧车」两条路上会得到两个不同的目录名。与 cnBrands 一样只算一次。
+	stationTokens []string
+
 	protectedIDs   map[string]struct{} // 不能被改名/搬走的目录（含分类目标根及其祖先）
 	protectedNoted map[string]struct{}
 
@@ -76,6 +85,9 @@ func (b *builder) run() error {
 	}
 	// 厂牌表要早于 loadSidecars —— 认侧车那一步就要用它（用户填的厂牌得算番号前缀）。
 	b.cnBrands = javrules.CNBrandsFromRules(b.planner.rules.ClassifyRules)
+	// 站名表同样只算一次：`numberDirName`（没有侧车那条路）要用它把日期序号型
+	// 的站名补回番号，与 `resolveStations` 给有侧车那条路补的是同一份。
+	b.stationTokens = javrules.StationTokens(b.planner.rules.ClassifyRules)
 	// 侧车先读齐：阶段 1 用它保护 json，阶段 2/3/5 用它决定名字与目录名。
 	// 只扫一次、每份只读一次。
 	b.sidecars = b.loadSidecars()
@@ -588,7 +600,8 @@ func (b *builder) stageEnsureDirAndMoveIn() {
 
 // dirNameFor 算一个文件应该进哪个作品目录。
 //
-// 有侧车 → **番号本体**（`MOIL-001`）；没有 → 既有的「改名后的整个主名」。
+// 有侧车 → **番号本体**（`MOIL-001`）；没有侧车 → 也**只留番号**（见 numberDirName），
+// 实在认不出番号才退回既有的「改名后的整个主名」。
 //
 // 抽成一个函数，是因为阶段 3（建目录）与阶段 5（目录改名）必须给出同一个答案 ——
 // 两处各写一份的话会出现「按 A 建目录、又按 B 把目录改名」这种自相矛盾的计划，
@@ -601,7 +614,80 @@ func (b *builder) dirNameFor(dirID, finalName string) (string, bool) {
 	if entry, ok := b.sidecars.sole(dirID); ok {
 		return entry.WorkNumber(), true
 	}
-	return javrules.ExpectedDirName(finalName, b.planner.rules), true
+	return b.numberDirName(finalName), true
+}
+
+// numberDirName 算「没有侧车」时这一部该叫什么目录名：**只保留番号**。
+//
+//	IPX-680_LTX.mp4   → IPX-680      （分享者贴的 LTX 标记）
+//	SSIS-444-UC-4K.mp4 → SSIS-444    （质量标记）
+//	DSOD-028-4K.mp4   → DSOD-028
+//	091926-001-carib.mp4 → 091926-001-CARIB   （日期序号型补站名，与 WorkNumber 同形）
+//
+// # 为什么没有侧车也要只留番号（2026-10-29 用户定的口径）
+//
+// 有侧车那条路早就是 `WorkNumber()`（纯番号），理由写在阶段 3 那段注释里：照标准
+// 番号命名视频叫 `MOIL-001-UC-4K.mp4`，目录名若跟着主名走就会建出
+// `MOIL-001-UC-4K/` —— 同一个作品的几个版本散成几个目录，「按番号归类」就没意义了。
+// 而**没有侧车的目录有完全一样的毛病**：用户库里那批 `_LTX`（别人的项目下载、
+// 再由本项目的 STRM 同步进来）原名里就带着标记，于是目录被叫成 `IPX-680_LTX/`。
+// 用户的要求是「和有侧车那样，只保留番号」—— 两类目录在库里长得一样才好找。
+//
+// # 为什么只剥「标准命名的后缀」而不做泛化收敛
+//
+// 剥的只有两样：`quality.StripLTXMark`（分享者贴的 `_LTX`）与
+// `quality.ParseJavFileName`（写侧 `BuildJavFileName` 那套 `-U` / `-C` / `-UC` /
+// `-4K` / `-cdN`）。**刻意不做**「从名字里抽出任意一段当番号」那种收敛 ——
+// 那条路（`javrules.ExtractCodeWithBrands`）会把 `ABP-123-EP13` 收成 `ABP-123`，
+// 于是同一部剧的 `-EP01` 与 `-EP02` 会被塞进同一个目录。整理是**真去改磁盘**的动作，
+// 这种误合并比「名字里多留一段 `_PJ`」糟得多。
+//
+// # 认不出番号时怎么办
+//
+// 退回 `javrules.ExpectedDirName`（改名后的整个主名）—— 与加这个函数之前逐字相同。
+// 「普通家庭录像.mp4」那类没有番号的片子仍然各自一个目录、名字不被清空。
+func (b *builder) numberDirName(finalName string) string {
+	fallback := javrules.ExpectedDirName(finalName, b.planner.rules)
+	stem := stemOf(finalName)
+	// ① 剥 LTX 标记。它不在 BuildJavFileName 那套后缀里（见 quality.StripLTXMark），
+	//    不先剥掉的话 ParseJavFileName 会把它当成番号的一部分原样带出来。
+	if stripped, hit := quality.StripLTXMark(stem); hit {
+		stem = stripped
+	}
+	// ② 剥质量标记（`-U` / `-C` / `-UC` / `-4K` / `-cdN`）。
+	number, _, ok := quality.ParseJavFileName(stem)
+	if !ok {
+		return fallback
+	}
+	number = strings.TrimSpace(number)
+	if number == "" {
+		return fallback
+	}
+	// ③ 日期序号型要补回站名（`091926-001-carib` → `091926-001-CARIB`）。
+	//
+	// 补是因为**分类**要它：`091926-001` 这种番号本身不带任何厂信息，规则表靠
+	// includes 里的 CARIB / 1PON / PACO / 10MU 才认得出它属于「素人」，少了站名
+	// 那一档的片子会整批落进兜底分类。口径与有侧车那条路的 `sidecarEntry.WorkNumber`
+	// **逐字一致**，两条路建出来的目录名因此对得上。
+	if base, station := javrules.SplitStationSuffix(number, b.stationTokens); station != "" {
+		number = base + "-" + station
+	} else if javrules.IsDateSeqCode(number) {
+		if station := javrules.MatchStation(stem, number, b.stationTokens); station != "" {
+			number += "-" + station
+		}
+	}
+	// ④ 认不出番号就退回旧口径。判据用 IsRecognizableNumber 而不是 HasCode：
+	//    后者只认日式/FC2/日期序号/厂牌表，国产形状（`DYXO002`）与欧美点分型
+	//    （`Tushy.2026.09.20`）都会被判否，于是那两类片连目录都建不出来 ——
+	//    而它们本来是可以的。这与 strmscrape 取番号那道闸用的是同一个函数。
+	if !javrules.IsRecognizableNumber(number, b.cnBrands) {
+		return fallback
+	}
+	// ⑤ 国内厂牌补连字符（`MGL0002` → `MGL-0002`）—— 与 WorkNumber 同一个做法。
+	if withHyphen, ok := javrules.NormalizeCNHyphenWithBrands(number, b.cnBrands); ok {
+		number = withHyphen
+	}
+	return number
 }
 
 // folderForVideo 算这个**视频**该进哪个作品目录。
@@ -619,7 +705,7 @@ func (b *builder) folderForVideo(dirID string, f ScannedFile) string {
 		}
 		return entry.WorkNumber()
 	}
-	return javrules.ExpectedDirName(b.finalName(f), b.planner.rules)
+	return b.numberDirName(b.finalName(f))
 }
 
 // ── 阶段 5：目录名跟随文件名 ──

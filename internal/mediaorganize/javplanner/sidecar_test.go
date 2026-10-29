@@ -1683,3 +1683,104 @@ func TestSidecarUserBrandKeepsJapanese(t *testing.T) {
 		}
 	}
 }
+
+// 「没有侧车的目录也只保留番号」（2026-10-29 用户定的口径）。
+//
+// # 为什么要这条
+//
+// 有侧车那条路早就是 `WorkNumber()`（纯番号），没有侧车那条路原来走
+// `ExpectedDirName`（= 改名后的整个主名）。于是同一个事实有两套目录名：
+// 库里那批 `_LTX`（别的项目下载、再由本项目的 STRM 同步进来）拿到的是
+// `IPX-680_LTX/`，而同一部片一旦有了 json 就变成 `IPX-680/`。
+//
+// 用户的原话是「和有侧车那样，只保留番号」，并且点名要连 `-C` / `-U` / `-UC` /
+// `-4K` 一起剥。这条用例就把「建目录」与「目录改名」两个出口一起钉住 ——
+// 它们必须给出**同一个答案**（见 dirNameFor 的注释）。
+func TestPlanNumberOnlyDirWithoutSidecar(t *testing.T) {
+	cases := []struct{ name, want string }{
+		{"IPX-680_LTX.mp4", "IPX-680"},               // 分享者贴的 LTX 标记
+		{"SSIS-444-UC-4K.mp4", "SSIS-444"},           // 质量标记：破解 + 中字 + 4K
+		{"DSOD-028-4K.mp4", "DSOD-028"},              // 只有 4K
+		{"PRED-365-C_LTX.mp4", "PRED-365"},           // 中字 + LTX
+		{"091926-001-carib.mp4", "091926-001-CARIB"}, // 日期序号型要补回站名（与有侧车同形）
+		{"MGL0002.mp4", "MGL-0002"},                  // 已知国产厂牌补连字符
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := newFakeFS()
+			const root = "/root"
+			fs.add(root, c.name, 3*1024*mb, false)
+			target := fs.add(root, "整理库", 0, true)
+			plan := buildPlanWith(t, fs, root, target, Config{ActionType: "move"})
+
+			// 只看阶段 3（建作品目录并移入）：分类那一步也会发 ensure_dir，
+			// 那几个是**分类目标**（`无码` / `国产`…），不是作品目录。
+			var ensure []string
+			for _, a := range plan.Actions {
+				stage, _ := a.Metadata["stage"].(string)
+				if stage == stageMoveIn && a.Kind == moplan.ActionKindEnsureDir {
+					ensure = append(ensure, a.TargetName)
+				}
+			}
+			if len(ensure) != 1 || ensure[0] != c.want {
+				t.Fatalf("建的目录 = %v，期望 [%s]（没有侧车时也只要番号）", ensure, c.want)
+			}
+		})
+	}
+}
+
+// 认不出番号时必须**退回旧口径**（改名后的整个主名），不能把目录名清空或建成空串。
+//
+// 这条守的是边界：上面的 `numberDirName` 有五道闸，任何一道判否都要落到 fallback。
+// 而「普通家庭录像」这种没番号的片在库里是真实存在的（黄金树里就有）。
+func TestPlanDirNameFallsBackWhenNoNumber(t *testing.T) {
+	fs := newFakeFS()
+	const root = "/root"
+	fs.add(root, "普通家庭录像.mp4", 2*1024*mb, false)
+	target := fs.add(root, "整理库", 0, true)
+	plan := buildPlanWith(t, fs, root, target, Config{ActionType: "move"})
+
+	var ensure []string
+	for _, a := range plan.Actions {
+		stage, _ := a.Metadata["stage"].(string)
+		if stage == stageMoveIn && a.Kind == moplan.ActionKindEnsureDir {
+			ensure = append(ensure, a.TargetName)
+		}
+	}
+	if len(ensure) != 1 || ensure[0] != "普通家庭录像" {
+		t.Fatalf("建的目录 = %v，期望 [普通家庭录像]", ensure)
+	}
+}
+
+// 库里的**目录名**同样只保留番号（阶段 5 走的是 dirNameFor 的另一半）。
+//
+// 用户真库里的形状就是这样：`strm/116/有码/IPX-680_LTX/`，里面一个 `.strm`
+// 与几个产物、没有侧车 json。以前 `ExpectedDirName` 会把整个主名当目录名，
+// 于是这一档永远是 `IPX-680_LTX`；有了侧车之后又变成 `IPX-680` —— 同一个作品
+// 两条路两个名字。这条钉住「原地重命名模式」下它也会被改成裸番号。
+func TestPlanRenameDirNumberOnly(t *testing.T) {
+	fs := newFakeFS()
+	const root = "/root"
+	dir := fs.add(root, "IPX-680_LTX", 0, true)
+	// 载体用真视频：阶段 5 只让**视频**决定目录名（`.strm` 不在视频扩展名表里，
+	// 那是 STRM 任务的产物，不是整理任务的输入）。
+	fs.add(dir, "IPX-680_LTX.mp4", 3*1024*mb, false)
+	fs.add(dir, "poster.jpg", 200000, false)
+
+	cfg := Config{SourceDirID: root, ActionType: "rename", SmallFileMB: 300,
+		CleanEmptyDirs: true, MaxDirs: 500}
+	p := New(context.Background(), fs, 1, cfg, javrules.Defaults(), "task-1", nil, nil)
+	plan, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build 失败：%v", err)
+	}
+	var got string
+	for _, a := range plan.Actions {
+		if stage, _ := a.Metadata["stage"].(string); stage == stageRenameDir && a.SourceID == dir {
+			got = a.TargetName
+		}
+	}
+	if got != "IPX-680" {
+		t.Fatalf("目录改名结果 = %q，期望 IPX-680", got)
+	}
+}

@@ -159,14 +159,24 @@ type JavOnlineScrapeProgress struct {
 //
 // # 为什么「用户可以正常操作」
 //
-// 它**不占 operationMu**（那把锁是 TMDB 刮削用的，会禁用界面按钮），也不动
-// `javWallCache`。整条路只做两件事：
+// 它**不占 operationMu**（那把锁是 TMDB 刮削用的，会禁用界面按钮）。整条路只做两件事：
 //
 //  1. 一次扫盘（只读），列出 (目录, 主干)；
 //  2. 逐个：取番号 → 打上游 → 合并进 json → 重建 nfo。
 //
-// 全程不碰墙的快照缓存，所以墙照常翻页、点卡片照常开详情；只有被补到的那几部
-// 的文件变了，用户下次刷新自然看到。
+// 跑的过程中**不碰**墙的快照缓存，所以墙照常翻页、点卡片照常开详情。
+//
+// ⚠️ 但**收尾时必须让它作废一次**（`defer s.invalidateJavWall(scopeKey)`）。
+// 以前这里不做事，结果是「刮完刷新一下，卡片上还是旧的」：快照里的番号与 LTX
+// 是扫盘那一刻从**旧 nfo / 主干**上读的（`Number: stem`，`LTX: false`），
+// 而 `fillMetaOnce` 一份快照只填一次、`validJavWallSnapshot` 只 stat **根目录**
+// —— 写进的是**影片子目录**里的 nfo，根目录 mtime 不变，60 秒 TTL 也没到，
+// 于是刚刮完的一轮被完整地挡在缓存后面。真机表现（2026-10-29）：`IPX-680_LTX`
+// 卡片上仍显示 `IPX-680_LTX`、没有 LTX 胶囊，而磁盘上的 nfo/json 都是对的；
+// 点一次「重刮」就好了 —— 因为 `RebuildJavWallItem` 显式调了 `invalidateJavWall`。
+//
+// 放在 `defer` 里是为了连**中途出错 / 用户取消**也一起兜住：那时已经写下去的
+// 那几部同样改了盘上内容。（一次成本是「下次列墙重扫一遍」，与一次「重刮」同级。）
 //
 // `items` 为空 = **整根**（扫出源根下所有作品，老行为逐字不变）；非空 = **点名**
 // （只刮这几部，见 javScrapeTargetsForItems）。
@@ -229,6 +239,11 @@ func (s *Service) JavWallOnlineScrape(ctx context.Context, src *wallSrc, items [
 	s.setJavOnlineProgress(scopeKey, 0, len(targets), "在线刮削中…")
 	// ⚠️ 收尾（Running=false 与写 Result）统一由 StartJavWallOnlineScrape 那个
 	// goroutine 做 —— 这里**不要**再动，否则前端会读到「完成了但还没有结果」。
+	//
+	// 快照作废**必须在这之前落地**：defer 在函数返回时执行，比 goroutine 里那句
+	// `Running = false` 更早 —— 而前端看到 running=false 就 `await load()`，
+	// 反过来的话它读到的还是这份作废前的快照，等于没改。见函数头那段 ⚠️。
+	defer s.invalidateJavWall(scopeKey)
 
 	// 限流：上游那边自己也有间隔（`jav_min_interval_ms`），这里再加一道是给
 	// 网盘/代理这类中间层留余量，也让「用户关掉页面」能更快收手。
