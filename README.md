@@ -103,7 +103,7 @@
 
 ## ▎ 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v3.0.3`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v3.0.4`
 
 ### 一、先确认共享挂载已开启（用到 FUSE 挂载才需要）
 
@@ -259,7 +259,7 @@ services:
 每个 Release 的 Assets 里都有一个 `mypan-<版本>-windows-amd64.exe`（Windows 10/11 x64）：
 
 ```bat
-mypan-v3.0.3-windows-amd64.exe --listen 0.0.0.0:5211 --data-dir "D:\mypan\data"
+mypan-v3.0.4-windows-amd64.exe --listen 0.0.0.0:5211 --data-dir "D:\mypan\data"
 ```
 
 数据（数据库、日志、STRM 输出）默认落在 exe 同级的 `data` 与 `strm` 目录，建议用

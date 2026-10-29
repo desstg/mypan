@@ -5,7 +5,7 @@ const (
 	AppName = "MyPan"
 
 	// AppVersion 是程序品牌版本，用于默认程序 User-Agent。
-	AppVersion = "v3.0.3"
+	AppVersion = "v3.0.4"
 
 	// DefaultUserAgent 用于未被驱动平台强制指定时的默认程序 UA。
 	DefaultUserAgent = AppName + "/" + AppVersion
