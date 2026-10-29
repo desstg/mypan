@@ -402,6 +402,13 @@ export interface WallActor {
   /** 上游性别码：1 = 男。TMDB 那面不填（它没有这个字段）。 */
   gender?: number;
   avatar_url?: string;
+  /**
+   * 为真表示 `avatar_url` 是**用户自己上传的**那张（服务端 `/api/admin/...` 地址）。
+   *
+   * 番号那面才有：在影片详情里点演员进演员详情，那个抽屉要据此知道这一格
+   * 不用再走自动那几档，也不能被「补一张小图」覆盖。
+   */
+  custom_avatar?: boolean;
 }
 
 /** TMDB 影片墙的详情。 */

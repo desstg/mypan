@@ -1,7 +1,9 @@
 package api
 
 import (
+	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -552,6 +554,99 @@ func (h *Handler) getJavWallActorPhoto(w http.ResponseWriter, r *http.Request) {
 	}
 	// TMDB 的图不可变（路径带内容哈希），缓存一天。
 	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	_, _ = w.Write(data)
+}
+
+// 演员的**自定义头像**：用户在演员详情页自己传一张，盖过侧车 / 资料层那只。
+//
+// 三条路由共用 `/jav-wall/actor/avatar`，用方法与参数区分：
+//
+//	POST   表单字段 file + query key  → 存（返回新的地址）
+//	DELETE query key                  → 删（回到侧车 / 资料层那张）
+//	GET    query key                  → 取图（image/jpeg）
+//
+// ⚠️ 上传的是**用户当时那台设备上的**文件，但服务端会把它重新编码后落盘
+// （见 strmscrape.SaveJavActorAvatar），之后与原文件、原设备无关 ——
+// 换手机 / 换电脑 / 清空相册都不影响显示。
+
+// saveJavWallActorAvatar 上传一张自定义头像。
+func (h *Handler) saveJavWallActorAvatar(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	max := strmscrape.JavActorAvatarMaxBytes
+	// 两道闸：MaxBytesReader 挡住超大请求体（连解析都不做），读完再核一次实际字节数
+	// （multipart 的边界、头部也算进 body，所以给 1 MB 余量）。
+	r.Body = http.MaxBytesReader(w, r.Body, max+(1<<20))
+	if err := r.ParseMultipartForm(max); err != nil {
+		writeErr(w, domain.Errorf(domain.CodeValidation, "读取上传的图片失败（可能超过 %d MB）", max>>20))
+		return
+	}
+	if r.MultipartForm != nil {
+		defer func() { _ = r.MultipartForm.RemoveAll() }()
+	}
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		key = strings.TrimSpace(r.FormValue("key"))
+	}
+	if key == "" {
+		writeErr(w, domain.Errorf(domain.CodeValidation, "缺少演员标识"))
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeErr(w, domain.Errorf(domain.CodeValidation, "请选择要上传的图片"))
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, max+1))
+	if err != nil {
+		writeErr(w, domain.Errorf(domain.CodeValidation, "读取上传的图片失败"))
+		return
+	}
+	if int64(len(data)) > max {
+		writeErr(w, domain.Errorf(domain.CodeValidation, "图片超过 %d MB 上限", max>>20))
+		return
+	}
+	out, err := h.strmScrape.SaveJavActorAvatar(r.Context(), key, data)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, out)
+}
+
+// deleteJavWallActorAvatar 删掉自定义头像（回到侧车 / 资料层那张）。
+//
+// 幂等：本来就没有也不算错 —— 前端点「恢复默认」时不该看到一个报错。
+func (h *Handler) deleteJavWallActorAvatar(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	writeOK(w, h.strmScrape.DeleteJavActorAvatar(r.URL.Query().Get("key")))
+}
+
+// getJavWallActorAvatar 取自定义头像的字节。
+//
+// 地址里的 `v=<mtime>` 让换图之后浏览器拿新的（见 actorAvatarURL），所以这里可以
+// 放心缓存一天。
+func (h *Handler) getJavWallActorAvatar(w http.ResponseWriter, r *http.Request) {
+	if !ensureServiceReady(w, h.strmScrape != nil) {
+		return
+	}
+	path, ok := h.strmScrape.ResolveJavActorAvatarFile(r.URL.Query().Get("key"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	// 存的时候一律是重新编码的 JPEG（见 normalizeActorAvatar），类型是确定的。
+	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	_, _ = w.Write(data)
 }

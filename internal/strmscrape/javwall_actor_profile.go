@@ -164,7 +164,24 @@ func (s *Service) ActorProfile(ctx context.Context, key string) *JavWallActorPro
 	if err != nil {
 		return nil
 	}
-	return s.lookJavActorProfile(ctx, card)
+	out := s.lookJavActorProfile(ctx, card)
+	// 用户自传的头像**盖在缓存结果之上**（包括缓存为 nil 的那条：「全都没查到」
+	// 按短 TTL 缓存了 nil，而这个人是自己传过头像的，不该也变 nil —— 前端会因此
+	// 把墙上那张又换成占位图）。缓存里那份只代表外站那一层。
+	//
+	// ⚠️ 必须先**复制一份**再改：`lookJavActorProfile` 命中缓存时返回的是缓存里
+	// 那个 `*JavWallActorProfile` 本身，就地改会把「自传头像」永久写进缓存 ——
+	// 用户点「恢复默认」之后，24 小时内拿到的仍是删掉那张图的地址（404）。
+	if card.CustomAvatar && strings.TrimSpace(card.AvatarURL) != "" {
+		if out == nil {
+			out = &JavWallActorProfile{Name: card.Name, Gender: card.Gender}
+		} else {
+			cp := *out
+			out = &cp
+		}
+		out.AvatarURL = strings.TrimSpace(card.AvatarURL)
+	}
+	return out
 }
 
 // lookJavActorProfile 是资料层的主体：本地表 → 各源 → 合并 → 缓存。
@@ -192,8 +209,14 @@ func (s *Service) lookJavActorProfile(ctx context.Context, card JavWallActorCard
 		}
 	}
 	// 侧车 / nfo 里已经带回来的头像：那是这套片子自己的数据，排第一。
+	//
+	// 用户自传的那张（`card.CustomAvatar`）**不进 candidates**，也不在下面任何
+	// 一步被读：它是本机同源地址，不在 `/api/jav/image` 的白名单里，拿去
+	// FetchImage 探针必然失败 —— 结果就是整条链把用户亲手选的那张跳过、换成外站
+	// 的小图（正是这次要治的「两处不一样」）。它在最后单独顶掉返回值，不参与
+	// 缓存（缓存只存外站那一层，见 ActorProfile）。
 	candidates := make([]string, 0, 4)
-	if v := strings.TrimSpace(card.AvatarURL); v != "" {
+	if v := strings.TrimSpace(card.AvatarURL); v != "" && !card.CustomAvatar {
 		candidates = append(candidates, v)
 	}
 

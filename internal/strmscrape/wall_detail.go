@@ -46,6 +46,10 @@ type WallActor struct {
 	// 前端必须走 /api/jav/image 取，不能直接 src —— 那个代理会解码并定 Content-Type。
 	// 空串表示上游没给，前端显示占位图标。
 	AvatarURL string `json:"avatar_url"`
+	// CustomAvatar 为真表示 `AvatarURL` 是**用户在演员详情页自己上传的**那张。
+	// 那是一个本机同源地址（`/api/admin/strm-scrape/jav-wall/actor/avatar`），
+	// 前端不能再套 `/api/jav/image`（那个代理只认外站白名单）。
+	CustomAvatar bool `json:"custom_avatar,omitempty"`
 }
 
 // WallDetail 是详情抽屉要的全部数据。
@@ -264,6 +268,15 @@ func (s *Service) JavWallDetail(ctx context.Context, srcRef WallSourceRef, relDi
 		}
 	} else if !hasSidecar {
 		detail.Notice = "这一部本地既没有 nfo 也没有侧车 json，只能显示文件名；想自动生成请对这个任务跑一次「同步元数据」的扫描"
+	}
+
+	// 用户自传的头像盖上来：**在侧车 / nfo 都填完之后**统一走一遍，三处入口
+	// （演员墙列表 / 演员详情 / 这里的演员格）就不会出现「同一人两样图」。
+	for i := range detail.Actors {
+		if u := s.actorAvatarURL(detail.Actors[i].Key); u != "" {
+			detail.Actors[i].AvatarURL = u
+			detail.Actors[i].CustomAvatar = true
+		}
 	}
 
 	if detail.Title == "" {

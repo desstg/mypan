@@ -524,8 +524,17 @@ export interface JavWallActorCard {
   aliases?: string[];
   /** 1 = 男。0 = 侧车没说。 */
   gender: number;
-  /** 上游原始地址（可能经 XOR 混淆），**必须**走 javImageURL 包一层。 */
+  /** 上游原始地址（可能经 XOR 混淆），**必须**走 javImageURL 包一层。
+   *
+   * 例外见 `custom_avatar`：那一档已经是本机同源地址，不能再包。 */
   avatar_url?: string;
+  /**
+   * 为真表示 `avatar_url` 是**用户自己上传的**那张（服务端 `/api/admin/...` 地址）。
+   *
+   * 两件事跟着变：取图不再走 `/api/jav/image` 代理（那是给外站用的白名单）；
+   * 墙上「补一张小图」那条链也不许覆盖它 —— 用户亲手选的就是最终答案。
+   */
+  custom_avatar?: boolean;
   /** 墙上有几部影片出现了这位演员。 */
   movies_count: number;
 }
@@ -710,3 +719,40 @@ export function javActorPhotoURL(path: string | undefined | null, size = "w185")
   if (!p) return "";
   return `/api/admin/strm-scrape/jav-wall/actor/photo?path=${encodeURIComponent(p)}&size=${encodeURIComponent(size)}`;
 }
+
+/**
+ * 用户**自己上传**的演员头像（存/删的返回值）。
+ *
+ * `avatar_url` 一定是**服务端**地址（`/api/admin/...`），删除时是空串（表示回到
+ * 侧车 / 资料层那张）。⚠️ 前端拿到之后要核对这一点 —— 绝不能把本机文件路径或
+ * `URL.createObjectURL` 的 blob 地址当结果，那样换台设备就裂图了。
+ */
+export interface JavWallActorAvatar {
+  key: string;
+  avatar_url: string;
+  updated_at?: string;
+}
+
+/**
+ * 上传一张自定义头像，盖过侧车 / 资料层那只。
+ *
+ * 传上去的是**当前这台设备上**的图片文件，但后端会解码 → 缩到 ≤480×720 →
+ * 重新编码成 JPEG 落进 `data/jav_actor_avatar/`。之后头像由服务端地址提供，
+ * 与这份原文件、这台设备彻底无关（换手机、清空相册都还在）。
+ */
+export function uploadJavActorAvatar(key: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return http.form<JavWallActorAvatar>(
+    `/admin/strm-scrape/jav-wall/actor/avatar?key=${encodeURIComponent(key)}`,
+    form,
+  );
+}
+
+/**
+ * 删掉自定义头像，回到侧车 / 资料层那张（幂等：本来就没有也不报错）。
+ */
+export function deleteJavActorAvatar(key: string) {
+  return http.del<JavWallActorAvatar>("/admin/strm-scrape/jav-wall/actor/avatar", undefined, { key });
+}
+

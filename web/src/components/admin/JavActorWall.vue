@@ -108,10 +108,37 @@ const detailOpen = ref(false);
  */
 const AVATAR_FILL_CONCURRENCY = 3;
 const avatarFillTried = new Set<string>();
+/**
+ * 已经补到的头像（`key → url`）。
+ *
+ * **翻页回来要有它**：`reload()` / `loadMore()` 拿到的是一份全新的 `items`，
+ * 后端那份卡片依然没有 `avatar_url`（资料层不参与建索引）。只把结果写进当时的
+ * 那一张卡，翻走再翻回来就又变空 —— 用户 2026-10-29 报的「演员页没头像、
+ * 详情页有」里有一半是这个。
+ *
+ * 只在内存里：它只是这一屏的补丁，事实来源仍然是后端（自传头像由后端给地址，
+ * 这里不需要记）。
+ */
+const filledAvatars = new Map<string, string>();
 let avatarFillSeq = 0;
 
+/** 把已经补到的地址盖回新一页的卡上（没有的卡原样）。 */
+function reapplyFilledAvatars() {
+  if (!filledAvatars.size) return;
+  for (const card of items.value) {
+    // 用户自传的那张是**后端给的、优先级更高**，不能被这里的旧补丁覆盖。
+    if (card.custom_avatar) continue;
+    if (card.avatar_url) continue;
+    const url = filledAvatars.get(card.key);
+    if (url) card.avatar_url = url;
+  }
+}
+
 function scheduleAvatarFill() {
-  const pending = items.value.filter((a) => a.key && !a.avatar_url && !avatarFillTried.has(a.key));
+  // `custom_avatar` 的那几位不用补：用户亲手选的就是最终答案。
+  const pending = items.value.filter(
+    (a) => a.key && !a.avatar_url && !a.custom_avatar && !avatarFillTried.has(a.key),
+  );
   if (!pending.length) return;
   void runAvatarFill(pending, avatarFillSeq);
 }
@@ -123,23 +150,62 @@ async function runAvatarFill(pending: JavWallActorCard[], seq: number) {
       // 换了关键词 / 关掉重开：这一轮的结果已经不该落到任何一张卡上。
       if (seq !== avatarFillSeq) return;
       const card = pending[cursor++];
-      avatarFillTried.add(card.key);
       try {
         const profile = await fetchJavWallActorProfile(card.key);
-        if (seq !== avatarFillSeq) return;
-        const url = (profile?.avatar_url ?? "").trim();
+        if (seq !== avatarFillSeq) {
+          // ⚠️ **作废时不许记「已试过」**：原来是在发请求之前就记，于是被作废的
+          // 那批永远不许再试（用户看到的就是「墙空着、详情页却有」）。
+          // 这里直接返回、什么都不记，下一次 reload 还能再补。
+          return;
+        }
+        // 小图优先，没有再要高清单张：只有 1/98 会走到高清这一条，而它 200KB
+        // 上下 —— 一屏几十张都拉大图才是「白花流量」的那件事，一张不算。
+        const url = ((profile?.avatar_url ?? "").trim() || (profile?.avatar_hd_url ?? "").trim());
+        // 拿到结果**之后**才记，且只在真的有结果时记：查不到的那位下次打开还能再试
+        // （后端那次查不到按 10 分钟短 TTL 缓存，重试很便宜）。
+        avatarFillTried.add(card.key);
         if (!url) continue;
+        filledAvatars.set(card.key, url);
         // 就地改那一张卡：`v-for` 的 key 是 `key`，不会因此重建整个网格。
         const target = items.value.find((a) => a.key === card.key);
-        if (target && !target.avatar_url) target.avatar_url = url;
+        if (target && !target.avatar_url && !target.custom_avatar) target.avatar_url = url;
       } catch {
         // 补头像失败不影响任何别的功能：卡上继续显示占位图。
+        // 网络错误不记「已试过」—— 下次打开还要再试一次。
       }
     }
   };
   await Promise.all(
     Array.from({ length: Math.min(AVATAR_FILL_CONCURRENCY, pending.length) }, worker),
   );
+}
+
+/**
+ * 详情抽屉里换了头像（上传 / 恢复默认）→ 墙上那张卡就地改掉。
+ *
+ * 只是让当前这一屏立刻对上；真正的事实来源是后端（下一次刷新带回来的就是它）。
+ * 同时把这个 key 从「补过的」和「补头像试过的」两处清掉 —— 否则恢复默认之后，
+ * 那张卡会被我们自己的旧补丁又填回去，或者干脆不再尝试补图。
+ */
+function onActorAvatarChanged(key: string, url: string) {
+  avatarFillTried.delete(key);
+  if (url) {
+    filledAvatars.set(key, url);
+  } else {
+    filledAvatars.delete(key);
+  }
+  const target = items.value.find((a) => a.key === key);
+  if (target) {
+    target.avatar_url = url;
+    target.custom_avatar = !!url;
+  }
+  if (detailActor.value?.key === key) {
+    detailActor.value = { ...detailActor.value, avatar_url: url, custom_avatar: !!url };
+  }
+  if (!url) {
+    // 恢复默认之后要重新按自动那几档补一次（墙空的话）。
+    scheduleAvatarFill();
+  }
 }
 
 /**
@@ -341,7 +407,7 @@ function onKeywordInput() {
  * 所以这里走「关一层、开一层」，两次点击都不打架，面包屑也清楚：
  * 演员墙 → 影片详情 → 演员详情，Esc 一路退回演员墙。
  */
-function openActorFromMovie(actor: { key?: string; name: string; gender?: number; avatar_url?: string }) {
+function openActorFromMovie(actor: { key?: string; name: string; gender?: number; avatar_url?: string; custom_avatar?: boolean }) {
   if (!actor.key) return;
   wall.close();
   const known = items.value.find((a) => a.key === actor.key);
@@ -353,6 +419,7 @@ function openActorFromMovie(actor: { key?: string; name: string; gender?: number
       name: actor.name,
       gender: actor.gender ?? 0,
       avatar_url: actor.avatar_url,
+      custom_avatar: actor.custom_avatar,
       movies_count: 0,
     } as JavWallActorCard);
   detailOpen.value = true;
@@ -440,6 +507,8 @@ async function reload() {
     if (seq !== loadSeq) return;
     building.value = !!res.building;
     items.value = res.items ?? [];
+    // 翻页 / 重搜之后，之前补到的头像要跟着回来（见 filledAvatars）。
+    reapplyFilledAvatars();
     total.value = res.total ?? 0;
     totalPage.value = res.total_page ?? 0;
     sources.value = res.sources ?? 0;
@@ -505,6 +574,7 @@ async function loadMore() {
     });
     if (seq !== loadSeq) return;
     items.value = [...items.value, ...(res.items ?? [])];
+    reapplyFilledAvatars();
     total.value = res.total ?? total.value;
     totalPage.value = res.total_page ?? totalPage.value;
   } catch (e) {
@@ -700,6 +770,7 @@ onBeforeUnmount(() => {
         @close="closeDetail"
         @open-movie="(source, movie) => wall.openJav(source, movie)"
         @search="searchByActorName"
+        @avatar-changed="onActorAvatarChanged"
       />
 
       <!-- 墙上的影片详情 + 从它里面发起的播放窗：与在海报墙上点一张卡**同一条路**。 -->

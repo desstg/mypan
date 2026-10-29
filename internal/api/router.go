@@ -489,6 +489,12 @@ func NewRouter(d Deps) http.Handler {
 					r.Get("/jav-wall/actor/profile", h.getJavWallActorProfile)
 					// 演员详情里那张 TMDB 人像的代理（image.tmdb.org 国内直连打不开）。
 					r.Get("/jav-wall/actor/photo", h.getJavWallActorPhoto)
+					// 用户**自己上传**的演员头像：三条共用一条路径，靠方法区分。
+					// 存的是服务端重新编码后的 JPEG（`data/jav_actor_avatar/`），
+					// 与上传时那台设备上的原文件无关 —— 换设备照样显示。
+					r.Post("/jav-wall/actor/avatar", h.saveJavWallActorAvatar)
+					r.Delete("/jav-wall/actor/avatar", h.deleteJavWallActorAvatar)
+					r.Get("/jav-wall/actor/avatar", h.getJavWallActorAvatar)
 				})
 				r.Route("/automation", func(r chi.Router) {
 					r.Get("/rules", h.listAutomationRules)

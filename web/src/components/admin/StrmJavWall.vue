@@ -1322,6 +1322,9 @@ function openActorFromMovie(actor: WallActor) {
     // 影片详情里那张已经是索引表拼过的地址（侧车没头像时），直接沿用 ——
     // 详情抽屉的探针会再换一张更可靠的，换不到就显示这张。
     avatar_url: actor.avatar_url,
+    // 用户自己上传的那张（后端在影片详情的演员格里也盖过了），抽屉据此知道
+    // 这一格不用再走自动那几档。
+    custom_avatar: actor.custom_avatar,
     movies_count: 0,
   };
   actorDetailOpen.value = true;
@@ -1329,6 +1332,30 @@ function openActorFromMovie(actor: WallActor) {
   // （这是这一面的原始版式）。上一次「被影片详情收起」的标记必须清掉，
   // 否则重开一个已取过数据的演员详情时会是一片空白 —— 看起来像点了没反应。
   actorSuspendedByMovie.value = false;
+}
+
+/**
+ * 演员详情里换了头像（上传 / 恢复默认）→ 这一面的占位卡与底下影片详情里的演员格跟着改。
+ *
+ * 这一面没有演员墙，能改的只有当前打开的这两处；真正的事实来源是后端 ——
+ * 下次从影片详情点进来，后端给的就是新那张。
+ */
+function onActorAvatarChanged(key: string, url: string) {
+  if (actorDetailCard.value?.key === key) {
+    actorDetailCard.value = {
+      ...actorDetailCard.value,
+      avatar_url: url,
+      custom_avatar: !!url,
+    };
+  }
+  const detail = wall.detail.value;
+  if (detail && Array.isArray(detail.actors)) {
+    const target = detail.actors.find((a) => a.key === key);
+    if (target) {
+      target.avatar_url = url;
+      target.custom_avatar = !!url;
+    }
+  }
 }
 
 /**
@@ -1686,6 +1713,7 @@ defineExpose({
       raised
       @close="actorDetailOpen = false"
       @open-movie="openMovieFromActor"
+      @avatar-changed="onActorAvatarChanged"
     />
     <WallPlayer
       v-if="wall.playerOpen.value"

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { getApiErrorMessage } from "@/api/client";
 import { javImageURL } from "@/api/jav";
 import {
+  deleteJavActorAvatar,
   fetchJavWallActorDetail,
   fetchJavWallActorProfile,
   fetchJavWallActorTMDB,
   javActorPhotoURL,
+  uploadJavActorAvatar,
   type JavWallActorCard,
   type JavWallActorMovie,
   type JavWallActorProfile,
@@ -14,7 +16,12 @@ import {
 } from "@/api/strmJavWall";
 import type { WallSourceRef } from "@/api/strmScrape";
 import AdminSettingsDrawer from "@/components/admin/AdminSettingsDrawer.vue";
+import AppMenuPanel from "@/components/base/AppMenuPanel.vue";
+import BusySpinner from "@/components/base/BusySpinner.vue";
 import MediaImage from "@/components/base/MediaImage.vue";
+import SvgIcon from "@/components/icons/SvgIcon.vue";
+import { toast } from "@/composables/useToast";
+import type { DropdownMenuItem } from "@/types/menu";
 import "@/styles/jav.css";
 
 /**
@@ -87,6 +94,14 @@ const emit = defineEmits<{
    * 搜出空列表。外层据此「点名」锁定这一位，结果与搜主名看到的是同一张卡。
    */
   search: [keyword: string, actor: JavWallActorCard];
+  /**
+   * 用户换了这位演员的头像（上传或恢复默认）。
+   *
+   * `url` 为空串 = 恢复默认（回到侧车 / 资料层那张）。外层据此把墙上那张卡就地
+   * 改掉，用户不必关掉重开 —— 但**真正的事实来源仍然是后端**（下一次刷新带回来的
+   * 就是它），这个回调只是让当前这一屏立刻对上。
+   */
+  avatarChanged: [key: string, url: string];
 }>();
 
 const detail = ref<JavWallActorCard | null>(null);
@@ -95,6 +110,13 @@ const movies = ref<JavWallActorMovie[]>([]);
 const tmdbInfo = ref<JavWallActorTMDB | null>(null);
 /** 资料档案（生日 / 出身 / 三围 / 头像）：同样是一条独立的补充请求。 */
 const profileInfo = ref<JavWallActorProfile | null>(null);
+/**
+ * 用户**自己上传**的那张头像（服务端地址）。空串 = 没传过，走自动那几档。
+ *
+ * 声明在这里（而不是下面那一段）是因为 `photoChain` 要用它，而 computed 的
+ * 定义顺序决定求值顺序 —— 放后面读到的会是 `undefined`。
+ */
+const customAvatar = ref("");
 const loading = ref(false);
 const error = ref("");
 
@@ -204,21 +226,30 @@ const intro = computed(() => profile.value?.intro?.trim() ?? "");
 const introIsJa = computed(() => (profile.value?.intro_lang ?? "") === "ja");
 
 /**
- * 人像地址：资料层的高清那张 > 资料层的小图 > TMDB > 侧车（列表里的头像）。
+ * 人像地址：**墙上那张 > 资料层的高清 > 资料层的小图 > TMDB**。
  *
- * 「高清」那张来自维基条目首图（960 宽），而 JAVDB 只有 300×300、dmm 那张
- * 90×122 —— 在 120px 的框里，小图在高分屏上肉眼就是糊的。它**只在这里用**：
- * 墙上的卡片仍然用 `avatar_url`（一屏几十张，拉大图是白花流量）。
+ * # 为什么墙上那张排第一（用户 2026-10-29 定的口径：「墙为准，详情放大同一张」）
+ *
+ * 原来第一档是 `avatar_hd_url`（维基条目的首图，960 宽的活动照），而墙上的卡片用的是
+ * 侧车 / 索引表那张（100~300 的正面照）。真机审计 98 位演员里有 26 位因此**两张
+ * 不同的照片**——用户的原话是「演员页的头像和详情页有时不一样」。
+ *
+ * 删掉「高清优先」之后：墙有图的人两面必然同一张；墙空的那些人仍然顺着高清 / 小图
+ * 往下兜（那正是「演员页没头像、详情页又有」要治的另一半）。
+ *
+ * 最前面还是**用户自己上传的那张**：那是他亲手选的，任何自动来源都不该盖过它。
  */
 const photoChain = computed(() => {
   const out: string[] = [];
   const push = (u: string) => {
     if (u && !out.includes(u)) out.push(u);
   };
+  // 自传那张已经是 `/api/...`（javImageURL 会原样放行）。
+  push(javImageURL(customAvatar.value));
+  push(javImageURL(header.value?.avatar_url));
   push(javImageURL(profile.value?.avatar_hd_url));
   push(javImageURL(profile.value?.avatar_url));
   push(javActorPhotoURL(tmdb.value?.profile_path, "w185"));
-  push(javImageURL(header.value?.avatar_url));
   return out;
 });
 
@@ -241,6 +272,219 @@ function onPhotoError() {
   if (photoTried.value < photoChain.value.length - 1) photoTried.value++;
 }
 
+// ————————————————— 自定义头像（用户自己上传） —————————————————
+//
+// 用户明确要求：演员名右边一个图片编辑图标，点一下能传自己的头像。
+//
+// ⚠️ **传的是当时那台设备上的文件，但显示不依赖它**：文件只被读一次，
+// 后端解码 → 缩到 ≤480×720 → 重编码 JPEG 存进服务端的 `data/jav_actor_avatar/`，
+// 之后一律用后端返回的 `/api/...` 地址。所以换手机、换电脑、清空相册都还在。
+// 这里**绝不能**拿 `URL.createObjectURL()` 的 blob 地址当结果 —— 那只在本机本次
+// 会话有效，换设备就是裂图，正好违背用户那条要求。
+const avatarBusy = ref(false);
+
+/** 上传入口弹出的小菜单（手机端给「相册」「文件浏览」两个入口，**不给拍照**）。 */
+const avatarMenuOpen = ref(false);
+/** 按钮那一簇的 DOM：点它自己不该把菜单收起来。 */
+const avatarActions = ref<HTMLElement | null>(null);
+/** 两个独立的 input：同一个 input 改 `accept` 再 `click()` 在移动端不一定重新选。 */
+const albumInput = ref<HTMLInputElement | null>(null);
+const fileInput = ref<HTMLInputElement | null>(null);
+
+/**
+ * 文件对话框里能选的格式 = 后端 `normalizeActorAvatar` 真的解得开的那些
+ * （jpeg / png / gif / webp）。**HEIC 故意不在里面** —— 后端解不了，列进去
+ * 只会让用户选中之后再吃一个「不是能识别的图片」。
+ *
+ * 同时写 MIME 和扩展名：Windows 的对话框按扩展名过滤，部分浏览器只认 MIME；
+ * 两边都写才能「只显示支持的格式」。`.jpeg` 与 `image/jpeg` 是同一个格式的两种写法，
+ * 都要列（用户从相机导出的文件常是 `.jpeg`）。
+ */
+const AVATAR_ACCEPT =
+  "image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp";
+const AVATAR_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const AVATAR_EXTS = new Set(["jpg", "jpeg", "png", "gif", "webp"]);
+
+/**
+ * 是不是受支持的图片。
+ *
+ * 不能只看 `file.type`：空 `type` 很常见（某些文件管理器、从压缩包里拖出来的文件），
+ * 那时按扩展名判。判据与上面的 `accept` 同源 —— 对话框能选的，这里一定放行。
+ */
+function isSupportedAvatarFile(file: File): boolean {
+  const mime = (file.type || "").toLowerCase();
+  if (AVATAR_MIMES.has(mime)) return true;
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  return AVATAR_EXTS.has(ext);
+}
+
+const isMobileViewport = ref(false);
+function syncViewport() {
+  isMobileViewport.value = window.matchMedia("(max-width: 720px)").matches;
+}
+
+/** 点相机图标：桌面端直接开文件对话框，移动端先弹两个入口（再点一次收起）。 */
+function openAvatarPicker() {
+  if (!isMobileViewport.value) {
+    avatarMenuOpen.value = false;
+    fileInput.value?.click();
+    return;
+  }
+  avatarMenuOpen.value = !avatarMenuOpen.value;
+}
+function pickFromAlbum() {
+  avatarMenuOpen.value = false;
+  albumInput.value?.click();
+}
+function pickFromFiles() {
+  avatarMenuOpen.value = false;
+  fileInput.value?.click();
+}
+
+function closeAvatarMenu() {
+  avatarMenuOpen.value = false;
+}
+// 抽屉关掉时顺手收起菜单：不收回的话，下次打开会残留一个浮在名字下面的小面板。
+watch(
+  () => props.open,
+  (open) => {
+    if (!open) closeAvatarMenu();
+  },
+);
+/**
+ * 点别处收起菜单。
+ *
+ * 用 capture 阶段：`openAvatarPicker` 是按钮自己的 click 处理器，它在冒泡到
+ * document 之前就把菜单**打开**了，只有 capture 才收得到「用户点的是别处」。
+ * 点在按钮那一簇里则放行 —— 那里自己 `@click.stop` 管开关。
+ */
+function onDocClick(e: MouseEvent) {
+  if (!avatarMenuOpen.value) return;
+  const root = avatarActions.value;
+  if (root && e.target instanceof Node && root.contains(e.target)) return;
+  avatarMenuOpen.value = false;
+}
+
+/**
+ * 手机端那两行入口。**没有「拍照」** —— 用户明确说「拍照就不要了」。
+ * 桌面端不会弹这个菜单（直接开文件对话框），两条在桌面上本来就是同一个对话框。
+ */
+const avatarMenuItems: DropdownMenuItem[] = [
+  { key: "album", type: "action", label: "从相册选择", icon: "image" },
+  { key: "files", type: "action", label: "从文件选择", icon: "folder" },
+];
+
+function onAvatarMenuSelect(key: string) {
+  if (key === "album") pickFromAlbum();
+  else pickFromFiles();
+}
+
+onMounted(() => {
+  syncViewport();
+  window.addEventListener("resize", syncViewport);
+  // 点别处收起菜单。capture 阶段才收得到（菜单自己 stop 了 click）。
+  document.addEventListener("click", onDocClick, true);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("resize", syncViewport);
+  document.removeEventListener("click", onDocClick, true);
+});
+
+/**
+ * 服务端地址判据：上传结果必须是后端给的（见上面那段注释）。
+ *
+ * 只认相对形式 `/api/...` —— 后端就是这么返回的；带 origin 的绝对形式会被
+ * `javImageURL` 当成外站再包一层代理，反而不对。
+ */
+function isServerAvatarURL(url: string): boolean {
+  return url.startsWith("/api/");
+}
+
+async function onAvatarFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  // 清掉 value，否则同一个文件选第二次不触发 change（用户常见的「点了没反应」）。
+  input.value = "";
+  const actor = header.value;
+  if (!file || !actor?.key) return;
+  if (!isSupportedAvatarFile(file)) {
+    toast.error("请选择 JPG / PNG / GIF / WebP 图片（HEIC 请先在相册里导出成 JPG）");
+    return;
+  }
+  // 前端先拦一道，真正的闸在后端（解不开的图后端也会拒）。
+  if (file.size > 8 * 1024 * 1024) {
+    toast.error("图片不能超过 8 MB");
+    return;
+  }
+  avatarBusy.value = true;
+  try {
+    const res = await uploadJavActorAvatar(actor.key, file);
+    const url = (res?.avatar_url ?? "").trim();
+    if (!isServerAvatarURL(url)) {
+      // 拿到一个本地地址 / 空地址都算失败：那种地址换设备就没了。
+      toast.error("上传结果异常，请重试");
+      return;
+    }
+    customAvatar.value = url;
+    // 表头那份也跟上：不然 `photoChain` 第二档还是上一张的地址（上传前后都是同一张卡）。
+    if (detail.value) detail.value = { ...detail.value, avatar_url: url, custom_avatar: true };
+    toast.success("头像已更新");
+    emit("avatarChanged", actor.key, url);
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "上传头像失败"));
+  } finally {
+    avatarBusy.value = false;
+  }
+}
+
+/** 恢复默认：删掉自传那张，回到侧车 / 资料层。 */
+async function resetAvatar() {
+  const actor = header.value;
+  if (!actor?.key || avatarBusy.value) return;
+  avatarBusy.value = true;
+  try {
+    await deleteJavActorAvatar(actor.key);
+    customAvatar.value = "";
+    // 表头那份先置空，落回资料层的高清 / 小图那两档（不会变成一片空白）；
+    // 再补发一条详情，拿回**侧车 / 索引表给的那张自动图**当第一档。
+    if (detail.value) {
+      detail.value = { ...detail.value, avatar_url: "", custom_avatar: false };
+    }
+    void refreshHeaderCard(actor.key);
+    toast.success("已恢复默认头像");
+    emit("avatarChanged", actor.key, "");
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "恢复默认头像失败"));
+  } finally {
+    avatarBusy.value = false;
+  }
+}
+
+/** 打开时同步「当前是不是自传那张」——后端在卡片上给了标记，不用另发一条请求。 */
+function syncCustomAvatar(card: JavWallActorCard | null | undefined) {
+  const url = card?.custom_avatar ? (card.avatar_url ?? "").trim() : "";
+  customAvatar.value = isServerAvatarURL(url) ? url : "";
+}
+
+/**
+ * 只刷新表头那张卡（不重拉片单、不动别的段）。
+ *
+ * 「恢复默认」之后要用：删掉的只是自传那张，**自动那张**（侧车 / 索引表给的）
+ * 只有后端知道 —— 原来那次详情带回来的已经是自传地址了，本地没有它的副本。
+ * 补这一条就是把它取回来，避免头像空一档掉到资料层的高清图上。
+ */
+async function refreshHeaderCard(key: string) {
+  const seq = loadSeq;
+  try {
+    const res = await fetchJavWallActorDetail(key);
+    if (seq !== loadSeq || !res.actor) return;
+    detail.value = res.actor;
+    syncCustomAvatar(res.actor);
+  } catch {
+    // 取不到就保持置空状态：资料层那两档还在，不会是一片空白。
+  }
+}
+
 /** 演员的片可能横跨好几面粉号墙 —— 多于一面时才在卡片上标来源。 */
 const sourceCount = computed(() => {
   const seen = new Set<string>();
@@ -261,6 +505,7 @@ watch(
       movies.value = [];
       tmdbInfo.value = null;
       profileInfo.value = null;
+      customAvatar.value = "";
       loading.value = false;
       error.value = "";
       return;
@@ -276,6 +521,8 @@ async function load(key: string) {
   movies.value = [];
   tmdbInfo.value = null;
   profileInfo.value = null;
+  // 换人时先按列表带过来的那份对齐，详情回来后再对齐一次（列表那份可能已经旧了）。
+  syncCustomAvatar(props.actor);
   error.value = "";
   loading.value = true;
   // 三条请求**并行发**：两条补充资料慢 / 不通，不该拖着这一页的影片。
@@ -285,6 +532,7 @@ async function load(key: string) {
     const res = await fetchJavWallActorDetail(key);
     if (seq !== loadSeq) return;
     if (res.actor) detail.value = res.actor;
+    syncCustomAvatar(res.actor ?? props.actor);
     movies.value = res.items ?? [];
   } catch (e) {
     if (seq !== loadSeq) return;
@@ -384,9 +632,60 @@ function searchAlias(name: string) {
         </div>
         <div class="jav-wall-actor-detail__info">
           <h1 class="jav-wall-actor-detail__name">
-            {{ header.name || "（未命名）" }}
+            <span class="jav-wall-actor-detail__name-text">{{ header.name || "（未命名）" }}</span>
             <span v-if="isMale" class="jav-wall-actor-detail__gender">男</span>
+            <!-- 换头像：用户要求（2026-10-29）在演员名右边放一个图片编辑图标。 -->
+            <span ref="avatarActions" class="jav-wall-actor-detail__avatar-actions" @click.stop>
+              <button
+                type="button"
+                class="jav-wall-actor-detail__avatar-btn"
+                :disabled="avatarBusy"
+                :title="avatarBusy ? '上传中…' : '上传自定义头像'"
+                aria-label="上传自定义头像"
+                @click="openAvatarPicker"
+              >
+                <BusySpinner v-if="avatarBusy" :size="14" />
+                <SvgIcon v-else name="camera" :size="15" />
+              </button>
+              <!-- 恢复默认：只在**确实有**自传头像时出现。 -->
+              <button
+                v-if="customAvatar"
+                type="button"
+                class="jav-wall-actor-detail__avatar-btn"
+                :disabled="avatarBusy"
+                title="恢复默认头像"
+                aria-label="恢复默认头像"
+                @click="resetAvatar"
+              >
+                <SvgIcon name="fa-undo-alt" :size="14" />
+              </button>
+              <!-- 手机端：相册 / 文件浏览两个入口（**不给拍照**，用户明确排除）。 -->
+              <AppMenuPanel
+                v-if="avatarMenuOpen"
+                class="jav-wall-actor-detail__avatar-menu"
+                :items="avatarMenuItems"
+                @select="onAvatarMenuSelect"
+              />
+            </span>
           </h1>
+          <!-- 两个**独立**的 input（见上面那段注释）：
+               相册：accept 列后端真能解的四种格式，**不加 capture** —— 加了会直接唤起相机。
+               文件：同一个 accept（不带 capture 时它打开的是文件 App / 文档管理器），
+               显式过滤是为了让对话框里**只显示支持的图片**，而不是把 .txt / .pdf 全摆出来。 -->
+          <input
+            ref="albumInput"
+            class="jav-wall-actor-detail__file-input"
+            type="file"
+            :accept="AVATAR_ACCEPT"
+            @change="onAvatarFileSelected"
+          />
+          <input
+            ref="fileInput"
+            class="jav-wall-actor-detail__file-input"
+            type="file"
+            :accept="AVATAR_ACCEPT"
+            @change="onAvatarFileSelected"
+          />
 
           <!-- 别名：索引表里这位演员的其它写法（日文原名 / 罗马音 / 旧艺名）。
                点一下拿它去搜 —— 用户往往只记得侧车里那个日文写法。 -->
@@ -550,6 +849,67 @@ function searchAlias(name: string) {
   font-weight: 700;
   color: var(--text);
   word-break: break-word;
+}
+
+/* 名字单独一格：换头像的两个按钮要贴着名字右边，但长名字换行时不能被按钮挤断。 */
+.jav-wall-actor-detail__name-text {
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* 换头像：一颗小圆按钮（相机）+ 一颗「恢复默认」（只在有自传头像时出现）。 */
+.jav-wall-actor-detail__avatar-actions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.jav-wall-actor-detail__avatar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.jav-wall-actor-detail__avatar-btn:hover:not(:disabled) {
+  color: var(--accent, #3b82f6);
+  border-color: var(--accent, #3b82f6);
+}
+
+.jav-wall-actor-detail__avatar-btn:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+/* 手机端那两行入口：贴着按钮下方展开。 */
+.jav-wall-actor-detail__avatar-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+}
+
+/* 隐藏的文件输入：不能用 display:none（部分移动端浏览器 click() 会失效）。 */
+.jav-wall-actor-detail__file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .jav-wall-actor-detail__gender {

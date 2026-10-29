@@ -74,6 +74,12 @@ type JavWallActorCard struct {
 	Aliases []string `json:"aliases,omitempty"`
 	// MoviesCount 是墙上有几部影片出现了这位演员。
 	MoviesCount int `json:"movies_count"`
+	// CustomAvatar 为真表示 `AvatarURL` 是**用户自己上传的**那张（见
+	// javwall_actor_avatar.go），不是侧车 / 索引表里的。
+	//
+	// 前端靠它决定两件事：这格的取图不再走 `/api/jav/image` 代理（自传图是本机的，
+	// 直接就是同源地址）；「补一张小图」那条链也不许覆盖它。
+	CustomAvatar bool `json:"custom_avatar,omitempty"`
 }
 
 // JavWallActorMovie 是「这位演员参演的一部**墙上的**影片」。
@@ -603,6 +609,9 @@ func (s *Service) ListJavWallActors(ctx context.Context, keyword string, page, p
 	}
 	items := make([]JavWallActorCard, 0, end-start)
 	items = append(items, matched[start:end]...)
+	// 用户自传的头像在这一步才盖上去（**在切片之后、在请求期**）：
+	// 索引是后台建 + 带签名缓存的，盖在索引里得等一轮重建才生效。
+	s.applyCustomAvatars(items)
 
 	totalPage := 0
 	if total > 0 {
@@ -716,5 +725,7 @@ func (s *Service) javActorLookup(ctx context.Context, key string) (JavWallActorC
 	if movies == nil {
 		movies = []JavWallActorMovie{}
 	}
+	// 用户自传的头像在请求期盖上（索引里那份是后台建的，不能等它重建）。
+	s.applyCustomAvatar(&card)
 	return card, movies, nil
 }
