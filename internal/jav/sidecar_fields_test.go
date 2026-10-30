@@ -230,12 +230,15 @@ func TestSidecarFieldsCoverWriteSchemaLeaves(t *testing.T) {
 		PreviewImages: []string{"https://example.com/1.jpg"},
 		Duration:      120, Score: 4.5, ReviewsCount: 12,
 		Tags: []string{"标签"},
+		// `type` 必须给：它决定海报怎么裁（有码取右边），不是纯展示字段。
+		Type: domain.JavTypeCensored,
 	}
 	_, fields, _ := sidecarFieldsFor(movie, []*domain.JavActor{{ID: "a1", Name: "演员"}})
 
 	// 「库里能提供的」那张清单。加字段时**两处一起改**，改漏了这条会红。
 	want := []string{
 		"summary", "review", "release_date", "preview_video_url",
+		"type", "type_label",
 		"director.id", "director.name", "maker.id", "maker.name",
 		"publisher.id", "publisher.name", "series.id", "series.name",
 		"images.cover", "images.thumb", "images.javbus_cover", "images.previews",

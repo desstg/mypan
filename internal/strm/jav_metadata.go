@@ -1600,10 +1600,16 @@ func (s *Service) SyncSidecarsFromRepo(
 			if !ok || len(fields) == 0 {
 				return nil // 库里没有这一部：跳过，不凭空造
 			}
-			changed, writeErr := writeFieldsIntoFile(path, fields)
+			changed, typeFilled, writeErr := writeFieldsIntoFileReport(path, fields)
 			if writeErr != nil {
 				s.log.Warn("番号侧车回写失败", "path", path, "number", number, "err", writeErr)
 				return nil
+			}
+			if typeFilled {
+				// 侧车刚补上 `type`：海报是按旧判据（人脸档）裁的，核一次。
+				// 这就是存量那 17 份「有码片 poster 不是 thumb 右边」的修法 ——
+				// 每小时那轮回写跑完之后它们自己就正了，不用逐张去点重刮。
+				s.enqueuePosterRecropCheck(path)
 			}
 			if changed {
 				res.Written++
@@ -1663,13 +1669,90 @@ func (s *Service) ApplySidecarFieldsByNumber(ctx context.Context, number string,
 		}
 		root := TaskOutputDir(s.strmDir, TaskRelDir(task.GroupDir, task.OutputFolder))
 		if found := walkForSidecar(root, number, func(path string) error {
-			_, err := writeFieldsIntoFile(path, fields)
-			return err
+			_, typeFilled, err := writeFieldsIntoFileReport(path, fields)
+			if err != nil {
+				return err
+			}
+			if typeFilled {
+				// `type` 刚补上：磁盘上那张 poster 是按**旧**判据（人脸档）裁的，
+				// 不会自己变。见 writeFieldsIntoFileReport 的注释。
+				s.enqueuePosterRecropCheck(path)
+			}
+			return nil
 		}); found {
 			return true
 		}
 	}
 	return false
+}
+
+// EnqueueJavPosterRecropCheck 供**包外**（在线刮削那条路）在「刚给侧车补上 `type`」
+// 之后调一次，核一下磁盘上那张海报是不是旧判据裁的。
+//
+// 导出而不是让 strmscrape 自己拼队列作业：作业字段（水印设置从哪读、窗口怎么算）
+// 是 strm 这边的知识，两处各拼一份迟早分家。
+func (s *Service) EnqueueJavPosterRecropCheck(jsonPath string) {
+	s.enqueuePosterRecropCheck(jsonPath)
+}
+
+// enqueuePosterRecropCheck 给一份**刚补上 `type`** 的侧车安排一次「海报核对」。
+//
+// 只核一次、且只在补上那一天核（调用点唯一）—— 例行扫描不能核，那会把用户
+// 手调过的框换成默认窗口。队列侧会再判一次「当前这张是不是本来就对」，见
+// javPosterQueue.process 与 posterNeedsRecrop。
+//
+// 判不出载体文件（侧车旁边只有它自己）时安静跳过：那说明这一层不是我们的布局，
+// 猜一个名字去裁只会写出一张谁都对不上的图。
+func (s *Service) enqueuePosterRecropCheck(jsonPath string) {
+	if s == nil || s.javPosters == nil {
+		return
+	}
+	absDir := filepath.Dir(jsonPath)
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		return
+	}
+	mediaNames := PickMediaNamesOfEntries(entries)
+	if len(mediaNames) == 0 {
+		return
+	}
+	// 载体文件用 **FindLocalSidecar 反向找**：那个函数就是「这个 .strm 配哪份侧车」
+	// 的正版判据（主干全等 → 前缀相容 → 整层唯一），这里问的是同一件事的逆命题。
+	// 自己拼一套「同主干 / 整层唯一」会与它分家 —— 真机 `欧美/Tushy.26.09.20/`
+	// 那种「视频与 json 主干差一个 `20`」的目录，自己写的那套就认不出来。
+	target := strings.ToLower(filepath.Clean(jsonPath))
+	mediaName := ""
+	var matchedMeta *emby.SidecarDoc
+	for _, name := range mediaNames {
+		scPath, doc, ok := FindLocalSidecar(absDir, name)
+		if !ok || doc == nil {
+			continue
+		}
+		if strings.ToLower(filepath.Clean(scPath)) == target {
+			mediaName, matchedMeta = name, doc
+			break
+		}
+	}
+	if mediaName == "" || matchedMeta == nil {
+		return
+	}
+	flat := countMedia(entries) > 1
+	names := emby.TargetNames(MediaStem(mediaName), flat)
+	if !artifactExists(filepath.Join(absDir, names.Poster)) {
+		// 没有海报：那是「缺」，走扫描那条路自然会补，不必在这里揽。
+		return
+	}
+	scan := s.scanSettings()
+	s.javPosters.SchedulePoster(javPosterJob{
+		ThumbPath:       filepath.Join(absDir, names.Thumb),
+		PosterPath:      filepath.Join(absDir, names.Poster),
+		Censored:        matchedMeta.IsCensored(),
+		EnforceCrop:     true,
+		WatermarkIDs:    autoWatermarkIDs(javArtifactRequest{WatermarkEnabled: scan.JavWatermarkEnabled}, matchedMeta),
+		WatermarkScale:  scan.JavWatermarkScale,
+		WatermarkMargin: scan.JavWatermarkMargin,
+		watermarkDir:    scan.JavWatermarkDir,
+	})
 }
 
 // 下面是「按番号找侧车并改一个字段」那两条的公共骨架（简介 / 中文标题共用）。
@@ -1839,6 +1922,19 @@ func replaceNFOTitle(sidecarPath, value string) {
 	if !presence.Title {
 		return
 	}
+	// ⓪ 残缺件：**整份重算**，不走下面那条「读→改→写」。
+	//
+	// 这条路每小时扫全库一遍（`syncSidecarTitles` → `ApplySidecarTitleZHByNumber`），
+	// 而它的重建基于 `ParseNFO` 的结果 —— 残缺件里 `<num>` 是空的，于是
+	// `meta.Number == ""`，重建出来的标题就**永远没有番号前缀**，一小时一次地
+	// 把「番号 + 标题」维护成「只有标题」（2026-10-30 真机：卡片下面显示
+	// `ABC-123_LTX` 而不是 `ABC-123`，正是这一条在每次循环里加固那个状态）。
+	//
+	// 这条路手上没有侧车结构体，只有 json 原文 —— 读一份出来交给同一个重建函数。
+	if sidecar, serr := emby.Parse(readSidecarRaw(sidecarPath)); serr == nil &&
+		nfoLooksDegenerate(presence, sidecar.Number) && regenerateNFOFromSidecar(nfoPath, sidecar) {
+		return
+	}
 	meta, err := emby.ParseNFO(raw, emby.NFOReadHints{})
 	if err != nil {
 		return // 不是 <movie> 结构（比如 tvshow.nfo）：别乱动
@@ -1861,6 +1957,18 @@ func replaceNFOTitle(sidecarPath, value string) {
 	_ = writeFileInPlace(nfoPath, body)
 }
 
+// readSidecarRaw 读一份侧车 json 的原始字节（读不到返回 nil）。
+//
+// 给 `replaceNFOTitle` 用：它手上只有路径，而要判「这份 nfo 是不是残缺件」得先有
+// 侧车的番号（`emby.Parse` 会校验 schema 与番号，顺带把「不是侧车」的 json 挡掉）。
+func readSidecarRaw(path string) []byte {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
 // writeFieldsIntoFile 把一批字段写进一个已存在的侧车 json（**只补空**）。
 // 返回是否真的改写了内容（没改就不写盘、也不碰 nfo）。
 //
@@ -1878,26 +1986,33 @@ func replaceNFOTitle(sidecarPath, value string) {
 // 额外多一条：**只补空值**。侧车里已经有值的一律不动 —— 那份 json 用户可能手改过，
 // 也是别的工具可能读的中间产物。判据见 isEmptyJSONValue。
 func writeFieldsIntoFile(path string, fields map[string]any) (bool, error) {
-	return WriteFieldsIntoFile(path, fields)
+	changed, _, err := writeFieldsIntoFileReport(path, fields)
+	return changed, err
 }
 
-// WriteFieldsIntoFile 是 writeFieldsIntoFile 的导出形态（在线刮削那条路要用）。
+// writeFieldsIntoFileReport 是上面那条的实现，多返回一个 `typeFilled`：
+// **这一次有没有把 `type` 这个键从空补成有值**。
 //
-// 判据（只补空、值没变不写盘、顺手补 nfo）与内部那条**逐字相同** —— 它就是个壳，
-// 不是另一份实现。
-func WriteFieldsIntoFile(path string, fields map[string]any) (bool, error) {
+// 为什么要单独报这一件事：`type` 决定**海报怎么裁**（有码取右边、其余走人脸）。
+// 存量里有一批侧车当年没写它（全库实测 17 份），海报于是按人脸档裁过一版；
+// 补上字段之后**磁盘上那张图不会自己变**，而扫描那条路的判据是「poster 在就跳过」
+// —— 永远不会再看它一眼。真机表现就是用户报的「好多张有码片的 poster 不是 thumb 的右边」。
+//
+// 所以调用方拿 `typeFilled` 去**核一次海报**（见 Service.enqueuePosterRecropCheck）。
+// 只有「刚补上」这一个瞬间才核 —— 每轮都核会把用户手调过的框换掉。
+func writeFieldsIntoFileReport(path string, fields map[string]any) (changed, typeFilled bool, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	// **用 map 解析而不是侧车结构体**：后者只认识它用得上的那些字段，写回去会把
 	// 其余字段（磁链指纹、落盘现场、画质档位…）整块丢掉。
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return false, err
+		return false, false, err
 	}
 
-	changed := false
+	changed = false
 	for _, key := range sortedFieldPaths(fields) {
 		value := fields[key]
 		if isEmptyJSONValue(value) {
@@ -1905,6 +2020,9 @@ func WriteFieldsIntoFile(path string, fields map[string]any) (bool, error) {
 		}
 		if !setIfEmptyPath(doc, key, value) {
 			continue
+		}
+		if key == "type" {
+			typeFilled = true
 		}
 		changed = true
 	}
@@ -1919,22 +2037,42 @@ func WriteFieldsIntoFile(path string, fields map[string]any) (bool, error) {
 	// 重复调用是幂等的、不会覆盖用户的编辑。
 	summaryChanged := applySummaryAndNFO(doc, path, fields)
 
-	if !changed {
-		// json 一个字都不用改，但 nfo 那边可能补上了（上面那次调用是无条件的）。
-		return summaryChanged, nil
-	}
-
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return false, err
-	}
-	if err := writeFileInPlace(path, out); err != nil {
-		return false, err
+	if changed {
+		out, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return false, typeFilled, err
+		}
+		if err := writeFileInPlace(path, out); err != nil {
+			return false, typeFilled, err
+		}
 	}
 	// 顺手把 nfo 里**缺的元素**补上 —— 否则「补到了」对用户没有任何可见效果
 	// （nfo 由 json 生成，而生成器是「存在即跳过」，不点重刮就永远空着）。
+	//
+	// ⚠️ **这一步与 json 改没改无关**（2026-10-30 修）。以前它只在 `changed` 时跑，
+	// 而「在线刮削新建侧车」那条路上 `changed` **必然是 false**：`fields` 里每个
+	// 非空的键都在写 json 之前就由 `setIfEmptyPathAny` 并进 doc 了。于是那一档
+	// nfo 唯一被做的事就是下面这一次调用 —— 而它以前根本没被调到。
+	//
+	// 真机（群晖，2026-10-30）：六部 `_LTX` 片刮完之后卡片还是 `ABC-123_LTX`、
+	// 右边没有 LTX 胶囊，得手点一次「重刮」才对。根因就是这几行。
 	fillNFOFieldsIfMissing(path, doc)
-	return true, nil
+	return changed || summaryChanged, typeFilled, nil
+}
+
+// WriteFieldsIntoFile 是 writeFieldsIntoFile 的导出形态（在线刮削那条路要用）。
+//
+// 判据（只补空、值没变不写盘、顺手补 nfo）与内部那条**逐字相同** —— 它就是个壳，
+// 不是另一份实现。
+func WriteFieldsIntoFile(path string, fields map[string]any) (bool, error) {
+	changed, _, err := writeFieldsIntoFileReport(path, fields)
+	return changed, err
+}
+
+// WriteFieldsIntoFileAndDetectType 与上面那条同一条路，多返回「这一次有没有把
+// `type` 从空补上」—— 在线刮削那条路拿它决定要不要**核一次海报**。
+func WriteFieldsIntoFileAndDetectType(path string, fields map[string]any) (bool, bool, error) {
+	return writeFieldsIntoFileReport(path, fields)
 }
 
 // applySummaryAndNFO 处理 `summary` 这一个字段，并把简介补进 nfo。
@@ -2187,6 +2325,19 @@ func fillNFOFieldsIfMissingAt(nfoPath string, doc map[string]any) {
 		return // 不是 <movie> 结构（比如 tvshow.nfo）：别乱动
 	}
 
+	// ⓪ 残缺件**整份重算**（判据见 nfoLooksDegenerate）。
+	//
+	// 为什么放在这里、而且失败就继续往下走：下面那张表只补七个字段，而
+	// `<num>` / `<customrating>` / 三个发行日期 / `<year>` / `<website>` /
+	// `<genre>` 都是**生成器恒写、`MovieMeta` 里读不回来**的东西 ——
+	// 对着残缺件逐条补再重建，产出的仍是一份同样残缺的文件。
+	//
+	// `regenerateNFOFromSidecar` 走 `BuildNFO(doc, …)`，与手动「重刮」同一条路：
+	// 那一次正是用户说的「点一下重刮就正常了」。
+	if nfoLooksDegenerate(presence, sidecar.Number) && regenerateNFOFromSidecar(nfoPath, sidecar) {
+		return
+	}
+
 	// nfo 里**已经有** `<genre>` → 把磁盘上那份钉住，别让下面那次重建按
 	// Tags/演员重算。重算会把用户手工删掉的合成项（「片商: X」「系列: Y」）加回来，
 	// 而这条路的全部意义就是「只补缺、不动用户的编辑」（见 MovieMeta.GenresOverride）。
@@ -2266,6 +2417,82 @@ func fillNFOFieldsIfMissingAt(nfoPath string, doc map[string]any) {
 		return
 	}
 	_ = writeFileInPlace(nfoPath, body)
+}
+
+// nfoLooksDegenerate 报告「这份 nfo 是不是缺了生成器**恒写**的那几个元素」。
+//
+// # 为什么要一个单独的判据（2026-10-30 真机）
+//
+// 补缺那条路（`fillNFOFieldsIfMissingAt`）的原则是「元素**不存在**就补」，而它那张
+// 表只列了 director / maker / publisher / series / trailer / cover / title 七个。
+// 生成器**恒写**的那一批（`<num>`、`<customrating>`、`<mpaa>`、`<countrycode>`、
+// 三个发行日期、`<year>`、`<website>`、`<outline>`/`<tagline>`、`<genre>`）一个都不在表里 ——
+// 于是有一种坏文件永远修不好：**它不是生成器写的**（是更早那批「用侧车片段拼出来」
+// 的产物），恒写元素一个都没有，而补缺那张表觉得「能补的都补上了」。
+//
+// 表现（用户 2026-10-30 报的）：卡片下面还是 `ABC-123_LTX` 而不是 `ABC-123`、
+// 右边没有 LTX 胶囊 —— 因为 `<num>` 与 `<genre>LTX破解</genre>` 都不在，
+// 而 `TitleAndNumber` / `ltxGenreOnly` 读的正是它们。点一次「重刮」就好，
+// 那一次走的是 `writeJavArtifacts` 里的**整份生成**。
+//
+// # 判据选得宽一点
+//
+// 只要 `<num>` 不在，**或者** `<genre>` 一条都没有，就当它是残缺件。
+//
+//   - `<num>`：生成器有番号就恒写，而侧车没有番号根本进不了这条路（emby.Parse
+//     会拒）。所以「侧车有番号 + nfo 没有 <num>」只可能是那道残缺形态。
+//   - `<genre>`：`buildGenres` 至少会输出番号字母 / 演员 / 片商里的一条；一条
+//     都没有的 nfo 必然是别的工具（或那批残缺件）写的。
+//
+// 用户手改过的 nfo **不会**被这里误伤：编辑器保存走的是
+// `SaveJavWallMeta` → `BuildNFOFromMeta`，恒写元素一个不少，判据为 false。
+func nfoLooksDegenerate(presence emby.NFOPresence, sidecarNumber string) bool {
+	if strings.TrimSpace(sidecarNumber) != "" && !presence.Num {
+		return true
+	}
+	return presence.Genres == 0
+}
+
+// regenerateNFOFromSidecar 用**侧车整份重算**一份 nfo，覆盖掉那份残缺件。
+//
+// 这就是手动「重刮」里 `writeJavArtifacts` 做的那一件事（`emby.BuildNFO(sc.doc, …)`），
+// 参数也照它取：
+//
+//   - `Names` 用 `emby.TargetNames(主干, 平铺?)` —— **不是**从旧 nfo 里读那三个文件名。
+//     残缺件里那三个就是对的（它写过 <poster>/<thumb>/<fanart>），但「平铺还是独占」
+//     只有磁盘知道；照目录里的实际文件数判，与生成器同一条判据。
+//   - `DateAdded` 照侧车的 `dest.added_at`（`SidecarDoc.DateAdded()` 自带三级回落）。
+//   - `Subtitle` 从**旁边真躺着的那份字幕**取（`findLocalSubtitle`），
+//     与生成器同源；没有字幕就是零值，nfo 那边回落到 srt / zh-CN。
+//
+// ⚠️ 只在 `nfoLooksDegenerate` 为真时调 —— 这一手是**覆盖**，会盖掉用户的手改。
+// 判据挡住的正是那种文件。
+func regenerateNFOFromSidecar(nfoPath string, doc *emby.SidecarDoc) bool {
+	if doc == nil {
+		return false
+	}
+	absDir := filepath.Dir(nfoPath)
+	stem := strings.TrimSuffix(filepath.Base(nfoPath), filepath.Ext(nfoPath))
+
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		return false
+	}
+	// 平铺判据与生成器**逐字相同**（见 generateJavDir）：这一层除本片之外还有
+	// 别的媒体文件，就是平铺布局。
+	flat := countMedia(entries) > 1
+	names := emby.TargetNames(stem, flat)
+	sub, _ := findLocalSubtitle(entries, stem)
+
+	data, err := emby.BuildNFO(doc, emby.NFOOptions{
+		Names:     names,
+		DateAdded: doc.DateAdded(),
+		Subtitle:  sub,
+	})
+	if err != nil {
+		return false
+	}
+	return writeFileInPlace(nfoPath, data) == nil
 }
 
 // parsedGenres 取一份 nfo 里 `<genre>` 的**原文列表**（按出现顺序、含空串以外的全部）。

@@ -1180,9 +1180,18 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 			return false, false, true
 		}
 		// 写完 json 之后用同一条路补 nfo（它有「元素存在就不动」的判据兜着）。
+		//
+		// ⚠️ 这次回读的 `changed` 必然是 false（`fields` 里每个非空的键都已经在
+		// 写盘前由 `setIfEmptyPathAny` 并进 doc 了），但**它不再是个空调用**：
+		// 它里面的「补 nfo」那一步现在与 changed 无关（2026-10-30 修，见
+		// strm/jav_metadata.go 里 WriteFieldsIntoFile 末尾那段）。以前这里正是
+		// 「六部 `_LTX` 刮完卡片还是 `ABC-123_LTX`、右边没有胶囊」的根因。
 		if _, err := strm.WriteFieldsIntoFile(jsonPath, fields); err != nil {
 			return false, false, true
 		}
+		// 海报**不用**在这里核：新建侧车意味着这一层原本没有 json（也就没有 poster
+		// ——生成器要先有侧车才动），海报是最后那一步 `FillJavArtifactsInRoot`
+		// 现裁的，那时 `type` 已经在 json 里了。
 		// ⚠️ 上面那次回读**必然是「无改动」**：`fields` 里每一个非空的键都已经在
 		// 写盘前由 `setIfEmptyPathAny` 并进 doc 了，所以 `WriteFieldsIntoFile`
 		// 走的是 `!changed` 那条早退（见 strm/jav_metadata.go 里那段的说明），
@@ -1215,9 +1224,18 @@ func (s *Service) scrapeOneJav(ctx context.Context, t javScrapeTarget, ri jav.Ro
 	if ltx {
 		mergeLTXMarkIntoFile(jsonPath)
 	}
-	changed, err := strm.WriteFieldsIntoFile(jsonPath, fields)
+	changed, typeFilled, err := strm.WriteFieldsIntoFileAndDetectType(jsonPath, fields)
 	if err != nil {
 		return false, false, true
+	}
+	// `type` 是**这一趟才补上**的：磁盘上那张 poster 是按旧判据（人脸档）裁的，
+	// 而末尾的 `FillJavArtifactsInRoot` 是「缺什么补什么」—— 它一张都不会重裁。
+	// 不在这里核一次的话，用户刮完看到的仍然是「有码片的 poster 不是 thumb 的右边」，
+	// 得逐张去点「重刮」（2026-10-30 用户报的正是这个）。
+	//
+	// 队列侧还会再判一次「当前这张是不是本来就对」，所以本来就正确的海报不会被动。
+	if typeFilled {
+		s.strm.EnqueueJavPosterRecropCheck(jsonPath)
 	}
 	// 同上：标题那一手放最后（这次它重建 nfo，就是这一部的收尾）。
 	s.pushScrapedJavTitle(ctx, t, jsonPath)

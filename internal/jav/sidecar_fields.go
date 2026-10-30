@@ -63,6 +63,19 @@ func sidecarFieldsFor(m *domain.JavMovie, actors []*domain.JavActor) (string, ma
 	putString("release_date", m.ReleaseDate)
 	putString("preview_video_url", m.PreviewVideoURL)
 
+	// `type` 决定**海报怎么裁**（有码取右边、其余走人脸），所以它不是一个可有可无的
+	// 展示字段 —— 少了它，`emby.SidecarDoc.IsCensored()` 判 false，每张有码海报都会
+	// 被切到居中/人脸那一档（2026-10-30 用户报的就是这个「海报不是 thumb 的右边」）。
+	//
+	// 为什么以前没有：写侧 `buildSidecar`（推送那一刻）是写的，而回写这条路
+	// （`SyncSidecarsFromRepo`）与在线刮削的 `newJavSidecarDoc` 都漏了它 ——
+	// 于是「有 json 的那批」是对的、「补出来的那一批」永远是空的。全库实测 17 份。
+	//
+	// `type_label` 一起写：它是同一个事实的中文名（写侧本来就有这个键），
+	// 只写一半会让读取方在「有 type 没 label」与「两个都有」之间摇摆。
+	putString("type", m.Type)
+	putString("type_label", javTypeLabel(m.Type))
+
 	putCredit("director", m.DirectorID, m.DirectorName)
 	putCredit("maker", m.MakerID, m.MakerName)
 	putCredit("publisher", m.PublisherID, m.PublisherName)
