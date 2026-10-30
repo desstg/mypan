@@ -783,7 +783,15 @@ func (s *Service) reviewSweepLoop(ctx context.Context, gate <-chan struct{}) {
 
 // ————————————————————— 媒体库定时同步 —————————————————————
 
-// libraryPollerLoop 按 cron 表达式定时全量同步媒体库。
+// libraryPollerLoop 到点全量同步媒体库。
+//
+// 触发方式有两套，**时间点优先**：
+//
+//   - 「每天这些时刻」列表（设置页的主入口，`jav_library_times`）；
+//   - cron 表达式（`jav_library_cron`，老配置的兼容保留，只有时间点为空时才看）。
+//
+// 优先顺序必须与 config.go 的 nextRunAt 完全一致 —— 那里算出来的是界面上
+// 显示的「下次触发」，两边判断不同就会出现「显示 12:00、实际 14:00」。
 //
 // 形态逐条照 internal/tgsubscribe/websearch_poller.go：两道启动闸 →
 // ticker 心跳 → **每 tick 重读设置**（用户在设置页改完，下一 tick 就按新值算，
@@ -816,6 +824,29 @@ func (s *Service) libraryPollerLoop(ctx context.Context, gate <-chan struct{}) {
 		if !s.settings.Bool(settings.KeyJavLibrarySyncEnabled) {
 			continue
 		}
+
+		// —— 时间点那一路 ——
+		//
+		// 写法和订阅调度一模一样：拿当前分钟去比列表。ticker 是 30 秒一跳，
+		// 同一分钟里跳两次由 lastKey 挡住。
+		//
+		// 日历式的「算好 nextAt 再等」在这里没有额外好处：时间点最多就是
+		// 一天几十个，逐 tick 比一次字符串比维护 nextAt 的失效逻辑简单得多，
+		// 而且用户改完设置在下一跳就生效，不用等旧的 nextAt 到点。
+		if daily := s.timeList(settings.KeyJavLibraryTimes); len(daily) > 0 {
+			if !hasClock(daily, now.Hour(), now.Minute()) {
+				continue
+			}
+			key := now.Format("200601021504")
+			if key == lastKey {
+				continue
+			}
+			lastKey = key
+			s.runLibrarySync(ctx, "schedule")
+			continue
+		}
+
+		// —— cron 那一路（时间点为空时的兼容路径）——
 		expr := strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavLibraryCron))
 		if expr != cronKey {
 			parsed, err := cronspec.Parse(expr)
@@ -1172,6 +1203,20 @@ func (s *Service) timeList(key string) []string {
 func containsString(list []string, want string) bool {
 	for _, v := range list {
 		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// hasClock 判断「这个时刻」在不在时间点列表里。
+//
+// 不走 `now.Format("15:04")` 再比字符串：设置页允许存 8:05 这种不补零的写法，
+// 而 Format 出来的是 08:05 —— 一比就对不上，表现是「设了 8:05，从来没在 8:05 跑过」。
+// parseClock 两边都认。
+func hasClock(list []string, hour, minute int) bool {
+	for _, raw := range list {
+		if h, m, ok := parseClock(raw); ok && h == hour && m == minute {
 			return true
 		}
 	}

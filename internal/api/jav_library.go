@@ -344,6 +344,7 @@ func (h *Handler) javGetSyncSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOK(w, map[string]any{
 		"enabled":     view.LibrarySyncEnabled,
+		"times":       view.LibraryTimes,
 		"cron":        view.LibraryCron,
 		"next_run_at": view.LibraryNextRunAt,
 		"last_run_at": view.LibraryLastRunAt,
@@ -358,14 +359,15 @@ func (h *Handler) javUpdateSyncSchedule(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var in struct {
-		Enabled *bool  `json:"enabled"`
-		Cron    string `json:"cron"`
+		Enabled *bool    `json:"enabled"`
+		Times   []string `json:"times"`
+		Cron    string   `json:"cron"`
 	}
 	if err := decodeJSON(r, &in); err != nil {
 		writeErr(w, err)
 		return
 	}
-	if err := h.jav.UpdateLibrarySchedule(r.Context(), in.Enabled, in.Cron); err != nil {
+	if err := h.jav.UpdateLibrarySchedule(r.Context(), in.Enabled, in.Times, in.Cron); err != nil {
 		writeErr(w, err)
 		return
 	}

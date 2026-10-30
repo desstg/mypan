@@ -642,8 +642,15 @@ export interface JavConfig {
   default_push_provider: string;
 
   library_sync_enabled: boolean;
+  /**
+   * 每天这些时刻刷新（HH:MM，已排序）。
+   *
+   * **优先于 library_cron**：非空就按它触发，空才退回 cron。
+   * 老用户的库里只有 cron，所以升级后不会突然改变行为。
+   */
+  library_times: string[];
   library_cron: string;
-  /** 由服务端用 cron 算出来的下次触发时间，算不出时为空串。 */
+  /** 由服务端按时间点（没有则按 cron）算出来的下次触发时间，算不出时为空串。 */
   library_next_run_at: string;
   library_last_run_at: string;
   library_sync_status: string;
@@ -685,6 +692,7 @@ export interface JavConfigInput {
   default_display_path?: string;
   default_push_provider?: string;
   library_sync_enabled?: boolean;
+  library_times?: string[];
   library_cron?: string;
 }
 

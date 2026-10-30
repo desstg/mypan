@@ -121,6 +121,11 @@ type JavDraft = {
   default_display_path: string;
   default_push_provider: string;
   library_sync_enabled: boolean;
+  /**
+   * 每天这些时刻刷新（HH:MM）。**优先于 library_cron** —— 有值就按它触发。
+   * 与订阅那两组「时间胶囊」同源，保存时由后端补零、去重、排序。
+   */
+  library_times: string[];
   library_cron: string;
 };
 
@@ -158,6 +163,7 @@ const draft = reactive<JavDraft>({
   default_display_path: "",
   default_push_provider: "auto",
   library_sync_enabled: false,
+  library_times: [],
   library_cron: "0 */6 * * *",
 });
 
@@ -195,6 +201,7 @@ function snapshot() {
     default_display_path: draft.default_display_path,
     default_push_provider: draft.default_push_provider,
     library_sync_enabled: draft.library_sync_enabled,
+    library_times: [...draft.library_times],
     library_cron: draft.library_cron,
     // 凭据只在用户**填了**的时候才算改动 —— 空串是「不修改」的意思。
     password: draft.password ? "changed" : "",
@@ -239,6 +246,7 @@ function applyConfig(cfg: JavConfig) {
   draft.default_display_path = cfg.default_display_path;
   draft.default_push_provider = cfg.default_push_provider;
   draft.library_sync_enabled = cfg.library_sync_enabled;
+  draft.library_times = [...cfg.library_times];
   draft.library_cron = cfg.library_cron;
   baseline.value = snapshot();
 }
@@ -336,26 +344,46 @@ async function doTestNodes() {
 }
 
 // —— 时间胶囊 ——
+//
+// 三处共用一套：订阅那两组的「每日检查时间」「同步时间表」，以及媒体服务器
+// 的「刷新时间点」。形态一致是刻意的 —— 用户已经在前面两处学会了「点＋加一个
+// 时间、点 ✕ 减一个」，第三处不该再换一套说法（比如让他在输入框里手写 cron）。
 
-const timeDraft = reactive({ daily: "", sync: "" });
+type TimeListKey = "daily" | "sync" | "library";
 
-function addTime(kind: "daily" | "sync") {
-  const raw = (kind === "daily" ? timeDraft.daily : timeDraft.sync).trim();
-  if (!/^\d{1,2}:\d{2}$/.test(raw)) {
+const timeDraft = reactive({ daily: "", sync: "", library: "" });
+
+function timeListOf(kind: TimeListKey): string[] {
+  if (kind === "daily") return draft.sub_daily_times;
+  if (kind === "sync") return draft.sub_sync_times;
+  return draft.library_times;
+}
+
+function addTime(kind: TimeListKey) {
+  const raw = timeDraft[kind].trim();
+  // 允许 8:05 这种不补零的写法，存进去统一补成 08:05。
+  const m = /^(\d{1,2}):(\d{2})$/.exec(raw);
+  if (!m) {
     toast.error("时间格式应为 HH:MM");
     return;
   }
-  const [h, m] = raw.split(":");
-  const value = `${h.padStart(2, "0")}:${m}`;
-  const list = kind === "daily" ? draft.sub_daily_times! : draft.sub_sync_times!;
-  if (!list.includes(value)) list.push(value);
-  list.sort();
-  if (kind === "daily") timeDraft.daily = "";
-  else timeDraft.sync = "";
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  if (hour > 23 || minute > 59) {
+    toast.error("时间超出范围（00:00 ~ 23:59）");
+    return;
+  }
+  const value = `${String(hour).padStart(2, "0")}:${m[2]}`;
+  const list = timeListOf(kind);
+  if (!list.includes(value)) {
+    list.push(value);
+    list.sort();
+  }
+  timeDraft[kind] = "";
 }
 
-function removeTime(kind: "daily" | "sync", value: string) {
-  const list = kind === "daily" ? draft.sub_daily_times! : draft.sub_sync_times!;
+function removeTime(kind: TimeListKey, value: string) {
+  const list = timeListOf(kind);
   const idx = list.indexOf(value);
   if (idx >= 0) list.splice(idx, 1);
 }
@@ -374,14 +402,19 @@ const syncing = ref(false);
 const schedule = reactive({ nextRunAt: "", lastRunAt: "" });
 const serverForm = reactive({ name: "", url: "", api_key: "", type: "emby" });
 
-const CRON_PRESETS = [
-  { label: "每天 00:30", cron: "30 0 * * *" },
-  { label: "每天 01:20", cron: "20 1 * * *" },
-  { label: "每周日 02:00", cron: "0 2 * * 0" },
-  { label: "每月 2 号 23:00", cron: "0 23 2 * *" },
-  { label: "每 6 小时", cron: "0 */6 * * *" },
-  { label: "每 12 小时", cron: "0 */12 * * *" },
-];
+// 快捷添加用的时间点。**只加不缺**：点一下往列表里塞一个，已有的不重复。
+//
+// 换成「一排时间点」而不是原来的「一排 cron 预设」，是因为预设那种按钮只能
+// 整体替换（选了「每 6 小时」就丢掉了前面设的所有时刻），而用户要的恰恰是
+// 「一天里我要这几个点」。
+const QUICK_TIMES = ["04:00", "09:00", "12:00", "14:00", "17:00", "20:00", "00:00"];
+
+function addQuickTime(value: string) {
+  const list = draft.library_times;
+  if (list.includes(value)) return;
+  list.push(value);
+  list.sort();
+}
 
 async function loadServers() {
   try {
@@ -458,11 +491,60 @@ const nodeOptions = computed(() =>
   (config.value?.api_nodes ?? []).map((n) => ({ value: n.base, label: n.name })),
 );
 
-/** 下次触发时间的展示值。算不出来时明确说「不会触发」，而不是留空。 */
+/**
+ * 下次触发时间的展示值。算不出来时明确说「不会触发」，而不是留空。
+ *
+ * 时间点这一档**在本地现算**，不用服务端那份：服务端返回的是「按已保存的设置」
+ * 算出来的，用户刚加了 12:00 还没点保存时，那一份会显示成旧值 ——
+ * 而这行字正是他用来确认「我设的对不对」的地方，滞后一次保存就是误导。
+ * cron 那一档仍用服务端的结果（前端没有 cron 解析器，也不该为一个兜底路径再造一个）。
+ */
 const nextRunText = computed(() => {
-  if (!schedule.nextRunAt) return "该表达式在可预见的时间内不会触发";
-  return schedule.nextRunAt.slice(0, 16).replace("T", " ");
+  const times = draft.library_times;
+  if (times.length > 0) {
+    const next = localNextRun(times);
+    return next ? formatDateTime(next) : "没有可触发的时间";
+  }
+  if (!schedule.nextRunAt) return "没有可触发的时间";
+  return formatDateTime(new Date(schedule.nextRunAt));
 });
+
+function formatDateTime(d: Date): string {
+  if (Number.isNaN(d.getTime())) return "没有可触发的时间";
+  const pad = (v: number) => String(v).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 与后端 nextDailyTime 同一套算法：今天还没过的最近一个，都过了就明天的第一个。 */
+function localNextRun(times: string[]): Date | null {
+  const now = new Date();
+  let best: Date | null = null;
+  for (const raw of times) {
+    const [hh, mm] = raw.split(":");
+    const h = Number(hh);
+    const m = Number(mm);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) continue;
+    const t = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+    if (t.getTime() <= now.getTime()) t.setDate(t.getDate() + 1);
+    if (!best || t.getTime() < best.getTime()) best = t;
+  }
+  return best;
+}
+
+/**
+ * 草稿里「已经设了哪些时间点」的一句话摘要。
+ *
+ * 用户问的就是这个：设完得看得见设了哪些，而不是只靠一排胶囊自己数。
+ * 时间点已经由后端（保存后）或本地的 addTime（保存前）排好序，这里直接拼。
+ */
+const libraryTimesText = computed(() => {
+  const list = draft.library_times;
+  if (list.length === 0) return "";
+  return `每天 ${list.join("、")} 刷新`;
+});
+
+/** 时间点为空时是否回落到 cron —— 决定界面上要不要露出 cron 输入框。 */
+const usesCronFallback = computed(() => draft.library_times.length === 0);
 
 // 脏状态登记到全局的「未保存改动」集合里，抽屉关闭时统一拦截。
 // 子 tab 之间用 v-show 切换，草稿不会丢，所以不需要额外的拦截。
@@ -951,13 +1033,14 @@ onMounted(async () => {
         <SettingsCard title="入库缓存设置">
           <SettingsRow>
             <template #info>
-              <SettingsRowLabel label="定时刷新计划" />
+              <SettingsRowLabel
+                label="定时刷新计划"
+                help-title="定时刷新计划"
+                help-text="到点全量同步一次媒体库，刷新海报墙上的「已入库」状态与影片数量。可以设多个时间点，系统每天在这些时刻各跑一次。"
+              />
             </template>
             <template #control>
-              <div style="display: flex; gap: 8px; align-items: center">
-              <AppInput v-model="draft.library_cron" placeholder="0 */6 * * *" style="width: 180px" />
               <SettingsBoolSegment v-model="draft.library_sync_enabled" label="定时刷新计划" />
-            </div>
             </template>
           </SettingsRow>
 
@@ -968,21 +1051,74 @@ onMounted(async () => {
                底部保存按钮永远不亮（看起来就是「保存不了」）；反过来一旦它亮了，
                又会拿开面板时加载的旧值把这边的改动覆盖回去。
                现在统一走 draft，只留底部那一个保存入口。 -->
+
+          <!-- 刷新时间点：与「订阅调度」那两处同一套胶囊控件。
+               以前这里是个 cron 输入框，要用户自己会写 `0 */6 * * *`；
+               而实际用到的只有「每天几点」，cron 既读不出含义，也表达不了
+               「04:00 / 09:00 / 12:00 / 14:00 / 17:00」这种一天多次且不均匀的排期。 -->
+          <SettingsRow>
+            <template #info>
+              <SettingsRowLabel
+                label="刷新时间点"
+                help-title="刷新时间点"
+                help-text="每天在这些时刻各刷新一次。设了时间点就以它为准；一个都不设时才回到下面的 cron。"
+              />
+            </template>
+            <template #control>
+              <div class="jav-time-chips">
+                <span v-for="t in draft.library_times" :key="t" class="jav-time-chip">
+                  {{ t }}
+                  <i class="jav-time-chip__x" @click="removeTime('library', t)">✕</i>
+                </span>
+                <AppInput
+                  v-model="timeDraft.library"
+                  type="time"
+                  style="width: 108px"
+                  @keyup.enter="addTime('library')"
+                />
+                <AppButton size="sm" variant="ghost" @click="addTime('library')">＋ 添加</AppButton>
+              </div>
+            </template>
+          </SettingsRow>
+
           <div class="jav-preset-row">
+            <span class="jav-hint">快捷添加：</span>
             <button
-              v-for="preset in CRON_PRESETS"
-              :key="preset.cron"
+              v-for="preset in QUICK_TIMES"
+              :key="preset"
               type="button"
               class="jav-sort-chip"
-              @click="draft.library_cron = preset.cron"
+              @click="addQuickTime(preset)"
             >
-              {{ preset.label }}
+              {{ preset }}
             </button>
           </div>
 
+          <!-- cron 只在「一个时间点都没设」时露出来。
+               它是给老配置兜底的：升级前用户库里只有 jav_library_cron，
+               直接抹掉会让那部分人突然不刷了 —— 保留输入框，让他看得见、改得动。 -->
+          <SettingsRow v-if="usesCronFallback">
+            <template #info>
+              <SettingsRowLabel
+                label="cron（备用）"
+                help-title="cron（备用）"
+                help-text="没有设置时间点时才按这个表达式触发。格式：分 时 日 月 星期，例如 0 */6 * * * 表示每 6 小时。"
+              />
+            </template>
+            <template #control>
+              <AppInput v-model="draft.library_cron" placeholder="0 */6 * * *" style="width: 180px" />
+            </template>
+          </SettingsRow>
+
           <div class="jav-hint">
-            下次触发：{{ nextRunText }}
-            <span v-if="schedule.lastRunAt"> · 上次：{{ schedule.lastRunAt.slice(0, 16).replace("T", " ") }}</span>
+            <template v-if="libraryTimesText">
+              {{ libraryTimesText }}<template v-if="!draft.library_sync_enabled">（开关关着，暂不生效）</template>
+              <span v-if="schedule.lastRunAt"> · 上次：{{ schedule.lastRunAt.slice(0, 16).replace("T", " ") }}</span>
+            </template>
+            <template v-else>
+              还没设时间点，现在按上面的 cron 触发。
+            </template>
+            <span> · 下次触发：{{ nextRunText }}</span>
           </div>
 
           <SettingsRow>

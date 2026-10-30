@@ -550,6 +550,8 @@ export function fetchJavSyncStatus() {
 export function fetchJavSyncSchedule() {
   return http.get<{
     enabled: boolean;
+    /** 每天这些时刻刷新；非空时优先于 cron。 */
+    times: string[];
     cron: string;
     next_run_at: string;
     last_run_at: string;
@@ -558,8 +560,14 @@ export function fetchJavSyncSchedule() {
   }>(`${BASE}/sync/schedule`);
 }
 
-export function saveJavSyncSchedule(enabled: boolean, cron: string) {
-  return http.put<{ ok: boolean }>(`${BASE}/sync/schedule`, { enabled, cron });
+/**
+ * 保存定时刷新计划。
+ *
+ * `times` 传 `undefined` = 不改时间点；传空数组 = 清空时间点、回到 cron。
+ * 这两种意图在后端是分开的（nil vs 空片），所以这里也不能把空数组顺手吞成 undefined。
+ */
+export function saveJavSyncSchedule(enabled: boolean, times: string[] | undefined, cron: string) {
+  return http.put<{ ok: boolean }>(`${BASE}/sync/schedule`, { enabled, times, cron });
 }
 
 export function fetchJavLibraryStats() {

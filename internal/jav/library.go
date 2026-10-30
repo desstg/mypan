@@ -634,14 +634,21 @@ func (s *Service) StartLibrarySync(ctx context.Context, trigger string) bool {
 // UpdateLibrarySchedule 保存定时刷新计划。
 //
 // cron 在这里做**写入时严格**的校验：写坏了当场拒绝，而不是等调度循环
-// 默默什么都不做、几天后才发现从来没同步过。
-func (s *Service) UpdateLibrarySchedule(ctx context.Context, enabled *bool, cron string) error {
+// 默默什么都不做、几天后才发现从来没同步过。时间点列表同理。
+func (s *Service) UpdateLibrarySchedule(ctx context.Context, enabled *bool, times []string, cron string) error {
 	if s.settings == nil {
 		return errNotReady()
 	}
 	patch := map[string]string{}
 	if enabled != nil {
 		patch[settings.KeyJavLibrarySyncEnabled] = boolString(*enabled)
+	}
+	if times != nil {
+		cleaned, err := normalizeTimes(times)
+		if err != nil {
+			return err
+		}
+		patch[settings.KeyJavLibraryTimes] = jsonStringList(cleaned)
 	}
 	if cron = strings.TrimSpace(cron); cron != "" {
 		if _, ok := parseCron(cron); !ok {

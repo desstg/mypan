@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -110,12 +111,19 @@ type ConfigView struct {
 	DefaultPushProvider string `json:"default_push_provider"`
 
 	// —— 媒体库同步 ——
-	LibrarySyncEnabled bool   `json:"library_sync_enabled"`
-	LibraryCron        string `json:"library_cron"`
-	LibraryNextRunAt   string `json:"library_next_run_at"`
-	LibraryLastRunAt   string `json:"library_last_run_at"`
-	LibrarySyncStatus  string `json:"library_sync_status"`
-	LibrarySyncMessage string `json:"library_sync_message"`
+	LibrarySyncEnabled bool `json:"library_sync_enabled"`
+	// LibraryTimes 是「每天这些时刻刷新」的时间点列表（HH:MM，已排序）。
+	//
+	// **优先于 LibraryCron**：非空就按它触发，cron 只作老配置的兼容保留。
+	// 换成时间点是因为 cron 那五个字段要求用户自己会写 —— 设置页上真正被用到的
+	// 只有「每天几点」，而一句 `0 */6 * * *` 既读不出含义，也表达不了
+	// 「04:00 / 09:00 / 12:00」这种不均匀的一天多次。订阅那两组调度早就是这个形态了。
+	LibraryTimes       []string `json:"library_times"`
+	LibraryCron        string   `json:"library_cron"`
+	LibraryNextRunAt   string   `json:"library_next_run_at"`
+	LibraryLastRunAt   string   `json:"library_last_run_at"`
+	LibrarySyncStatus  string   `json:"library_sync_status"`
+	LibrarySyncMessage string   `json:"library_sync_message"`
 }
 
 // ConfigInput 是写配置的入参。
@@ -166,8 +174,9 @@ type ConfigInput struct {
 	DefaultDisplayPath  string `json:"default_display_path"`
 	DefaultPushProvider string `json:"default_push_provider"`
 
-	LibrarySyncEnabled *bool  `json:"library_sync_enabled"`
-	LibraryCron        string `json:"library_cron"`
+	LibrarySyncEnabled *bool    `json:"library_sync_enabled"`
+	LibraryTimes       []string `json:"library_times"`
+	LibraryCron        string   `json:"library_cron"`
 }
 
 // ConnectionResult 是一次探活的结论。
@@ -246,6 +255,7 @@ func (s *Service) Config(ctx context.Context) (ConfigView, error) {
 		DefaultPushProvider: strings.TrimSpace(s.settings.String(settings.KeyJavDefaultPushProvider)),
 
 		LibrarySyncEnabled: s.settings.Bool(settings.KeyJavLibrarySyncEnabled),
+		LibraryTimes:       s.stringList(settings.KeyJavLibraryTimes),
 		LibraryCron:        strings.TrimSpace(s.settings.StringAllowEmpty(settings.KeyJavLibraryCron)),
 		LibraryLastRunAt:   s.settings.StringAllowEmpty(settings.KeyJavLibraryLastRunAt),
 		LibrarySyncStatus:  strings.TrimSpace(s.settings.String(settings.KeyJavLibrarySyncStatus)),
@@ -258,7 +268,7 @@ func (s *Service) Config(ctx context.Context) (ConfigView, error) {
 		}
 	}
 
-	view.LibraryNextRunAt = nextRunAt(view.LibraryCron)
+	view.LibraryNextRunAt = nextRunAt(view.LibraryTimes, view.LibraryCron)
 	_ = ctx
 	return view, nil
 }
@@ -302,11 +312,18 @@ func (s *Service) stringList(key string) []string {
 	return out
 }
 
-// nextRunAt 用 cronspec 算出下次触发时间，算不出来返回空串。
+// nextRunAt 算「下次触发」，算不出来返回空串。
+//
+// 优先看时间点列表（`times`），没有时才退回 cron —— 两者的优先级与
+// libraryPollerLoop 里的判断必须**完全一致**，否则界面显示的下次触发
+// 会和实际调度对不上。
 //
 // 返回空串而非报错：表达式写坏不该让整个配置页打不开，
-// 前端把它显示成「该表达式在可预见的时间内不会触发」就够了。
-func nextRunAt(expr string) string {
+// 前端把它显示成「没有可触发的时间」就够了。
+func nextRunAt(times []string, expr string) string {
+	if next, ok := nextDailyTime(times, time.Now()); ok {
+		return next.Format(time.RFC3339)
+	}
 	spec, ok := parseCron(expr)
 	if !ok {
 		return ""
@@ -316,6 +333,43 @@ func nextRunAt(expr string) string {
 		return ""
 	}
 	return next.Format(time.RFC3339)
+}
+
+// nextDailyTime 在「每天这些时刻」里找 after 之后最先到的那个。
+//
+// 同一天按 HH:MM 字符串比大小即可（定长零填充，字典序就是时间序），
+// 全都已过就落到明天的第一个。
+func nextDailyTime(times []string, after time.Time) (time.Time, bool) {
+	var first time.Time
+	found := false
+	for _, raw := range times {
+		h, m, ok := parseClock(raw)
+		if !ok {
+			continue
+		}
+		t := time.Date(after.Year(), after.Month(), after.Day(), h, m, 0, 0, after.Location())
+		if !t.After(after) {
+			t = t.AddDate(0, 0, 1)
+		}
+		if !found || t.Before(first) {
+			first, found = t, true
+		}
+	}
+	return first, found
+}
+
+// parseClock 解析 HH:MM。与前端 time 输入框的口径一致（允许 8:05 这种不补零的写法）。
+func parseClock(raw string) (int, int, bool) {
+	hh, mm, ok := strings.Cut(strings.TrimSpace(raw), ":")
+	if !ok {
+		return 0, 0, false
+	}
+	h, err1 := strconv.Atoi(strings.TrimSpace(hh))
+	m, err2 := strconv.Atoi(strings.TrimSpace(mm))
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, false
+	}
+	return h, m, true
 }
 
 // ————————————————————— 写 —————————————————————
@@ -431,6 +485,15 @@ func (s *Service) UpdateConfig(ctx context.Context, in ConfigInput) error {
 
 	if in.LibrarySyncEnabled != nil {
 		patch[settings.KeyJavLibrarySyncEnabled] = boolString(*in.LibrarySyncEnabled)
+	}
+	if in.LibraryTimes != nil {
+		// 写入时严格：格式不对当场拒。静默丢掉一个时间点，用户看到的是
+		// 「明明设了 12:00，却从来没在那时候刷新过」，而界面上那个胶囊还好端端挂着。
+		cleaned, err := normalizeTimes(in.LibraryTimes)
+		if err != nil {
+			return err
+		}
+		patch[settings.KeyJavLibraryTimes] = jsonStringList(cleaned)
 	}
 	if cron := strings.TrimSpace(in.LibraryCron); cron != "" {
 		// 写入时严格校验：表达式写坏了就在保存这一刻告诉他，
@@ -622,9 +685,36 @@ func boolString(v bool) string {
 	return "false"
 }
 
-// jsonStringList 把时间/类别列表序列化进设置。
+// normalizeTimes 校验并规整一组 HH:MM：补零、去重、排序。
 //
-// 排序并去重：同一组时间点每次保存得到同一个字符串，
+// 空列表是**合法值**（表示「没有时间点，回到 cron」），所以不能像
+// jsonStringList 那样把空串默默丢掉再当没事发生 —— 非空项格式不对就报错。
+func normalizeTimes(values []string) ([]string, error) {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		h, m, ok := parseClock(raw)
+		if !ok {
+			return nil, domain.Errorf(domain.CodeValidation,
+				"刷新时间格式应为 HH:MM（24 小时制）：%s", raw)
+		}
+		v := fmt.Sprintf("%02d:%02d", h, m)
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sortStrings(out)
+	return out, nil
+}
+
+// jsonStringList 把一组字符串收成 JSON 数组：去空白、去重、排序。
+//
+// 排序并去重不只是好看：同一组时间点每次保存得到同一个字符串，
 // 前端靠比较前后串判断「有没有改动」，顺序不稳定会一直误报未保存。
 func jsonStringList(values []string) string {
 	cleaned := make([]string, 0, len(values))

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"litepan/internal/settings"
 )
@@ -184,6 +185,77 @@ func TestUpdateConfigRejectsBadCron(t *testing.T) {
 	view, _ := s.Config(ctx)
 	if view.LibraryCron != "0 */6 * * *" || view.LibraryNextRunAt == "" {
 		t.Errorf("cron 没写进去或算不出下次时间: %+v", view)
+	}
+}
+
+// TestLibraryTimesDriveSchedule 钉住「时间点优先于 cron」这条优先级。
+//
+// 两处判断必须一致：`nextRunAt`（界面显示的下次触发）与 `libraryPollerLoop`
+// （实际调度）。写成两份逻辑时最容易出的 bug 就是「显示 12:00、实际按 cron 跑」，
+// 而那种偏差在界面上完全看不出来 —— 只能等到第二天发现它在错误的时间同步过。
+func TestLibraryTimesDriveSchedule(t *testing.T) {
+	s := newConfigService(t)
+	ctx := context.Background()
+
+	// 只给时间点、cron 留着一个完全不同的排期：下次触发必须落在时间点上。
+	if err := s.UpdateConfig(ctx, ConfigInput{
+		LibraryTimes: []string{"23:59", "00:01", "00:01", " 07:30 "},
+		LibraryCron:  "0 3 * * 0",
+	}); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	view, err := s.Config(ctx)
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	// 去重 + 补零 + 排序。
+	want := []string{"00:01", "07:30", "23:59"}
+	if len(view.LibraryTimes) != len(want) {
+		t.Fatalf("时间点 = %v, want %v", view.LibraryTimes, want)
+	}
+	for i := range want {
+		if view.LibraryTimes[i] != want[i] {
+			t.Errorf("时间点[%d] = %q, want %q", i, view.LibraryTimes[i], want[i])
+		}
+	}
+	if view.LibraryNextRunAt == "" {
+		t.Fatal("设了时间点却算不出下次触发时间")
+	}
+	next, err := time.Parse(time.RFC3339, view.LibraryNextRunAt)
+	if err != nil {
+		t.Fatalf("下次触发时间不是 RFC3339: %q", view.LibraryNextRunAt)
+	}
+	hm := next.Format("15:04")
+	if hm != "00:01" && hm != "07:30" && hm != "23:59" {
+		t.Errorf("下次触发 %s 不在设定的时间点里 —— 时间点没优先于 cron", hm)
+	}
+	// 且必须是「最近的」那个：间隔不超过 24 小时。
+	if d := time.Until(next); d > 24*time.Hour || d < 0 {
+		t.Errorf("下次触发离现在 %s，不合理", d)
+	}
+
+	// 格式不对当场拒 —— 静默丢掉一个时间点，用户看到的是「设了却不生效」。
+	if err := s.UpdateConfig(ctx, ConfigInput{LibraryTimes: []string{"25:00"}}); err == nil {
+		t.Error("非法时间点应当被拒绝")
+	}
+	if err := s.UpdateConfig(ctx, ConfigInput{LibraryTimes: []string{"abc"}}); err == nil {
+		t.Error("非法时间点应当被拒绝")
+	}
+
+	// 清空时间点 → 回到 cron。
+	if err := s.UpdateConfig(ctx, ConfigInput{LibraryTimes: []string{}}); err != nil {
+		t.Fatalf("清空时间点: %v", err)
+	}
+	view, _ = s.Config(ctx)
+	if len(view.LibraryTimes) != 0 {
+		t.Errorf("时间点应当被清空，got %v", view.LibraryTimes)
+	}
+	next, err = time.Parse(time.RFC3339, view.LibraryNextRunAt)
+	if err != nil {
+		t.Fatalf("清空时间点后算不出下次触发: %v", err)
+	}
+	if next.Weekday() != time.Sunday || next.Hour() != 3 {
+		t.Errorf("清空时间点后应当回到 cron（周日 3 点），got %s", next)
 	}
 }
 

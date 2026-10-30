@@ -383,6 +383,7 @@ const (
 
 	// 媒体库同步。
 	KeyJavLibrarySyncEnabled = "jav_library_sync_enabled"
+	KeyJavLibraryTimes       = "jav_library_times"
 	KeyJavLibraryCron        = "jav_library_cron"
 	KeyJavLibraryBackfillN   = "jav_library_backfill_batch"
 	KeyJavLibraryBackfillMS  = "jav_library_backfill_pause_ms"
@@ -849,6 +850,13 @@ func defaultSpecs() []Spec {
 		}},
 
 		{Key: KeyJavLibrarySyncEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		// 每天这些时刻刷新（HH:MM 列表）。**优先于下面那条 cron**：非空就按它触发，
+		// 空才退回 cron。
+		//
+		// 默认**空**而不是给一组时间点：老用户的库里已经有 jav_library_cron，
+		// 新键一上来就带默认值等于把所有人的排期悄悄改掉（自定义过 cron 的
+		// 会从「每周日三点」变成「每天四次」）。空 = 维持原样，等用户在设置页里自己加。
+		{Key: KeyJavLibraryTimes, Type: TypeString, Default: "[]", Hidden: true},
 		// 与源码 config.py 的 sync_cron 默认值一致：每 6 小时一轮全库同步。
 		{Key: KeyJavLibraryCron, Type: TypeString, Default: "0 */6 * * *", Hidden: true},
 		// 每批 20 部、条目间停顿 0.3 秒，与源码 start_library_quality_backfill 一致。
