@@ -220,6 +220,9 @@ const javWallRef = ref<{
   pickedCount?: number;
   /** 要刮的部数（整分类态下是「整档减掉排除的」，与 `pickedCount` 不是一回事）。 */
   pickedCountDisplay?: number;
+  /** 手机端图标按钮上的角标（已选部数 / 刮削进度），见 StrmJavWall 里的同名 computed。 */
+  pickedBadge?: string;
+  onlineScrapeBadge?: string;
   toggleBatchMode?: () => void;
   onlineScrapeDisabled?: boolean;
 } | null>(null);
@@ -453,6 +456,22 @@ const batchModeLabel = computed(() => {
 // 「开着但一部没勾 → 按钮禁用」的判据两侧都有：这里是可见的那一道。
 // 收尾清场靠的是面板里的 `clearBatchPicked()`，它比页头那颗按钮更靠得住。
 const batchDisabled = computed(() => batchMode.value && pickedCount.value === 0);
+
+/**
+ * 手机端那几颗图标按钮上的角标（2026-10-30，与番号墙的 `pickedBadge` 同一条思路）。
+ *
+ * 文字标签（「批量选择（已选 3 部）」）在手机上放不下，缩成图标之后：
+ *   * 批量选择那颗 → 已选部数；
+ *   * 开始刮削那颗 → 刮削进度 `8/128`（跑起来才有）。
+ * 0 / 没在跑时给空串，角标不渲染。
+ */
+const pickedBadge = computed(() => (pickedCount.value > 0 ? String(pickedCount.value) : ""));
+const scrapeBadge = computed(() => {
+  if (!running.value) return "";
+  const p = progress.value;
+  if (p && p.total > 0) return `${p.done}/${p.total}`;
+  return "";
+});
 
 function isPicked(item: StrmScrapeItem) {
   return batchPicked.value.has(item.id);
@@ -1240,6 +1259,10 @@ defineExpose({
   // 整分类态下 `pickedCount` 是**排除集**的长度，拿它报数会把「整档 88 部」
   // 说成「刮削选中（3）」。
   pickedCountDisplay: computed(() => javWallRef.value?.pickedCountDisplay ?? 0),
+  // 手机端两颗图标按钮的角标。**必须包 `computed(() => ...)`**：经 defineExpose
+  // 传给父组件后裸 ref 不会被解包，父组件拿到的是对象、角标会渲染成 [object Object]。
+  pickedBadge: computed(() => javWallRef.value?.pickedBadge ?? ""),
+  onlineScrapeBadge: computed(() => javWallRef.value?.onlineScrapeBadge ?? ""),
   toggleBatchMode: () => javWallRef.value?.toggleBatchMode?.(),
   onlineScrapeDisabled: computed(() => Boolean(javWallRef.value?.onlineScrapeDisabled)),
   // 父组件（辅助工具页）要用它决定页头那几个按钮显不显示：番号那面跑 TMDB 刮削
@@ -1264,6 +1287,10 @@ defineExpose({
   tmdbPickedCount: pickedCount,
   tmdbBatchDisabled: batchDisabled,
   tmdbToggleBatchMode: toggleBatchMode,
+  // 手机端图标按钮的角标（已选部数 / 刮削进度）。这两个本来就是 computed，是值，
+  // 不用再包一层 —— 与番号墙那几个 `computed(() => ...)` 的区别只在来源。
+  tmdbPickedBadge: pickedBadge,
+  tmdbScrapeBadge: scrapeBadge,
   refresh: refreshAll,
   refreshing,
   running,

@@ -1,4 +1,4 @@
-.PHONY: lint lint-install test build build-nofuse docker-build docker-up docker-down docker-save docker-push
+﻿.PHONY: lint lint-install test build build-nofuse docker-build docker-up docker-down docker-save docker-push
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOLANGCI_LINT ?= $(shell command -v golangci-lint 2>/dev/null || echo "$(shell go env GOPATH)/bin/golangci-lint")
@@ -8,7 +8,7 @@ DOCKER_PLATFORM ?= linux/amd64
 DOCKER_EXPORT ?= dist/$(DOCKER_IMAGE).tar.gz
 
 # 发布到 Docker Hub
-VERSION ?= v3.0.8
+VERSION ?= v3.0.9
 RELEASE_IMAGE ?= desstg/mypan
 RELEASE_TAG ?= latest
 RELEASE_PLATFORMS ?= linux/amd64,linux/arm64

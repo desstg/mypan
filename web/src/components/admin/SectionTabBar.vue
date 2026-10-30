@@ -14,7 +14,14 @@ interface Tab {
   count?: number;
 }
 
-defineProps<{ tabs: Tab[]; modelValue: string; icon?: string }>();
+defineProps<{
+  tabs: Tab[];
+  modelValue: string;
+  icon?: string;
+  sticky?: boolean;
+  /** 手机上是否也粘（见 AppTabBar 的同名 prop）。缺省 true。 */
+  stickyMobile?: boolean;
+}>();
 const emit = defineEmits<{ "update:modelValue": [string] }>();
 </script>
 
@@ -23,6 +30,8 @@ const emit = defineEmits<{ "update:modelValue": [string] }>();
     :tabs="tabs"
     :model-value="modelValue"
     :icon="icon"
+    :sticky="sticky"
+    :sticky-mobile="stickyMobile"
     @update:model-value="emit('update:modelValue', $event)"
   >
     <template #actions>

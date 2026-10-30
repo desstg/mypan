@@ -29,12 +29,31 @@ defineProps<{
   modelValue: string;
   /** 可选的分组图标（FontAwesome 名，如 fire）。缺省不渲染，其它页面不受影响。 */
   icon?: string;
+  /**
+   * 整条栏粘在滚动容器顶部。**缺省不粘**，所以其它页面一个字段都不用改、观感完全不变。
+   *
+   * 只有「内容要滚很久」的页面才值得开（海报墙：一屏几十张卡片，滚十几屏之后
+   * 页头那几颗动作按钮就够不着了 —— 用户 2026-10-30 要求）。
+   */
+  sticky?: boolean;
+  /**
+   * 手机上（≤768px）是否也保持吸顶。**缺省 true**，所以开了 `sticky` 的页面
+   * 一个字都不用改。
+   *
+   * 只有番号海报墙传 `false`：手机上一屏只放得下一张卡片，这条栏
+   * （Tab 一排 + 动作按钮一排）粘住之后吃掉的可视高度太多，那一档改用两颗
+   * 只有图标的小浮标（见 `AuxToolsManagement.vue` 的 `.jav-mobile-actions`）。
+   */
+  stickyMobile?: boolean;
 }>();
 const emit = defineEmits<{ "update:modelValue": [string] }>();
 </script>
 
 <template>
-  <div class="tabbar">
+  <div
+    class="tabbar"
+    :class="{ 'tabbar--sticky': sticky, 'tabbar--sticky-desktop-only': sticky && !stickyMobile }"
+  >
     <div class="tabbar__tabs">
       <i v-if="icon" class="tabbar__icon fas" :class="`fa-${icon}`" aria-hidden="true" />
       <!-- TransitionGroup 负责分组 Tab 的展开/收起。其余页面传的都是静态列表、
@@ -165,6 +184,43 @@ const emit = defineEmits<{ "update:modelValue": [string] }>();
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* 整条栏粘在滚动容器顶部（`.admin__body`），滚多远都够得着页头那几颗按钮。
+ *
+ * ⚠️ `top` 必须吃掉滚动容器的**上内边距**：`.admin__body` 桌面 24px、手机上 16px
+ *    （见 AdminShell）。留成 0 的话，栏会停在内边距**之下**，它上方那 24px 里
+ *    滚过去的卡片照旧露出来 —— 看着像栏浮在半空、底下还有一条缝。
+ *    负偏移把它顶到容器的可视边，栏体本身不透明，滚过去的内容自然被盖住。
+ *
+ * 只有「内容要滚很久」的页面才开（海报墙），其余页面缺省不粘、观感不变。
+ *
+ * `z-index: 45` 的顺序是算过的：刮削面板里的 tooltip 气泡是 40（`.scrape-tip__bubble`，
+ * 见 StrmScrapePanel），栏要压在它上面；而页面级下拉 / 弹窗都是 Teleport 到 body 的
+ * `--z-dropdown`(10050) 起跳，远在它之上，不会被栏挡住。 */
+.tabbar--sticky {
+  position: sticky;
+  top: calc(-1 * var(--tabbar-sticky-pad, 24px));
+  z-index: 45;
+}
+
+@media (max-width: 768px) {
+  /* 与 AdminShell 里 `.admin__body` 的手机内边距一致。 */
+  .tabbar--sticky {
+    --tabbar-sticky-pad: 16px;
+  }
+
+  /* 手机上**整条栏不粘**（`stickyMobile: false`，目前只有番号海报墙这么传）。
+   *
+   * 为什么单独一个类名而不是让调用方自己关 `sticky`：桌面还要粘。手机上一屏
+   * 只放得下一张卡片，「Tab 一排 + 动作按钮一排」粘住之后海报区几乎没法看 ——
+   * 那一档改用两颗只有图标的小浮标（见 `AuxToolsManagement.vue` 的
+   * `.jav-mobile-actions`），栏自己退回普通流。
+   *
+   * 桌面（>768px）完全不受影响：栏照旧吸顶。 */
+  .tabbar--sticky-desktop-only {
+    position: static;
+  }
 }
 
 /* 分组箭头的翻转。 */
