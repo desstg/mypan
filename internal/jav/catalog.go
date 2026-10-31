@@ -151,6 +151,9 @@ func (s *Service) Search(ctx context.Context, p SearchParams) (SearchResult, err
 	}
 
 	// 番号直达：归一化后精确比对。
+	//
+	// 判据走本文件的 `normalizeNumber`（`domain.LooseNumberKey` 的别名，**多吃一层
+	// 补零**）：用户拿 `MIAE-0071` 敲番号搜索时，命中的那一部在上游叫 `MIAE-071`。
 	if strings.EqualFold(strings.TrimSpace(p.Type), "number") {
 		target := normalizeNumber(keyword)
 		exact := make([]javdb.Movie, 0, len(all))
@@ -1115,14 +1118,21 @@ func (s *Service) ingestByNumber(ctx context.Context, number string, force bool)
 		return nil, upstreamErr(err)
 	}
 
-	// 搜索是模糊的，这里要的是**精确**那一条：番号大小写与分隔符都归一后比较。
+	// 搜索是模糊的，这里要的是**精确**那一条：番号大小写、分隔符、以及**补出来的
+	// 前导零**都归一后比较。
+	//
+	// ⚠️ 补零这一层是 2026-10-31 真机加的：分享者把序号补成 4 位
+	// （`MIAE-0071_LTX.strm`），上游与库里都是 `MIAE-071`。上游搜 `MIAE-0071`
+	// 回来的第一条**恰好**就是 `MIAE-071`，但这里只比 `NormalizeNumberKey`，
+	// 两条对不上 → 判「上游没有这一部」→ 整部片一张卡都没刮到。用户把名字改成
+	// `MIAE-071` 立刻就好了，正是这个原因。判据的收法见 `domain.LooseNumberKey`。
 	//
 	// ⚠️ 两条出口都**只抓详情、不跑补缺链**（2026-09-30 改）。这是「用户直接敲了一个
 	// 番号」那条路，他等着看见结果；补缺链 60~148 秒会把这个请求一起拖死
 	// （前端 90 秒超时，见 api/client.ts）。补缺归后台两处，见 resolveSearchActor 的注释。
-	want := domain.NormalizeNumberKey(number)
+	want := normalizeNumber(number)
 	for _, m := range movies {
-		if domain.NormalizeNumberKey(m.Number) == want {
+		if normalizeNumber(m.Number) == want {
 			return s.ingestMovieDetailOnly(ctx, m.ID)
 		}
 	}
@@ -1151,16 +1161,16 @@ func (s *Service) ingestByNumber(ctx context.Context, number string, force bool)
 	return nil, domain.Errorf(domain.CodeNotFound, "没有找到番号 %s", number)
 }
 
-// normalizeNumber 归一化番号用于比较：去分隔符、转大写。
+// normalizeNumber 归一化番号用于比较：去分隔符、转大写、**削掉补出来的前导零**。
 //
 // 「SSIS-001」「ssis001」「SSIS_001」在用户眼里是同一个番号，
 // 而上游不同接口给的写法确实不一样。
 //
-// ⚠️ **2026-10-17 起只是 `domain.NormalizeNumberKey` 的一层本地别名**（留着是为了
-// 不一次性改动本文件里那几处调用）。那边多剥了制表符，两处**必须同源** ——
-// 「上游给的 vs 库里存的」与「刮削目标 vs 库里存的」是同一件事，各写一份迟早
-// 会在某个空白字符上分家（而分家的表现是「有的片能对上、有的对不上」）。
-func normalizeNumber(v string) string { return domain.NormalizeNumberKey(v) }
+// ⚠️ **2026-10-17 起只是 `domain.NormalizeNumberKey` 的一层本地别名**，2026-10-31
+// 改成 `domain.LooseNumberKey`（多吃一层补零：`MIAE-0071` = `MIAE-071`）。
+// 两处**必须同源** ——「上游给的 vs 库里存的」与「刮削目标 vs 库里存的」是同一件事，
+// 各写一份迟早会在某个空白字符上分家（而分家的表现是「有的片能对上、有的对不上」）。
+func normalizeNumber(v string) string { return domain.LooseNumberKey(v) }
 
 // buildDetail 组装详情视图。
 //

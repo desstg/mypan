@@ -1,6 +1,9 @@
 package domain
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // 番号的**书写形态**问题（2026-10-17 真机）。
 //
@@ -84,14 +87,110 @@ func NumberLookupForms(number string) []string {
 			out = append(out, loose)
 		}
 	}
+	// ③ 补零形态（2026-10-31）：`MIAE-0071` → `MIAE-071`。
+	//
+	// 分享者常常把序号补成 4 位（`MIAE-0071_LTX.strm`），而上游与库里都是 3 位的
+	// `MIAE-071` —— 加这一条，那种片子不用改名也能查到库里那一部。
+	//
+	// 判据与 `LooseNumberKey` **同一条窗口规则**（那边有为什么收得这么紧的说明）。
+	// 只在**原样不含零补**时才追加：`MIAE-00071` 只生成 `MIAE-071` 一种，
+	// 不会连 `MIAE00071` 那种中间形态一起堆上去（多一条 SQL 没收益，还会让
+	// 「第一个形态是原样」这条不变式读起来更绕）。
+	if unpadded := unpadNumberForm(number); unpadded != "" {
+		out = append(out, unpadded)
+	}
 	return out
 }
 
-// SameNumber 报告两个番号是不是同一部片（忽略大小写与分隔符）。
+// unpadNumberForm 返回「去掉多余前导零」的那种写法，收不动时返回空串。
+//
+// 与 `LooseNumberKey` 同一条窗口规则（至少留 3 位、且原本 4 位以上才收），
+// 但这里的输入是**原样**（可能带连字符），所以先按连字符切开再处理数字段：
+// `MIAE-0071` → `MIAE-071`；`MDSR-0006-1`（数字段不是结尾）→ 不动。
+func unpadNumberForm(number string) string {
+	i := strings.LastIndexByte(number, '-')
+	head, tail := "", number
+	if i > 0 {
+		head, tail = number[:i+1], number[i+1:]
+	}
+	if tail == "" || strings.Trim(tail, "0123456789") != "" {
+		return "" // 连字符后面不是纯数字（`MIAE-071_LTX` 那种尾巴）：不猜
+	}
+	// ⚠️ 只有 **4 位以上**的才谈得上「补零」：`MIAE-071`（3 位，零是本体）与
+	// `MAD-016` 都不该多生成形态 —— 前者会与 `MIAE-71` 混、后者与 `MAD-16` 混，
+	// 两者全库都实测过是**不同影片**。
+	if len(tail) < 4 {
+		return ""
+	}
+	digits := trimExtraLeadingZeros(tail)
+	if digits == tail {
+		return ""
+	}
+	return head + digits
+}
+
+// SameNumber 报告两个番号是不是同一部片（忽略大小写、分隔符，以及**多余的补零**）。
 //
 // 给「上游给的番号 vs 磁盘上的番号」这类**不查库**的比较用；
 // 查库那条路走 NumberLookupForms。
 func SameNumber(a, b string) bool {
-	ka, kb := NormalizeNumberKey(a), NormalizeNumberKey(b)
+	ka, kb := LooseNumberKey(a), LooseNumberKey(b)
 	return ka != "" && ka == kb
 }
+
+// LooseNumberKey 是 NormalizeNumberKey 再多吃一层「**补零**」：
+// `MIAE-0071` 与 `MIAE-071` 是同一个番号。
+//
+// # 为什么需要这一层（2026-10-31 真机）
+//
+// 用户库里有一部 `MIAE-0071_LTX.strm`（分享者把序号补成了 4 位），上游的番号是
+// `MIAE-071`。程序把这两串当成两个不同的番号，于是：
+//
+//   - 打上游搜索拿回来的第一条**恰好**是 `MIAE-071`（上游把 `MIAE-0071` 当模糊词，
+//     按相似度把 071 排在第一），但「精确命中」那道闸比的是
+//     `NormalizeNumberKey`，两条对不上 → 判成「上游没有这一部」，
+//     `scrapeOneJav` 走进 `localJavRepair` 那条支路，结果是**一张卡都没被刮**；
+//   - 用户把目录/文件改名成 `MIAE-071` 之后一次就过 —— 这正是他报的现象。
+//
+// 判据只在**一处**放宽、并且收得很紧（见下面那段窗口规则）：补零是「同一个番号
+// 的另一种写法」，而少一位就是另一个番号（`MIAE-071` vs `MIAE-71` 是两部片，
+// 全库实测 `SS-003`/`SS-3` 这类正是不同影片）。
+func LooseNumberKey(v string) string {
+	key := NormalizeNumberKey(v)
+	if key == "" {
+		return ""
+	}
+	// 只处理 **字母前缀 + 数字** 这一种形状（日式番号、FC2 都不受影响），
+	// 数字段必须占满这个键的**尾部** —— 带尾巴的（`MDSR0006-1` / `010218-571`）
+	// 一律不动：那两种形态里数字段不是序号本体，收零会改错番号。
+	m := reLooseNumberShape.FindStringSubmatch(key)
+	if m == nil {
+		return key
+	}
+	digits := trimExtraLeadingZeros(m[2])
+	if digits == m[2] {
+		return key
+	}
+	return m[1] + digits
+}
+
+// trimExtraLeadingZeros 把序号**补出来的**多余前导零削掉，至少保留 3 位。
+//
+// `0071` → `071`（多补了一个零）；`071` → `071`（本来就是 3 位）；`00071` → `071`。
+//
+// # 为什么是「保留 3 位」而不是「全削掉」
+//
+// 全削掉会把 `SS-003` 与 `SS-3` 合成同一部 —— 全库实测这是 30 组**不同影片**、
+// 当年同一天的上映序号不同。3 位是日式番号序号的常见宽度（`MIAE-071`），
+// 而分享者多补零时补到 4 位、5 位，所以「削到只剩 3 位」正好只吃掉补出来的那部分。
+func trimExtraLeadingZeros(digits string) string {
+	for len(digits) > 3 && digits[0] == '0' {
+		digits = digits[1:]
+	}
+	return digits
+}
+
+// reLooseNumberShape 匹配「纯字母前缀 + 纯数字结尾」的**已归一**键。
+//
+// 用 `FindStringSubmatch` 而不是 `MatchString` + 手切：只有拿到两段才谈得上重拼。
+var reLooseNumberShape = regexp.MustCompile(`^([A-Z]+)(\d+)$`)
