@@ -15,6 +15,8 @@ import AppDropdown from "@/components/base/AppDropdown.vue";
 import AppInput from "@/components/base/AppInput.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import InputActionField from "@/components/admin/InputActionField.vue";
+import LocalDirBrowserModal from "@/components/common/LocalDirBrowserModal.vue";
+import SvgIcon from "@/components/icons/SvgIcon.vue";
 import SettingsBoolSegment from "@/components/admin/SettingsBoolSegment.vue";
 import SettingsCard from "@/components/admin/SettingsCard.vue";
 import SettingsCheckboxRow from "@/components/admin/SettingsCheckboxRow.vue";
@@ -74,6 +76,18 @@ type StrmSettingsForm = Pick<
 const { loading, loaded, runLoad } = useSettingsLoad(false);
 const saving = ref(false);
 const replacingBaseURL = ref(false);
+
+// 水印图标目录的目录选择器（容器内浏览）。
+//
+// 「容器内」不是「浏览器所在那台机器」：列的是**跑 MyPan 那个进程能看到的路径**。
+// 部署在群晖容器里时，那是容器里的挂载点 —— 与海报墙「本地目录」弹窗同一个口径
+// （见 StrmWallLocalDirDialog 里那段说明），所以这里也用同一个选择器，不另写一套。
+const watermarkDirPickerOpen = ref(false);
+
+function onWatermarkDirPicked(path: string) {
+  watermarkDirPickerOpen.value = false;
+  settings.jav_watermark_dir = path;
+}
 
 const numericSettingKeys = new Set<keyof StrmSettingsForm>([
   "default_scan_interval",
@@ -668,13 +682,24 @@ defineExpose(
               <!-- 开关开着才显示这三项：关着时它们没有任何作用，露出来只会让人
                    以为"调了会生效"。 -->
               <div v-if="settings.jav_watermark_enabled" class="jav-wm-settings__detail">
-                <label class="jav-wm-settings__item">
+                <label class="jav-wm-settings__item jav-wm-settings__item--dir">
                   图标目录
-                  <AppInput
-                    v-model="settings.jav_watermark_dir"
-                    placeholder="留空 = 用内置那套"
-                    style="width: 230px"
-                  />
+                  <span class="jav-wm-settings__dir">
+                    <AppInput
+                      v-model="settings.jav_watermark_dir"
+                      class="jav-wm-settings__dir-input"
+                      placeholder="留空 = 用内置那套"
+                    />
+                    <button
+                      type="button"
+                      class="jav-wm-settings__browse"
+                      title="浏览目录（容器内路径，即跑 MyPan 的进程能看到的目录）"
+                      aria-label="浏览图标目录"
+                      @click.prevent="watermarkDirPickerOpen = true"
+                    >
+                      <SvgIcon name="folder-open" :size="16" />
+                    </button>
+                  </span>
                 </label>
                 <label class="jav-wm-settings__item">
                   大小 %
@@ -706,9 +731,84 @@ defineExpose(
       </SettingsCard>
     </template>
   </div>
+
+  <!-- 图标目录选择器：走「容器内路径」那条既有弹窗（与海报墙「本地目录」同一个），
+       不另写一套面包屑/错误态。nested 是因为它开在任务抽屉之上。 -->
+  <LocalDirBrowserModal
+    :open="watermarkDirPickerOpen"
+    :initial-path="settings.jav_watermark_dir"
+    title="选择水印图标目录（容器内）"
+    confirm-text="使用当前目录"
+    @close="watermarkDirPickerOpen = false"
+    @select="onWatermarkDirPicked"
+  />
 </template>
 
 <style scoped>
+/* 图标目录那一格：输入框 + 右侧「浏览」图标键。
+ *
+ * 这一组（`.jav-wm-settings*`）本来没有任何样式 —— 全靠 label 的默认行内排布，
+ * 所以这里也只做两件事：竖直居中，撑满同一行高。高度交给 `align-items: stretch`
+ * 自动对齐输入框，不写死数字（AppInput 一改 padding 就又对不上了）。 */
+.jav-wm-settings__dir {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 6px;
+  vertical-align: middle;
+}
+.jav-wm-settings__dir-input {
+  width: 230px;
+}
+/* 三项（图标目录 / 大小 / 边距）本来靠 label 行内流式排布 —— 桌面上一行放得下，
+ * 手机上一行放不下，会从**某一项中间**折行（"大" 与 "小 % 24" 落到两行）。 */
+.jav-wm-settings__detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-top: 8px;
+}
+.jav-wm-settings__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.jav-wm-settings__browse {
+  flex: 0 0 auto;
+  width: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.jav-wm-settings__browse:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 8%, var(--surface));
+}
+/* 手机上三项排不下：让「图标目录」独占一行、输入框吃掉剩余宽度。
+ * 不这么写就是 230px 定宽把按钮挤到下一行，而右边那两颗数字框又被挤成两段。 */
+@media (max-width: 640px) {
+  .jav-wm-settings__item--dir {
+    width: 100%;
+  }
+  .jav-wm-settings__dir {
+    flex: 1;
+    min-width: 0;
+  }
+  .jav-wm-settings__dir .jav-wm-settings__dir-input {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
 /* 番号相关设置与通用元数据之间的分隔线。
  *
  * 用**两像素的品牌色实线**而不是常见的 1px 灰线：这里不是「同组里的分节」，

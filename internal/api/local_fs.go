@@ -55,15 +55,29 @@ func (h *Handler) browseDefaultPath() string {
 	return "/"
 }
 
+// isBrowsableAbsPath 判断一个前端传来的路径是不是「绝对路径」。
+//
+// 不能只看 `/` 开头：Windows 上 `filepath.IsAbs("/app")` 是 false（没有卷名），
+// 而前端那排常用位置（`/app/strm` `/mnt` …）是容器里的写法。反过来
+// `E:\icons` 在 Windows 上是绝对路径、在 Linux 上不是。两边都收，
+// 交给 `filepath.Abs` 各自解析。
+//
+// 2026-10-31：原来只认 `/` 开头，于是 Windows 上（含发出去的
+// `mypan-*-windows-amd64.exe`）这个目录选择器**一打开就报错**：
+// `browseDefaultPath()` 在 Windows 上返回 `E:\...`，自己就被自己的校验拒了。
+func isBrowsableAbsPath(p string) bool {
+	return strings.HasPrefix(p, "/") || filepath.IsAbs(p)
+}
+
 func (h *Handler) browseLocalFS(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(r.URL.Query().Get("path"))
 	if raw == "" {
 		raw = h.browseDefaultPath()
 	}
-	if !strings.HasPrefix(raw, "/") {
+	if !isBrowsableAbsPath(raw) {
 		writeJSON(w, http.StatusOK, Resp{
 			Success:   false,
-			Message:   "请使用绝对路径（以 / 开头）",
+			Message:   "请使用绝对路径（以 / 开头，或 Windows 上的 E:\\… 这种写法）",
 			ErrorType: string(domain.CodeValidation),
 		})
 		return
