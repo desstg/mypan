@@ -738,6 +738,10 @@ const onlineProgress = ref<{ done: number; total: number } | null>(null);
 /**
  * 「在线刮削」那颗按钮的文案。
  *
+ * **按钮上叫「开始刮削」**（用户 2026-10-31 要求与影视墙那颗统一）：改的只是**文字**，
+ * 底下的接口、参数、禁用语义一样没动 —— 那几个 `在线刮削` 字样（确认弹窗标题、
+ * 完成/失败的 toast）描述的是**发生了什么**（打上游补元数据），不是按钮名，故保持原样。
+ *
  * 批量选择开着 → 「刮削选中（N）」。**N 取 `pickedCountDisplay`**（不是 `picked.size`）：
  * 整分类态下台上那几部勾是**排除集**，真正要刮的是「整档减掉排队的那些」，
  * 直接报 `picked.size` 会说成「刮削选中（3）」而实际要跑 85 部。
@@ -751,7 +755,7 @@ const onlineProgress = ref<{ done: number; total: number } | null>(null);
 const onlineScrapeLabel = computed(() => {
   if (!onlineScraping.value) {
     const n = pickedCountDisplay.value;
-    if (n <= 0) return "在线刮削";
+    if (n <= 0) return "开始刮削";
     if (wholeCategoryOn.value) return `刮削选中（${category.value} ${n}）`;
     return `刮削选中（${n}）`;
   }

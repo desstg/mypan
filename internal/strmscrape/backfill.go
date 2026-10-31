@@ -24,9 +24,17 @@ import (
 // 但结果是：加了新抓取范围之后，库里已经有的那些作品永远拿不到新数据，
 // 只能靠用户把写入策略切成「覆盖」再全量重刮一次（那会把所有 nfo 重写）。
 //
-// 所以给一个**独立入口**：只补缺，不覆盖已有正文（writeMatchedOpts 的 backfillOnly）。
+// 所以给了这个能力：只补缺，不覆盖已有正文（writeMatchedOpts 的 backfillOnly）。
+//
+// # 两个入口，一份实现
+//
+//   - `POST /strm-scrape/backfill`（`BackfillImages`）：整根扫或点名补。**页头上那颗
+//     「补齐剧照与演员」已经并进「开始刮削」了**（用户 2026-10-31），现在没有界面入口，
+//     留着接口与函数是因为下面这条合并路径复用的就是同一个 `backfillOne`；
+//   - **点名刮削**（`run()` 里 `picked && !workNeedsScrape && backfillNeeded`）：
+//     批量选择勾中已刮过的作品再点「开始刮削」，那几部走这里。
 
-// BackfillRequest 是「补齐剧照与演员」的入参。
+// BackfillRequest 是「补齐」接口的入参（页头那颗按钮已并进「开始刮削」，见文件头）。
 type BackfillRequest struct {
 	StrmTaskID int64  `json:"strm_task_id"`
 	LocalDirID string `json:"local_dir_id,omitempty"`

@@ -514,6 +514,11 @@ export function deleteTmdbWallItem(ref: number | WallSourceRef, itemId: string) 
  * 只补缺：**不重写已有 nfo 的正文**，也不覆盖已有的图。已经齐了的作品会被跳过。
  * `itemIDs` 与 `runStrmScrape` 同义（空 = 整根扫）。与「开始刮削」同一条后台队列，
  * 进度看 `fetchStrmScrapeProgress`。
+ *
+ * ⚠️ **界面上已经没有它的入口了**（用户 2026-10-31 拍板把它并进「开始刮削」：
+ * 勾中已刮过的作品再点刮削，后端 `run()` 会对那几部走 `backfillOne`）。
+ * 接口与这个函数留着，是因为那条合并路径与它**同一个后端实现**，日后要单独做入口
+ * 不必再从头加一遍。
  */
 export function backfillStrmScrapeImages(ref: number | WallSourceRef, itemIDs?: string[]) {
   return http.post<StrmScrapeProgress>("/admin/strm-scrape/backfill", {

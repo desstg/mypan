@@ -111,7 +111,7 @@ async function handleDrawerSave() {
          两面墙（番号 / TMDB）各一套，条件与页头那两段 `v-if` 逐条对应，
          不多一颗也不少一颗。 -->
     <div v-if="isScrapeTab && scrapePanelRef" class="wall-mobile-actions">
-      <!-- —— 番号：批量选择 + 在线刮削 —— -->
+      <!-- —— 番号：批量选择 + 开始刮削（内部仍是在线刮削那套，只是按钮这样叫）—— -->
       <template v-if="scrapePanelRef.isJavSource">
         <button
           type="button"
@@ -132,7 +132,7 @@ async function handleDrawerSave() {
           class="wall-mobile-actions__btn wall-mobile-actions__btn--primary"
           :class="{ 'wall-mobile-actions__btn--wide': scrapePanelRef.onlineScrapeBadge }"
           :disabled="scrapePanelRef.onlineScraping || scrapePanelRef.onlineScrapeDisabled"
-          :aria-label="scrapePanelRef.onlineScrapeLabel ?? '在线刮削'"
+          :aria-label="scrapePanelRef.onlineScrapeLabel ?? '开始刮削'"
           @click="scrapePanelRef.onlineScrape()"
         >
           <i class="fas fa-wand-magic-sparkles" aria-hidden="true" />
@@ -144,7 +144,7 @@ async function handleDrawerSave() {
           </span>
         </button>
       </template>
-      <!-- —— TMDB：批量选择 + 补齐剧照与演员 + 开始/停止刮削 —— -->
+      <!-- —— TMDB：批量选择 + 开始/停止刮削（存量补缺已并进「开始刮削」，见下）—— -->
       <template v-else>
         <button
           type="button"
@@ -159,15 +159,6 @@ async function handleDrawerSave() {
           <span v-if="scrapePanelRef.tmdbPickedBadge" class="wall-mobile-actions__badge">
             {{ scrapePanelRef.tmdbPickedBadge }}
           </span>
-        </button>
-        <button
-          type="button"
-          class="wall-mobile-actions__btn"
-          :disabled="scrapePanelRef.running || scrapePanelRef.tmdbBatchDisabled"
-          aria-label="补齐剧照与演员"
-          @click="scrapePanelRef.backfillArtwork()"
-        >
-          <i class="fas fa-user-friends" aria-hidden="true" />
         </button>
         <button
           v-if="scrapePanelRef.running"
@@ -200,8 +191,8 @@ async function handleDrawerSave() {
     <!-- ⚠️ `sticky` 只开在「海报墙」这个 tab 上：一屏几十张卡片，滚十几屏之后
          页头这几颗动作按钮就够不着了（用户 2026-10-30 要求）。写条件而不是无条件开，
          是因为另外两个 tab（增强工具 / 备份管理）不长，粘着只是白挡内容。
-         两面墙都开 —— 番号要「批量选择 / 在线刮削」，TMDB 要「批量选择 /
-         补齐剧照与演员 / 开始刮削」。
+         两面墙都开 —— 番号要「批量选择 / 开始刮削」，TMDB 要「批量选择 /
+         开始刮削」（原来那颗「补齐剧照与演员」2026-10-31 并进了「开始刮削」）。
          手机那一档**不粘**（`sticky-mobile="false"`）：这条栏在手机上被
          「Tab 一排 + 动作按钮一排」顶成两行，粘住吃掉 12% 的可视高度，
          改为上面那组图标浮标。 -->
@@ -224,11 +215,11 @@ async function handleDrawerSave() {
                （用户 2026-10-30 要求）。桌面保持在栏里显示，一字不改。 -->
           <div class="wall-head-actions">
           <!-- 批量选择：只刮 / 只补勾中的那几部。
-               位置由用户指定 —— 在「补齐剧照与演员」**左边**，所以它同时管着右边那两颗：
-               勾了片子之后点「补齐剧照与演员」就只补这几部，点「开始刮削」就只刮这几部。
-               一部没勾时右边两颗**禁用**（开着批量选择却整库扫，等于这颗按钮白开）。
+               位置由用户指定 —— 在「开始刮削」**左边**，所以它管着右边那颗：
+               勾了片子之后点「开始刮削」就只处理这几部，一部没勾时右边那颗**禁用**
+               （开着批量选择却整库扫，等于这颗按钮白开）。
 
-               开态用 primary 高亮，与右边两颗区分开「我现在在哪一档」。
+               开态用 primary 高亮，与右边那颗区分开「我现在在哪一档」。
                ⚠️ 刮削期间禁用：提交那拍要按这份选择集算 id，中途改选中会让「点了哪几部」
                与「实际刮了哪几部」对不上（墙里也有一道同样的守卫）。 -->
           <AppButton
@@ -244,26 +235,14 @@ async function handleDrawerSave() {
           >
             {{ scrapePanelRef?.tmdbBatchModeLabel ?? "批量选择" }}
           </AppButton>
-          <!-- 补齐：给**已经刮过**的作品补新抓的剧照/演员/背景图。它必须放在页头 ——
-               藏在面板里那颗 ⚙ 的下拉菜单里时用户根本找不到（实测问「在哪里」）。
-               `missing_only` 策略下已刮过的作品会被正常刮削跳过，这是它们唯一的入口。
-               勾了几部就只补这几部（`item_ids` 那条路，后端按作品过滤）。 -->
-          <AppButton
-            type="button"
-            variant="secondary"
-            :disabled="scrapePanelRef?.running || scrapePanelRef?.tmdbBatchDisabled"
-            :title="
-              scrapePanelRef?.tmdbBatchDisabled
-                ? '先在卡片上勾几部，或关掉批量选择'
-                : undefined
-            "
-            @click="scrapePanelRef?.backfillArtwork()"
-          >
-            补齐剧照与演员
-          </AppButton>
           <!-- 开始刮削：任务源与本地目录源**共用这一颗**（原来本地目录上还有一颗
                「AI 识别刮削」，只差一个「这次要不要用 AI」的意图，已按用户要求合并掉，
                好给页头腾位置）。
+
+               **勾中的那几部里，「已经刮过、只是缺剧照/演员/背景图」的走补齐**
+               （只补缺，不覆盖已有 nfo 正文与图）—— 原来页头另有一颗「补齐剧照与演员」，
+               与这颗管的是同一件事、并排只会让人猜该点哪颗，用户 2026-10-31 拍板合并，
+               页头只留一颗。整根扫与「覆盖」策略的行为一个字都没变（见后端 run()）。
 
                ⚠️ AI 现在是**设置项**（「海报墙 → 设置 → 刮削策略 → AI 补认识别」），
                不再是点击时带的参数：合并之后页头没有第二个入口能表达「这次别用 AI」，
@@ -296,7 +275,7 @@ async function handleDrawerSave() {
           </div>
         </template>
         <!-- 番号影片任务：同一位置、同样式的主按钮，但干的是**另一件事** ——
-             打上游（JAVDB）补齐缺的元数据。TMDB 那两颗（开始刮削 / 补齐剧照与演员）
+             打上游（JAVDB）补齐缺的元数据。TMDB 那颗「开始刮削」
              在番号任务上**不能出现**：那套会往同一批目录写 nfo，而「标记为正常」
              那一步的正则正好命中 thumb.jpg / poster.jpg，会把番号生成的图删掉。 -->
         <template v-else-if="isScrapeTab && scrapePanelRef?.isJavSource">
@@ -306,7 +285,7 @@ async function handleDrawerSave() {
                桌面保持在栏里显示，一字不改。 -->
           <div class="wall-head-actions">
             <!-- 批量选择：只刮勾中的那几部（原来那颗按钮只会整根扫，补几部新片也要跑全库）。
-                 开态用 primary 高亮，与右边那颗「在线刮削」区分开「我现在在哪一档」。
+                 开态用 primary 高亮，与右边那颗「开始刮削」区分开「我现在在哪一档」。
 
                  ⚠️ 刮削期间禁用：收尾要靠这份选择集清场，中途退出会留下一堆
                  「看不见但仍被选中」的条目（墙里也有同一道守卫，这里是可见的那一道）。 -->
@@ -334,7 +313,7 @@ async function handleDrawerSave() {
               "
               @click="scrapePanelRef?.onlineScrape()"
             >
-              {{ scrapePanelRef?.onlineScrapeLabel ?? "在线刮削" }}
+              {{ scrapePanelRef?.onlineScrapeLabel ?? "开始刮削" }}
             </AppButton>
           </div>
         </template>
@@ -375,8 +354,8 @@ async function handleDrawerSave() {
 <style scoped>
 /* ——————— 手机端那组图标浮标（只在 ≤768px 存在） ———————
  *
- * 两面墙共用一套样式：番号是「批量选择 + 在线刮削」两颗，TMDB 是
- * 「批量选择 + 补齐剧照与演员 + 开始/停止刮削」三颗，同一行右对齐。
+ * 两面墙共用一套样式：两面都是「批量选择 + 开始/停止刮削」两颗，同一行右对齐
+ * （TMDB 原来还有第三颗「补齐剧照与演员」，2026-10-31 并进了「开始刮削」）。
  *
  * 为什么是 `sticky` 而不是 `fixed`：滚动容器是 `.admin__body`（`overflow-y: auto`），
  * `fixed` 以视口为准 —— 它上方那 42px 是 `.global-chrome`，`fixed` 得写死

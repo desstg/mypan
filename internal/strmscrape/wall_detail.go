@@ -313,7 +313,8 @@ func (s *Service) JavWallDetail(ctx context.Context, srcRef WallSourceRef, relDi
 // 上打开的，本地那份就是它的现状。
 //
 // 老作品（本次改造之前刮的）磁盘上只有简版 nfo（title/year/tmdbid/plot 四个字段），
-// 所以抽屉里那些块还是空的。想补上就对该任务点一次「补齐剧照与演员」（见 BackfillImages）。
+// 所以抽屉里那些块还是空的。想补上就把那部勾进「批量选择」再点「开始刮削」——
+// 点名刮削会对「已刮过但缺演员/背景图/剧照」的作品走补齐（见 run() 与 BackfillImages）。
 func (s *Service) TMDBWallDetail(ctx context.Context, srcRef WallSourceRef, itemID string) (*WallDetail, error) {
 	src, err := s.resolveSource(ctx, srcRef)
 	if err != nil {

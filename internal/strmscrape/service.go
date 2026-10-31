@@ -725,6 +725,49 @@ func (s *Service) run(ctx context.Context, src *wallSrc, req RunRequest) error {
 		displayName := workDisplayName(g)
 		item := buildItem(src.PosterRef(), root, g)
 		need := mode == WriteModeOverwrite || workNeedsScrape(g, item.MediaType)
+		// 点名刮削（批量选择勾中的那几部）时，勾了却「已经刮过、只是缺剧照/演员/背景图」
+		// 的作品改走**补齐**那条路：只补缺、不覆盖已有 nfo 正文与图。
+		//
+		// 起因：页头那颗「补齐剧照与演员」与这颗按钮管的是同一件事（给存量作品补新抓的
+		// 那批数据），两颗并排只会让人猜「该点哪颗」。用户 2026-10-31 拍板合并，页头腾一颗。
+		// 并进来的只有**点名**这一档：整根扫照旧只挑没刮过的（那是每次跑全库的路径，
+		// 不该悄悄多干活），「覆盖」策略照旧覆盖（`mode != WriteModeOverwrite` 把这条挡掉，
+		// 这一条是防御 —— 覆盖模式下 `need` 恒真，本来就到不了这里）。
+		//
+		// 只认「有 nfo 但缺演员/背景图/剧照」的那批（`backfillNeeded`）。勾中却连 nfo 都
+		// 没有的作品不在这儿开工：多半是点名刮扫了一遍没认出来的漏网，混进来会让
+		// 「勾了几部只刮几部」的语义变得说不清，照旧跳过。
+		if !need && picked && mode != WriteModeOverwrite && backfillNeeded(g, item.MediaType) {
+			s.setProgress(func(p *Progress) {
+				p.CurrentItemID = item.ID
+				p.Message = "正在补齐：" + displayName
+			})
+			if err := s.backfillOne(ctx, client, root, g, item.MediaType); err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				failures = append(failures, s.logScrapeFailure(src, g, displayName, ScrapeFailureStageWrite, err.Error()))
+				s.setProgress(func(p *Progress) {
+					p.Done = i + 1
+					p.Failed++
+					p.CurrentItemID = ""
+					p.Message = "补齐失败：" + displayName
+				})
+				time.Sleep(interval)
+				continue
+			}
+			s.upsertIndexItem(ctx, src, root, g)
+			updated := buildItem(src.PosterRef(), root, g)
+			s.setProgress(func(p *Progress) {
+				p.Done = i + 1
+				p.CurrentItemID = ""
+				p.ItemRevision++
+				p.UpdatedItem = &updated
+				p.Message = "已补齐：" + displayName
+			})
+			time.Sleep(interval)
+			continue
+		}
 		if !need {
 			s.setProgress(func(p *Progress) {
 				p.Done = i + 1

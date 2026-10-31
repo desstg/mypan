@@ -13,7 +13,6 @@ import JavActorWall from "@/components/admin/JavActorWall.vue";
 import StrmTmdbWallDeleteModal from "@/components/admin/StrmTmdbWallDeleteModal.vue";
 import { JAV_WALL_SORTS } from "@/api/strmJavWall";
 import {
-  backfillStrmScrapeImages,
   fetchStrmScrapeItems,
   fetchStrmScrapeScope,
   fetchStrmScrapeProgress,
@@ -765,6 +764,11 @@ async function syncProgress() {
  * **批量选择开着时，勾中的那几部只刮那几部**（`pickedForSubmit` 那个判据）。
  * 拿不准（源换过 / 有勾中的部不在当前列表里）就退回整根扫 —— 宁可多扫，不能刮错。
  *
+ * **其中「已经刮过、只是缺剧照/演员/背景图」的那几部会走补齐**（只补缺，不覆盖
+ * 已有 nfo 正文与图）：原来页头另有一颗「补齐剧照与演员」，与这颗管的是同一件事，
+ * 并排只会让人猜该点哪颗，用户 2026-10-31 拍板合并。判据在后端 `run()` 里
+ * （`picked && !workNeedsScrape && backfillNeeded`）；整根扫照旧只挑没刮过的。
+ *
  * ⚠️ **AI 没配时不报错、不提示**（用户明确要求）：后端 `Available()` 为假时整条 AI
  * 分支不进，这次刮削就等于普通刮削。所以这里不去查设置、不弹「先配置 AI」；
  * toast 也照旧只说「已开始刮削」—— 认没认出来只有后端知道，不替它宣称。
@@ -798,51 +802,6 @@ async function stopScrape() {
     toast.success("已请求停止");
   } catch (e) {
     toast.error(getApiErrorMessage(e, "停止失败"));
-  }
-}
-
-/**
- * 补齐剧照与演员。
- *
- * 存量作品的入口：`missing_only` 策略下，已经刮过的作品会被跳过（那是对的 ——
- * 否则每次刮削都要全量重跑），所以加了新抓取范围之后得有个**单独**的入口去补。
- * 只补缺：不重写已有 nfo 的正文，也不覆盖已有的图。
- *
- * **批量选择开着时，勾中的那几部只补那几部** —— 与「开始刮削」同一条规矩
- * （同一份勾选集、同一个 `pickedForSubmit` 判据，用户明确要求两颗按钮都吃它）。
- */
-async function backfillArtwork() {
-  if (!selectedKey.value) {
-    toast.error("请先选择任务或本地目录");
-    return;
-  }
-  if (running.value) {
-    toast.error("刮削任务进行中，请稍后再试");
-    return;
-  }
-  const picked = pickedForSubmit();
-  try {
-    await confirm({
-      title: "补齐剧照与演员",
-      message: picked.length
-        ? `将给**选中的 ${picked.length} 部**作品补上缺少的剧照、演员、背景图或完整 nfo（只补缺，不改动已有的 nfo 正文与图片，也没勾的那些不会被动到）。每部作品要下载若干张图，数量多时请耐心等待。`
-        : "将扫描本任务下**已经刮过**的作品，给缺少剧照、演员、背景图或完整 nfo 的那些补上（只补缺，不改动已有的 nfo 正文与图片）。每部作品要下载若干张图，数量多时请耐心等待。",
-      icon: "info",
-      confirmText: "开始补齐",
-      danger: false,
-    });
-  } catch {
-    return;
-  }
-  try {
-    const p = await backfillStrmScrapeImages(sourceRef.value, picked);
-    progress.value = p;
-    progressPolling.sync();
-    // 与「开始刮削」同一拍清勾选（不退模式），理由见 startScrape。
-    if (batchMode.value) clearBatchPicked();
-    toast.success(picked.length > 0 ? `已开始补齐：选中的 ${picked.length} 部` : "已开始补齐");
-  } catch (e) {
-    toast.error(getApiErrorMessage(e, "启动补齐失败"));
   }
 }
 
@@ -1244,12 +1203,13 @@ const wall = useWallDetail();
 defineExpose({
   startScrape,
   stopScrape,
-  backfillArtwork,
   // 番号任务的「在线刮削」在子组件（StrmJavWall）里，页头那颗按钮要转调它 ——
   // 与上面几个同一条规矩：动作住在实现那一侧，页头只做入口。
+  // ⚠️ 回落文案与 StrmJavWall 的 `onlineScrapeLabel` 首档保持一致（都是「开始刮削」）：
+  // 子组件挂载前那一拍若写成别的，按钮会闪一下旧名字。
   onlineScrape: () => javWallRef.value?.onlineScrape?.(),
   onlineScraping: computed(() => Boolean(javWallRef.value?.onlineScraping)),
-  onlineScrapeLabel: computed(() => javWallRef.value?.onlineScrapeLabel ?? "在线刮削"),
+  onlineScrapeLabel: computed(() => javWallRef.value?.onlineScrapeLabel ?? "开始刮削"),
   // 批量选择：按钮长在页头（辅助工具页那边），状态与动作都在番号墙里。
   // 「开着但一部没勾 → 禁用」的判据也只有实现那一侧有（它才知道勾了几部）。
   batchMode: computed(() => Boolean(javWallRef.value?.batchMode)),
@@ -1270,7 +1230,7 @@ defineExpose({
   // ⚠️ 对外叫 `isJavSource`：它同时涵盖**任务**与**本地目录**两种源（判据是
   // 数据源的 media_kind，两者同一套词）。父组件原先读的是 `isJavTask`。
   isJavSource,
-  // 父组件（辅助工具页）用它决定页头那几颗按钮显不显示：「补齐剧照与演员」与番号的
+  // 父组件（辅助工具页）用它决定页头那几颗按钮显不显示：番号的
   // 那两颗都只对**任务**源有意义，本地目录不显示。
   // ⚠️ 与同文件里那些 `computed(() => ref.value)` 包装不同，这里必须直接暴露 computed
   // 本身 —— 裸 ref 不会被父组件解包。
