@@ -146,10 +146,20 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
           echo "${{ matrix.platform }} → ${digest}"
 
+      # artifact 名字里**不能有 `/`**（upload-artifact v4 直接报
+      # "Artifact name is not valid: digests-linux/amd64"），而 matrix.platform
+      # 就是 `linux/amd64` 这种形态。踩过：v3.1.1 第一次跑 amd64 那一格编完、
+      # 镜像也推上去了，卡在这一步整格失败，白跑一趟。这里剥掉 `linux/` 前缀。
+      - name: Resolve arch name
+        id: arch
+        run: echo "name=${PLATFORM#*/}" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.platform }}
+          name: digests-${{ steps.arch.outputs.name }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
