@@ -1,9 +1,5 @@
 ﻿<a name="readme-top"></a>
 <br>
-### 本项目上游是： 开源 LitePan项目，链接地址：https://github.com/Ponphil/LitePan
-
----
-
 ## ▎ 一条龙：从资源到播放
 
 **MyPan 不是网盘管理器，是一条完整的影片流水线。** 资源从哪儿来、怎么落到网盘、
@@ -103,7 +99,7 @@
 
 ## ▎ 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v3.1.0`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v3.1.1`
 
 ### 一、先确认共享挂载已开启（用到 FUSE 挂载才需要）
 
@@ -254,18 +250,35 @@ services:
 > **媒体库目录**：compose 里那行 `/path/to/media:/app/media` 是给海报墙的「数据源 → 本地目录」用的 ——
 > 左边换成你宿主机上的媒体库路径，然后在界面里登记**容器内路径** `/app/media`。不用就删掉这行。
 
-#### 不想用 Docker？Windows 免安装版
+#### 不想用 Docker？免安装版（Windows / macOS）
 
-每个 Release 的 Assets 里都有一个 `mypan-<版本>-windows-amd64.exe`（Windows 10/11 x64）：
+每个 Release 的 Assets 里都有对应平台的可执行文件：
+
+| 系统 | 文件 |
+|---|---|
+| Windows 10/11 x64 | `mypan-<版本>-windows-amd64.exe` |
+| macOS · Apple 芯片（M 系列） | `mypan-<版本>-macos-arm64` |
+| macOS · Intel | `mypan-<版本>-macos-amd64` |
 
 ```bat
-mypan-v3.1.0-windows-amd64.exe --listen 0.0.0.0:5211 --data-dir "D:\mypan\data"
+:: Windows
+mypan-v3.1.1-windows-amd64.exe --listen 0.0.0.0:5211 --data-dir "D:\mypan\data"
 ```
 
-数据（数据库、日志、STRM 输出）默认落在 exe 同级的 `data` 与 `strm` 目录，建议用
-`--data-dir` 指到别处，升级时只替换 exe。**云盘 FUSE 挂载是 Linux 专属**，Windows 版
-没有那一块 —— 只用本机的硬盘 / 网络盘做海报墙、目录整理、离线下载没问题，挂 115 / 夸克
-这类网盘请用 Docker 版。
+```bash
+# macOS：先去掉下载隔离属性，否则会被 Gatekeeper 拦住
+chmod +x mypan-v3.1.1-macos-arm64
+xattr -d com.apple.quarantine mypan-v3.1.1-macos-arm64
+./mypan-v3.1.1-macos-arm64 --listen 0.0.0.0:5211 --data-dir ~/mypan/data
+```
+
+数据（数据库、日志、STRM 输出）默认落在可执行文件同级的 `data` 与 `strm` 目录，建议用
+`--data-dir` 指到别处，升级时只替换文件。**云盘 FUSE 挂载是 Linux 专属**，Windows 与
+macOS 免安装版没有那一块 —— 只用本机的硬盘 / 网络盘做海报墙、目录整理、离线下载没问题，
+挂 115 / 夸克这类网盘请用 Docker 版。
+
+> 想知道自己该下哪个 macOS 版：菜单 → 关于本机 →「芯片」写着 Apple M 系列就选
+> `macos-arm64`，写着 Intel 就选 `macos-amd64`。
 
 ### 四、盘搜（搜索转存 / 影视订阅的「搜网盘」都靠它）
 
@@ -313,3 +326,9 @@ docker compose up -d          # mypan + pansou 一起起
 
 - Telegram：[联系我](https://t.me/mypandesstg_bot)
 - GitHub：[desstg/mypan](https://github.com/desstg/mypan)（源码与问题反馈）
+
+---
+
+## ▎ 关于上游
+
+本项目上游是开源 **LitePan** 项目，链接地址：https://github.com/Ponphil/LitePan

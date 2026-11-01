@@ -1,20 +1,24 @@
-# 构建并推送 Docker 镜像到 Docker Hub，并把 Windows 免安装 exe 传到 Release。
+# 构建并推送 Docker 镜像到 Docker Hub，并把免安装可执行文件（Windows / macOS）
+# 传到 Release。
 #
 # 触发方式**刻意只有两种**，都不碰 push 事件 —— 平时提交代码不会触发构建：
-#   1. 发 tag：`git tag v2.0.1 && git push origin v2.0.1`
+#   1. 发 tag：`git tag v3.1.1 && git push origin v3.1.1`
 #   2. 网页手动：Actions → 本 workflow → Run workflow，填版本号
-#      （手动触发只补镜像，**不发 exe** —— 见 windows job 的说明）
+#      （手动触发只补镜像，**不发可执行文件** —— 见 binary job 的说明）
 #
-# ⚠️ **默认只编 amd64**。这不是偷懒，是踩过一次：
+# ⚠️ **tag 触发默认编 amd64 + arm64**（v3.1.1 起）。
 #
-# 最初默认编 amd64 + arm64，结果跑了近 4 小时没完。原因是 arm64 那一半在
-# amd64 的 runner 上走 **QEMU 软件模拟**，而 Dockerfile 里最重的活全在前端阶段：
-# `npm ci` 装近九千个依赖包、`vue-tsc` 全项目类型检查、`vite build` + gzip，
-# 再叠上 `go build` 静态编译。模拟环境里这些比原生慢十几倍。
+# 2026-10 曾经改成只编 amd64：最初两种架构塞在一个 buildx 任务里跑，arm64 那一半
+# 走 **QEMU 软件模拟**，而 Dockerfile 最重的活全在前端阶段（npm ci 近九千包、
+# vue-tsc 全量类型检查、vite build + gzip），模拟环境里慢十几倍，一趟跑了近 4 小时。
 #
-# 而群晖 / 绝大多数自建场景都是 x86，amd64 是**原生**执行，几分钟到十几分钟就完。
-# 真要发 ARM 版时，手动触发时把 platforms 填成 `linux/amd64,linux/arm64` 即可
-# —— 那种情况请预留一小时以上。
+# 现在拆成**一个架构一个任务并行编**，各自按 digest 推送，最后一个 merge 任务用
+# `docker buildx imagetools create` 把两个 digest 合成一份 multi-arch manifest。
+#
+# ⚠️ **不能**让两个任务「各推一个同 tag 的镜像」—— Docker Hub 不做合并，后推的
+# 会**覆盖**先推的，最终 manifest 里只剩一种架构，另一种机器拉取时报
+# `no matching manifest for linux/arm64 in the manifest list entries`。
+# push-by-digest + imagetools 才是并行的正确做法（也省掉一堆临时 tag）。
 #
 # Dockerfile 不用改 —— 它刻意避开了 BuildKit 专属语法（见其顶部注释），
 # 在 Actions 的 buildx 上照样能跑。
@@ -27,23 +31,32 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号（如 v2.0.1）"
+        description: "版本号（如 v3.1.1）"
         required: true
         type: string
       platforms:
-        description: "目标架构。默认只编 amd64（快）。要发 ARM 版填 linux/amd64,linux/arm64 —— 那一趟要一小时以上"
+        description: "目标架构。默认 amd64 + arm64；只想补 amd64 时填 linux/amd64（快很多）"
         required: false
-        default: "linux/amd64"
+        default: "linux/amd64,linux/arm64"
         type: string
 
 env:
   IMAGE: desstg/mypan
 
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # 先把版本号与架构列表算出来，后面几个 job 共用。
+  #
+  # 架构列表要转成 JSON 数组给矩阵用 —— 手动触发时可以只填 linux/amd64，
+  # 写死矩阵的话 arm64 那格还会白跑一趟 QEMU。
+  # ---------------------------------------------------------------------------
+  meta:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      platforms: ${{ steps.plat.outputs.platforms }}
 
     steps:
       - name: Checkout
@@ -51,7 +64,7 @@ jobs:
 
       # 版本号的三个来源，优先级从高到低：
       #   1. 手动触发时填的那个
-      #   2. tag 名（refs/tags/v2.0.1 → v2.0.1）
+      #   2. tag 名（refs/tags/v3.1.1 → v3.1.1）
       #   3. 兜底用提交短 sha —— 只该在异常情况下走到
       - name: Resolve version
         id: ver
@@ -66,8 +79,35 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "构建版本：$V"
 
-      # buildx 是 build-push-action 的前置；QEMU 用来在 amd64 的 runner 上
-      # 模拟 arm64（没有它只能出单架构）。
+      - name: Resolve platforms
+        id: plat
+        run: |
+          P="${{ inputs.platforms }}"
+          [ -z "$P" ] && P="linux/amd64,linux/arm64"
+          # "linux/amd64,linux/arm64" → ["linux/amd64","linux/arm64"]（去空格）
+          J=$(printf '%s' "$P" | tr -d ' ' | jq -Rc 'split(",") | map(select(length > 0))')
+          echo "platforms=$J" >> "$GITHUB_OUTPUT"
+          echo "目标架构：$J"
+
+  # ---------------------------------------------------------------------------
+  # 镜像。一个架构一个任务，并行跑；按 digest 推送，不打 tag。
+  # ---------------------------------------------------------------------------
+  build:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.meta.outputs.platforms) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # QEMU 只在编 arm64 时有意义（在 amd64 的 runner 上模拟），编 amd64 时
+      # 装上也无害，代价是几秒钟 —— 比按架构写条件更容易读。
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -80,32 +120,79 @@ jobs:
           username: desstg
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      # 平台：手动触发填了就用填的，否则 amd64（tag 触发走这里）。
-      # tag 触发时不编 arm64 是**刻意的** —— 见文件顶部那段说明。
-      - name: Resolve platforms
-        id: plat
-        run: |
-          P="${{ inputs.platforms }}"
-          [ -z "$P" ] && P="linux/amd64"
-          echo "platforms=$P" >> "$GITHUB_OUTPUT"
-          echo "目标架构：$P"
-
-      - name: Build and push
+      - name: Build and push by digest (${{ matrix.platform }})
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ steps.plat.outputs.platforms }}
+          platforms: ${{ matrix.platform }}
           # VERSION 会经 -ldflags 写进「关于」页的 buildinfo.Version，
           # 与本地 `docker build --build-arg VERSION=...` 是同一个入口。
           build-args: |
-            VERSION=${{ steps.ver.outputs.version }}
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
-            ${{ env.IMAGE }}:latest
+            VERSION=${{ needs.meta.outputs.version }}
+          # 按 digest 推送：不打 tag，等 merge 任务把它们合成一份 manifest list。
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           # 云端缓存：不配的话每次都要从头 npm ci + go mod download。
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          push: true
+          # scope 按架构分开，否则两种架构抢同一份缓存会互相挤掉。
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      # 把 digest 落成一个**以 digest 本身命名的空文件**：merge 任务直接 glob
+      # 这些文件名拼成 `image@sha256:...` 列表，不用再解析文本。
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+          echo "${{ matrix.platform }} → ${digest}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 把各架构的 digest 合成一份 multi-arch manifest，打上版本号与 latest 两个 tag。
+  # 这一步只推 manifest，不重新编译，几秒钟的事。
+  # ---------------------------------------------------------------------------
+  merge:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: desstg
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      # imagetools 只操作 registry 里的 manifest，不需要 QEMU、不需要重新构建。
+      - name: Create manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t "${{ env.IMAGE }}:${{ needs.meta.outputs.version }}" \
+            -t "${{ env.IMAGE }}:latest" \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+
+      # 打出来的 manifest 自己看一眼，别等用户拉到 no matching manifest 才发现。
+      - name: Inspect
+        run: docker buildx imagetools inspect "${{ env.IMAGE }}:${{ needs.meta.outputs.version }}"
 
       - name: Summary
         run: |
@@ -114,26 +201,51 @@ jobs:
             echo ""
             echo "| tag | 说明 |"
             echo "|---|---|"
-            echo "| \`${{ env.IMAGE }}:${{ steps.ver.outputs.version }}\` | 本次版本 |"
+            echo "| \`${{ env.IMAGE }}:${{ needs.meta.outputs.version }}\` | 本次版本 |"
             echo "| \`${{ env.IMAGE }}:latest\` | 同时更新 |"
             echo ""
-            echo "平台：\`${{ steps.plat.outputs.platforms }}\`"
+            echo "架构：\`${{ needs.meta.outputs.platforms }}\`"
             echo ""
             echo "群晖上拉取：\`docker compose pull && docker compose up -d\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Windows 免安装 exe，传到对应的 Release 里。
+  # ---------------------------------------------------------------------------
+  # 免安装可执行文件，传到对应的 Release 里。
   #
-  # 与镜像**分开一个 job、且不写 needs**：它不需要 buildx / QEMU / Docker Hub
-  # 凭据，也不该被镜像那一步的失败连坐（镜像挂了照样能发 exe）。
+  # 与镜像**分开、且不写 needs**：它不需要 buildx / QEMU / Docker Hub 凭据，
+  # 也不该被镜像那一步的失败连坐（镜像挂了照样能发可执行文件）。
   #
   # ⚠️ 只在 tag 触发时跑：手动触发那一路是补镜像，版本号是手填的，
   # 而 `gh release upload` 需要一个**已存在**的 Release（手填的版本号常常没有）。
-  windows:
+  #
+  # 三个产物：
+  #   mypan-<版本>-windows-amd64.exe   Windows 10/11 x64
+  #   mypan-<版本>-macos-arm64         macOS，Apple 芯片（M 系列）
+  #   mypan-<版本>-macos-amd64         macOS，Intel
+  # 每个都配一个 <同名去掉 .exe>.sha256。
+  # ---------------------------------------------------------------------------
+  binary:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            label: windows-amd64
+            ext: ".exe"
+          - goos: darwin
+            goarch: arm64
+            label: macos-arm64
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            label: macos-amd64
+            ext: ""
 
     steps:
       - name: Checkout
@@ -145,31 +257,41 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build Windows amd64
+      - name: Build ${{ matrix.label }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          LABEL: ${{ matrix.label }}
+          EXT: ${{ matrix.ext }}
         run: |
           V="${GITHUB_REF_NAME}"
-          # ⚠️ 不加 `-tags fuse`：FUSE 挂载是 Linux 专属，Windows 上编不过。
-          # 这与作本地 `go build ./cmd/litepan` 同一条路径（Makefile 的 build-nofuse）。
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+          NAME="mypan-${V}-${LABEL}${EXT}"
+          # ⚠️ 不加 `-tags fuse`：FUSE 挂载是 Linux 专属，Windows / macOS 上编不过。
+          # 这与本地 `go build ./cmd/litepan` 同一条路径（Makefile 的 build-nofuse）。
+          # CGO_ENABLED=0：纯静态，不依赖 VC 运行库，也不逼用户装 Xcode 命令行工具。
+          CGO_ENABLED=0 go build \
             -trimpath -ldflags "-s -w -X litepan/internal/buildinfo.Version=${V}" \
-            -o "mypan-${V}-windows-amd64.exe" ./cmd/litepan
-          ls -lh "mypan-${V}-windows-amd64.exe"
-          sha256sum "mypan-${V}-windows-amd64.exe" | tee "mypan-${V}-windows-amd64.sha256"
+            -o "${NAME}" ./cmd/litepan
+          ls -lh "${NAME}"
+          # 校验文件名不带 .exe，与历史 Release 保持一致。
+          sha256sum "${NAME}" | tee "mypan-${V}-${LABEL}.sha256"
 
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
+          LABEL: ${{ matrix.label }}
+          EXT: ${{ matrix.ext }}
         run: |
           V="${GITHUB_REF_NAME}"
           # ⚠️ 要等一下：Release 可能比这个 job 晚一步建出来（tag 一推 workflow
           # 就起跑，而 `gh release create` 是随后手动跑的）。没它 `gh release
-          # upload` 直接报错，exe 就白编了。等 3 分钟足够覆盖那个窗口。
+          # upload` 直接报错，编出来的东西就白编了。等 3 分钟足够覆盖那个窗口。
           for i in $(seq 1 12); do
             if gh release view "$V" >/dev/null 2>&1; then break; fi
             echo "等待 Release ${V} 出现…（${i}/12）"
             sleep 15
           done
           gh release upload "$V" \
-            "mypan-${V}-windows-amd64.exe" \
-            "mypan-${V}-windows-amd64.sha256" \
+            "mypan-${V}-${LABEL}${EXT}" \
+            "mypan-${V}-${LABEL}.sha256" \
             --clobber

@@ -1,7 +1,5 @@
 ﻿# MyPan
 
-> 本项目上游是开源项目 **LitePan**：https://github.com/Ponphil/LitePan
-
 **MyPan 不是网盘管理器，是一条完整的影片流水线。** 资源从哪儿来、怎么落到网盘、
 怎么变得整整齐齐、怎么被播放器认出来 —— 全流程打通，中间不需要你手动搬一次文件。
 
@@ -87,7 +85,7 @@
 
 ## 快速开始
 
-**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v3.1.0`
+**Docker Compose 部署** · 镜像标签：`latest` 或指定 `v3.1.1`
 
 ### 一、先确认共享挂载已开启（用到 FUSE 挂载才需要）
 
@@ -238,18 +236,35 @@ services:
 > **媒体库目录**：compose 里那行 `/path/to/media:/app/media` 是给海报墙的「数据源 → 本地目录」用的 ——
 > 左边换成你宿主机上的媒体库路径，然后在界面里登记**容器内路径** `/app/media`。不用就删掉这行。
 
-#### 不想用 Docker？Windows 免安装版
+#### 不想用 Docker？免安装版（Windows / macOS）
 
-每个 Release 的 Assets 里都有一个 `mypan-<版本>-windows-amd64.exe`（Windows 10/11 x64）：
+每个 Release 的 Assets 里都有对应平台的可执行文件：
+
+| 系统 | 文件 |
+|---|---|
+| Windows 10/11 x64 | `mypan-<版本>-windows-amd64.exe` |
+| macOS · Apple 芯片（M 系列） | `mypan-<版本>-macos-arm64` |
+| macOS · Intel | `mypan-<版本>-macos-amd64` |
 
 ```bat
-mypan-v3.1.0-windows-amd64.exe --listen 0.0.0.0:5211 --data-dir "D:\mypan\data"
+:: Windows
+mypan-v3.1.1-windows-amd64.exe --listen 0.0.0.0:5211 --data-dir "D:\mypan\data"
 ```
 
-数据（数据库、日志、STRM 输出）默认落在 exe 同级的 `data` 与 `strm` 目录，建议用
-`--data-dir` 指到别处，升级时只替换 exe。**云盘 FUSE 挂载是 Linux 专属**，Windows 版
-没有那一块 —— 只用本机的硬盘 / 网络盘做海报墙、目录整理、离线下载没问题，挂 115 / 夸克
-这类网盘请用 Docker 版。
+```bash
+# macOS：先去掉下载隔离属性，否则会被 Gatekeeper 拦住
+chmod +x mypan-v3.1.1-macos-arm64
+xattr -d com.apple.quarantine mypan-v3.1.1-macos-arm64
+./mypan-v3.1.1-macos-arm64 --listen 0.0.0.0:5211 --data-dir ~/mypan/data
+```
+
+数据（数据库、日志、STRM 输出）默认落在可执行文件同级的 `data` 与 `strm` 目录，建议用
+`--data-dir` 指到别处，升级时只替换文件。**云盘 FUSE 挂载是 Linux 专属**，Windows 与
+macOS 免安装版没有那一块 —— 只用本机的硬盘 / 网络盘做海报墙、目录整理、离线下载没问题，
+挂 115 / 夸克这类网盘请用 Docker 版。
+
+> 想知道自己该下哪个 macOS 版：菜单 → 关于本机 →「芯片」写着 Apple M 系列就选
+> `macos-arm64`，写着 Intel 就选 `macos-amd64`。
 
 ### 四、盘搜（搜索转存 / 影视订阅的「搜网盘」都靠它）
 
@@ -289,17 +304,19 @@ docker compose up -d          # mypan + pansou 一起起
 盘搜自己还要能连上 t.me 才拿得到 TG 频道那一半结果 —— 需要的话在**它的容器**里配
 `HTTPS_PROXY`（同样写宿主机的局域网 IP）。
 
-## 标签
+## 标签与架构
 
 | 标签 | 说明 |
 |---|---|
 | `latest` | 最新发布版 |
-| `v3.1.0` | 固定版本 |
-| `v3.0.9` | 上一版固定版本 |
+| `v3.1.1` | 固定版本 |
+| `v3.1.0` | 上一版固定版本（仅 amd64） |
 
-**默认只构建 `linux/amd64`。** 绝大多数 NAS（群晖、威联通、自建 x86）都是这个架构。
-需要 ARM 版时请在 Actions 里手动触发并填写 `linux/amd64,linux/arm64` ——
-arm64 走 QEMU 模拟，那一趟要一小时以上。
+同一张镜像同时提供 **`linux/amd64`** 与 **`linux/arm64`** 两个架构，`docker pull`
+会自动挑与本机匹配的那一个 —— 群晖 / 威联通 / 自建 x86 机器、树莓派这类 ARM 板子、
+Apple 芯片 Mac 上的 Docker Desktop 都能直接拉，不需要额外指定 `--platform`。
+
+手动指定时写法是 `docker pull --platform linux/arm64 desstg/mypan:v3.1.1`。
 
 ## 许可
 
@@ -312,3 +329,9 @@ THIRD_PARTY_NOTICES.md。
 
 - Telegram：[联系我](https://t.me/mypandesstg_bot)
 - GitHub：[desstg/mypan](https://github.com/desstg/mypan)（源码与问题反馈）
+
+---
+
+## 关于上游
+
+本项目上游是开源 **LitePan** 项目，链接地址：https://github.com/Ponphil/LitePan
